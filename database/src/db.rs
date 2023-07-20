@@ -15,15 +15,15 @@ pub fn open_db(db_path: PathBuf, create_if_missing: bool, parallelism: usize) ->
     b_opts.set_bloom_filter(2.0, true);
     opts.set_block_based_table_factory(&b_opts);
 
-    opts.set_write_buffer_size(256 * 1024 * 1024);
+    opts.set_write_buffer_size(768 * 1024 * 1024);
     opts.set_max_write_buffer_number(3);
     opts.set_min_write_buffer_number(2);
     opts.set_min_write_buffer_number_to_merge(2);
-    opts.set_max_bytes_for_level_base(1024 * 1024 * 1024);
+    opts.set_max_bytes_for_level_base(2 * 3 * 768 * 1024 * 1024);
 
     // In most linux environments the limit is set to 1024, so we use 500 to give sufficient slack.
     // TODO: fine-tune this parameter and additional parameters related to max file size
-    opts.set_max_open_files(500);
+    opts.set_max_open_files(-1);
 
     // metrics
     opts.enable_statistics();
