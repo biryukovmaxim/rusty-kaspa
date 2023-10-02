@@ -760,4 +760,8 @@ impl ConsensusApi for Consensus {
         self.virtual_processor
             .virtual_finality_point(&self.virtual_stores.read().state.get().unwrap().ghostdag_data, self.pruning_point())
     }
+
+    fn get_db(&self) -> Option<Arc<DB>> {
+        Some(self.db.clone())
+    }
 }

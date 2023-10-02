@@ -2131,6 +2131,7 @@ dependencies = [
  "js-sys",
  "kaspa-addresses",
  "kaspa-core",
+ "kaspa-database",
  "kaspa-hashes",
  "kaspa-math",
  "kaspa-merkle",

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 pub struct Core {
     pub keep_running: AtomicBool,
-    services: Mutex<Vec<Arc<dyn Service>>>,
+    pub services: Mutex<Vec<Arc<dyn Service>>>,
 }
 
 impl Default for Core {

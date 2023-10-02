@@ -8,6 +8,9 @@ include.workspace = true
 license.workspace = true
 
 [dependencies]
+
+kaspa-database.workspace = true
+
 kaspa-hashes.workspace = true
 kaspa-muhash.workspace = true
 kaspa-merkle.workspace = true

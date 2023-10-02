@@ -15,10 +15,9 @@ pub struct Daemon {
     pub rpc_port: u16,
     pub p2p_port: u16,
 
-    core: Arc<Core>,
+    pub core: Arc<Core>,
     workers: Option<Vec<std::thread::JoinHandle<()>>>,
-
-    _appdir_tempdir: TempDir,
+    // _appdir_tempdir: TempDir,
 }
 
 impl Daemon {
@@ -50,12 +49,15 @@ impl Daemon {
         args.listen = Some(format!("0.0.0.0:{p2p_port}").try_into().unwrap());
         args.rpclisten_json = Some(format!("0.0.0.0:{rpc_json_port}").parse().unwrap());
         args.rpclisten_borsh = Some(format!("0.0.0.0:{rpc_borsh_port}").parse().unwrap());
-        let appdir_tempdir = get_kaspa_tempdir();
-        args.appdir = Some(appdir_tempdir.path().to_str().unwrap().to_owned());
+
+        if args.appdir.is_none() {
+            let appdir_tempdir = get_kaspa_tempdir();
+            args.appdir = Some(appdir_tempdir.path().to_str().unwrap().to_owned());
+        }
 
         let network = args.network();
         let (core, _) = create_core_with_runtime(&Default::default(), &args);
-        Daemon { network, rpc_port, p2p_port, core, workers: None, _appdir_tempdir: appdir_tempdir }
+        Daemon { network, rpc_port, p2p_port, core, workers: None }
     }
 
     pub async fn start(&mut self) -> GrpcClient {

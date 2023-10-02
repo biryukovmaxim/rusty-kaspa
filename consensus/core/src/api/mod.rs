@@ -1,4 +1,5 @@
 use futures_util::future::BoxFuture;
+use kaspa_database::prelude::DB;
 use kaspa_muhash::MuHash;
 use std::sync::Arc;
 
@@ -271,6 +272,10 @@ pub trait ConsensusApi: Send + Sync {
 
     fn finality_point(&self) -> Hash {
         unimplemented!()
+    }
+
+    fn get_db(&self) -> Option<Arc<DB>> {
+        None
     }
 }
 
