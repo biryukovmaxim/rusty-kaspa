@@ -8,6 +8,7 @@ include.workspace = true
 license.workspace = true
 
 [dependencies]
+kaspa-database.workspace = true
 kaspa-core.workspace = true
 kaspa-utils.workspace = true
 kaspa-consensus-core.workspace = true

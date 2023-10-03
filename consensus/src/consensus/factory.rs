@@ -54,7 +54,7 @@ pub struct MultiConsensusMetadata {
 
 #[derive(Clone)]
 pub struct MultiConsensusManagementStore {
-    db: Arc<DB>,
+    pub db: Arc<DB>,
     entries: CachedDbAccess<U64Key, ConsensusEntry>,
     metadata: CachedDbItem<MultiConsensusMetadata>,
 }
@@ -245,5 +245,9 @@ impl ConsensusFactory for Factory {
     fn close(&self) {
         debug!("Consensus factory: closing");
         self.notification_root.close();
+    }
+
+    fn meta_db(&self) -> Option<Arc<DB>> {
+        Some(self.management_store.read().db.clone())
     }
 }

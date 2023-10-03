@@ -1,6 +1,7 @@
 use itertools::Itertools;
 use kaspa_consensus_core::api::{ConsensusApi, DynConsensus};
 use kaspa_core::{core::Core, debug, service::Service};
+use kaspa_database::prelude::DB;
 use parking_lot::RwLock;
 use std::{collections::VecDeque, ops::Deref, sync::Arc, thread::JoinHandle};
 
@@ -37,6 +38,10 @@ pub trait ConsensusFactory: Sync + Send {
 
     /// Close the factory and cleanup any shared resources used by it
     fn close(&self);
+
+    fn meta_db(&self) -> Option<Arc<DB>> {
+        None
+    }
 }
 
 /// Test-only mock factory
@@ -97,7 +102,7 @@ impl ManagerInner {
 }
 
 pub struct ConsensusManager {
-    factory: Arc<dyn ConsensusFactory>,
+    pub factory: Arc<dyn ConsensusFactory>,
     inner: RwLock<ManagerInner>,
 }
 
