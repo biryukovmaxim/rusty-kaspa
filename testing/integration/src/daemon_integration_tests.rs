@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::common::daemon::Daemon;
 use kaspa_consensus::consensus::Consensus;
 use kaspa_consensusmanager::ConsensusManager;
+use kaspa_database::utils::get_kaspa_tempdir;
 use std::time::Duration;
 
 #[tokio::test]
@@ -65,28 +66,34 @@ async fn daemon_mining_test() {
 
 #[tokio::test]
 async fn daemon_cleaning_test() {
-    let args = Args { devnet: true, ..Default::default() };
+    let mut args = Args { devnet: true, ..Default::default() };
+    let appdir_tempdir = get_kaspa_tempdir();
+    args.appdir = Some(appdir_tempdir.path().to_str().unwrap().to_owned());
+
     let db;
     {
-        let mut kaspad1 = Daemon::new_random_with_args(args);
+        let mut kaspad1 = Daemon::new_random_with_args(args.clone());
         let consensus_manager =
             kaspad1.core.services.lock().unwrap().iter().find(|s| s.clone().clone().ident() == "consensus manager").cloned().unwrap();
         let consensus_manager = Arc::downcast::<ConsensusManager>(consensus_manager.arc_any()).unwrap();
         db = consensus_manager.consensus().session_blocking().await.get_db().unwrap();
         let rpc_client1 = kaspad1.start().await;
         rpc_client1.disconnect().await.unwrap();
-        drop(rpc_client1);
-        kaspad1.shutdown();
+        kaspad1.shutdown()
     }
-    tokio::time::sleep(Duration::from_secs(10)).await;
-    assert_eq!(Arc::strong_count(&db), 1); // 1557 vs 1
+    assert_eq!(Arc::strong_count(&db), 1); // 1 vs 1
+    drop(db);
+    let db;
 
-    // {
-    //     let mut kaspad2 = Daemon::new_random();
-    //     let rpc_client2 = kaspad2.start().await;
-    //     rpc_client2.disconnect().await.unwrap();
-    //     drop(rpc_client2);
-    //     kaspad2.shutdown();
-    // }
-    // tokio::time::sleep(Duration::from_secs(10)).await;
+    {
+        let mut kaspad2 = Daemon::new_random_with_args(args);
+        let consensus_manager =
+            kaspad2.core.services.lock().unwrap().iter().find(|s| s.clone().clone().ident() == "consensus manager").cloned().unwrap();
+        let consensus_manager = Arc::downcast::<ConsensusManager>(consensus_manager.arc_any()).unwrap();
+        db = consensus_manager.consensus().session_blocking().await.get_db().unwrap();
+        let rpc_client2 = kaspad2.start().await;
+        rpc_client2.disconnect().await.unwrap();
+        kaspad2.shutdown();
+    }
+    assert_eq!(Arc::strong_count(&db), 1); // 1 vs 1
 }
