@@ -64,9 +64,7 @@ pub async fn try_from_storage(
     match data {
         AccountData::Bip32(bip32) => Ok(Arc::new(Bip32::try_new(wallet, prv_key_data_id.unwrap(), settings, bip32, meta).await?)),
         AccountData::Legacy(legacy) => Ok(Arc::new(Legacy::try_new(wallet, prv_key_data_id.unwrap(), settings, legacy, meta).await?)),
-        AccountData::MultiSig(multisig) => {
-            Ok(Arc::new(MultiSig::try_new(wallet, prv_key_data_id.unwrap(), settings, multisig, meta).await?))
-        }
+        AccountData::MultiSig(multisig) => Ok(Arc::new(MultiSig::try_new(wallet, settings, multisig, meta).await?)),
         AccountData::Keypair(keypair) => {
             Ok(Arc::new(Keypair::try_new(wallet, prv_key_data_id.unwrap(), settings, keypair, meta).await?))
         }
@@ -302,7 +300,7 @@ pub trait Account: AnySync + Send + Sync + 'static {
         let signer = Arc::new(Signer::new(self.clone().as_dyn_arc(), keydata, payment_secret));
         let settings =
             GeneratorSettings::try_new_with_account(self.clone().as_dyn_arc(), PaymentDestination::Change, Fees::None, None)?;
-        let generator = Generator::new(settings, Some(signer), abortable);
+        let generator = Generator::try_new(settings, Some(signer), Some(abortable))?;
 
         let mut stream = generator.stream();
         let mut ids = vec![];
@@ -313,7 +311,7 @@ pub trait Account: AnySync + Send + Sync + 'static {
 
             transaction.try_sign()?;
             transaction.log().await?;
-            let id = transaction.try_submit(self.wallet().rpc()).await?;
+            let id = transaction.try_submit(&self.wallet().rpc_api()).await?;
             ids.push(id);
             yield_executor().await;
         }
@@ -336,7 +334,7 @@ pub trait Account: AnySync + Send + Sync + 'static {
 
         let settings = GeneratorSettings::try_new_with_account(self.clone().as_dyn_arc(), destination, priority_fee_sompi, payload)?;
 
-        let generator = Generator::new(settings, Some(signer), abortable);
+        let generator = Generator::try_new(settings, Some(signer), Some(abortable))?;
 
         let mut stream = generator.stream();
         let mut ids = vec![];
@@ -347,7 +345,7 @@ pub trait Account: AnySync + Send + Sync + 'static {
 
             transaction.try_sign()?;
             transaction.log().await?;
-            let id = transaction.try_submit(self.wallet().rpc()).await?;
+            let id = transaction.try_submit(&self.wallet().rpc_api()).await?;
             ids.push(id);
             yield_executor().await;
         }
@@ -364,7 +362,7 @@ pub trait Account: AnySync + Send + Sync + 'static {
     ) -> Result<GeneratorSummary> {
         let settings = GeneratorSettings::try_new_with_account(self.as_dyn_arc(), destination, priority_fee_sompi, payload)?;
 
-        let generator = Generator::new(settings, None, abortable);
+        let generator = Generator::try_new(settings, None, Some(abortable))?;
 
         let mut stream = generator.stream();
         while let Some(_transaction) = stream.try_next().await? {
@@ -426,7 +424,7 @@ pub trait DerivationCapableAccount: Account {
             // ----
 
             let addresses = keypairs.iter().map(|(address, _)| address.clone()).collect::<Vec<_>>();
-            let utxos = self.wallet().rpc().get_utxos_by_addresses(addresses).await?;
+            let utxos = self.wallet().rpc_api().get_utxos_by_addresses(addresses).await?;
             let balance = utxos.iter().map(|utxo| utxo.utxo_entry.amount).sum::<u64>();
             if balance > 0 {
                 aggregate_balance += balance;
@@ -448,12 +446,12 @@ pub trait DerivationCapableAccount: Account {
                         None,
                     )?;
 
-                    let generator = Generator::new(settings, Some(signer), abortable);
+                    let generator = Generator::try_new(settings, Some(signer), Some(abortable))?;
 
                     let mut stream = generator.stream();
                     while let Some(transaction) = stream.try_next().await? {
                         transaction.try_sign()?;
-                        let id = transaction.try_submit(self.wallet().rpc()).await?;
+                        let id = transaction.try_submit(&self.wallet().rpc_api()).await?;
                         if let Some(notifier) = notifier.as_ref() {
                             notifier(index, balance, Some(id));
                         }
@@ -483,7 +481,7 @@ pub trait DerivationCapableAccount: Account {
         let address = self.derivation().receive_address_manager().new_address()?;
         self.utxo_context().register_addresses(&[address.clone()]).await?;
 
-        let metadata = self.metadata()?.expect("derivation accounds must provide metadata");
+        let metadata = self.metadata()?.expect("derivation accounts must provide metadata");
         let store = self.wallet().store().as_account_store()?;
         store.update_metadata(&[&metadata]).await?;
 
@@ -494,7 +492,7 @@ pub trait DerivationCapableAccount: Account {
         let address = self.derivation().change_address_manager().new_address()?;
         self.utxo_context().register_addresses(&[address.clone()]).await?;
 
-        let metadata = self.metadata()?.expect("derivation accounds must provide metadata");
+        let metadata = self.metadata()?.expect("derivation accounts must provide metadata");
         let store = self.wallet().store().as_account_store()?;
         store.update_metadata(&[&metadata]).await?;
 

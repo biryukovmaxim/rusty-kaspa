@@ -86,10 +86,10 @@ pub enum Error {
     NetworkTypeConnected,
 
     #[error("{0}")]
-    NetworkType(#[from] kaspa_consensus_core::networktype::NetworkTypeError),
+    NetworkType(#[from] kaspa_consensus_core::network::NetworkTypeError),
 
     #[error("{0}")]
-    NetworkId(#[from] kaspa_consensus_core::networktype::NetworkIdError),
+    NetworkId(#[from] kaspa_consensus_core::network::NetworkIdError),
 
     #[error("The server UTXO index is not enabled")]
     MissingUtxoIndex,
@@ -124,7 +124,7 @@ pub enum Error {
     #[error(transparent)]
     ParseFloatError(#[from] std::num::ParseFloatError),
 
-    #[error("data decryption error (chacha20poly1305 -> {0})")]
+    #[error("Unable to decrypt this wallet")]
     Chacha20poly1305(chacha20poly1305::Error),
 
     #[error(transparent)]
@@ -201,6 +201,27 @@ pub enum Error {
 
     #[error(transparent)]
     ConsensusWasm(#[from] kaspa_consensus_wasm::error::Error),
+
+    #[error("Fees::Include or Fees::Exclude are not allowed in sweep transactions")]
+    GeneratorFeesInSweepTransaction,
+
+    #[error("Change address does not match supplied network type")]
+    GeneratorChangeAddressNetworkTypeMismatch,
+
+    #[error("Payment output address does not match supplied network type")]
+    GeneratorPaymentOutputNetworkTypeMismatch,
+
+    #[error("Priority fees can not be included into transactions with multiple outputs")]
+    GeneratorIncludeFeesRequiresOneOutput,
+
+    #[error("Requested transaction is too heavy")]
+    GeneratorTransactionIsTooHeavy,
+
+    #[error(transparent)]
+    MultisigCreateError(#[from] kaspa_txscript::MultisigCreateError),
+
+    #[error(transparent)]
+    TxScriptError(#[from] kaspa_txscript_errors::TxScriptError),
 }
 
 impl From<Aborted> for Error {

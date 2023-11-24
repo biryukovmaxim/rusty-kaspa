@@ -1,5 +1,5 @@
 use crate::service::WrpcEncoding;
-use kaspa_consensus_core::networktype::NetworkType;
+use kaspa_consensus_core::network::NetworkType;
 use kaspa_utils::networking::ContextualNetAddress;
 use std::{net::AddrParseError, str::FromStr};
 
@@ -16,14 +16,14 @@ impl WrpcNetAddress {
             WrpcNetAddress::Default => {
                 let port = match encoding {
                     WrpcEncoding::Borsh => network_type.default_borsh_rpc_port(),
-                    WrpcEncoding::SerdeJson => network_type.default_borsh_rpc_port(),
+                    WrpcEncoding::SerdeJson => network_type.default_json_rpc_port(),
                 };
                 format!("127.0.0.1:{port}").parse().unwrap()
             }
             WrpcNetAddress::Public => {
                 let port = match encoding {
                     WrpcEncoding::Borsh => network_type.default_borsh_rpc_port(),
-                    WrpcEncoding::SerdeJson => network_type.default_borsh_rpc_port(),
+                    WrpcEncoding::SerdeJson => network_type.default_json_rpc_port(),
                 };
                 format!("0.0.0.0:{port}").parse().unwrap()
             }
@@ -43,5 +43,21 @@ impl FromStr for WrpcNetAddress {
                 Ok(Self::Custom(addr))
             }
         }
+    }
+}
+
+impl TryFrom<&str> for WrpcNetAddress {
+    type Error = AddrParseError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        WrpcNetAddress::from_str(s)
+    }
+}
+
+impl TryFrom<String> for WrpcNetAddress {
+    type Error = AddrParseError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        WrpcNetAddress::from_str(&s)
     }
 }

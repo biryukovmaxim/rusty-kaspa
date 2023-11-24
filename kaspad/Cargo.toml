@@ -7,6 +7,10 @@ authors.workspace = true
 include.workspace = true
 license.workspace = true
 
+[lib]
+name = "kaspad_lib"
+crate-type = ["cdylib", "lib"]
+
 [dependencies]
 kaspa-hashes.workspace = true
 kaspa-utils.workspace = true
@@ -26,6 +30,8 @@ kaspa-mining.workspace = true
 kaspa-addressmanager.workspace = true
 kaspa-consensusmanager.workspace = true
 kaspa-perf-monitor.workspace = true
+kaspa-addresses.workspace = true
+kaspa-txscript.workspace = true
 
 async-channel.workspace = true
 thiserror.workspace = true
@@ -42,7 +48,8 @@ workflow-log.workspace = true
 dirs = "4.0"
 num_cpus.workspace = true
 
-dhat = {version = "0.3.2", optional = true}
+dhat = { version = "0.3.2", optional = true }
 
 [features]
 heap = ["dhat"]
+devnet-prealloc = ["kaspa-consensus/devnet-prealloc"]

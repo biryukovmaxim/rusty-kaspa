@@ -4,7 +4,7 @@ use crate::tx::{Fees, PaymentDestination};
 use crate::utxo::{UtxoContext, UtxoEntryReference, UtxoIterator};
 use crate::Events;
 use kaspa_addresses::Address;
-use kaspa_consensus_core::networktype::NetworkType;
+use kaspa_consensus_core::network::NetworkType;
 use std::sync::Arc;
 use workflow_core::channel::Multiplexer;
 
@@ -12,7 +12,7 @@ pub struct GeneratorSettings {
     // Network type
     pub network_type: NetworkType,
     // Event multiplexer
-    pub multiplexer: Option<Multiplexer<Events>>,
+    pub multiplexer: Option<Multiplexer<Box<Events>>>,
     // Utxo iterator
     pub utxo_iterator: Box<dyn Iterator<Item = UtxoEntryReference> + Send + Sync + 'static>,
     // Utxo Context
@@ -24,7 +24,7 @@ pub struct GeneratorSettings {
     // change address
     pub change_address: Address,
     // applies only to the final transaction
-    pub final_priority_fee: Fees,
+    pub final_transaction_priority_fee: Fees,
     // final transaction outputs
     pub final_transaction_destination: PaymentDestination,
     // payload
@@ -55,7 +55,7 @@ impl GeneratorSettings {
             utxo_iterator: Box::new(utxo_iterator),
             utxo_context: Some(account.utxo_context().clone()),
 
-            final_priority_fee,
+            final_transaction_priority_fee: final_priority_fee,
             final_transaction_destination,
             final_transaction_payload,
         };
@@ -71,7 +71,7 @@ impl GeneratorSettings {
         final_transaction_destination: PaymentDestination,
         final_priority_fee: Fees,
         final_transaction_payload: Option<Vec<u8>>,
-        multiplexer: Option<Multiplexer<Events>>,
+        multiplexer: Option<Multiplexer<Box<Events>>>,
     ) -> Result<Self> {
         let network_type = utxo_context.processor().network_id()?.into();
         let utxo_iterator = UtxoIterator::new(&utxo_context);
@@ -85,7 +85,7 @@ impl GeneratorSettings {
             utxo_iterator: Box::new(utxo_iterator),
             utxo_context: Some(utxo_context),
 
-            final_priority_fee,
+            final_transaction_priority_fee: final_priority_fee,
             final_transaction_destination,
             final_transaction_payload,
         };
@@ -101,7 +101,7 @@ impl GeneratorSettings {
         final_transaction_destination: PaymentDestination,
         final_priority_fee: Fees,
         final_transaction_payload: Option<Vec<u8>>,
-        multiplexer: Option<Multiplexer<Events>>,
+        multiplexer: Option<Multiplexer<Box<Events>>>,
     ) -> Result<Self> {
         let network_type = NetworkType::try_from(change_address.prefix)?;
 
@@ -114,7 +114,7 @@ impl GeneratorSettings {
             utxo_iterator: Box::new(utxo_iterator),
             utxo_context: None,
 
-            final_priority_fee,
+            final_transaction_priority_fee: final_priority_fee,
             final_transaction_destination,
             final_transaction_payload,
         };

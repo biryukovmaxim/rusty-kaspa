@@ -111,7 +111,7 @@ impl Generator {
         };
 
         let abortable = Abortable::default();
-        let generator = native::Generator::new(settings, None, &abortable);
+        let generator = native::Generator::try_new(settings, None, Some(&abortable))?;
 
         Ok(Self { inner: Arc::new(generator) })
     }
@@ -156,7 +156,7 @@ enum GeneratorSource {
 /// Converts [`GeneratorSettingsObject`] to a series of properties intended for use by the [`Generator`].
 struct GeneratorSettings {
     pub source: GeneratorSource,
-    pub multiplexer: Option<Multiplexer<Events>>,
+    pub multiplexer: Option<Multiplexer<Box<Events>>>,
     pub final_transaction_destination: PaymentDestination,
     pub change_address: Option<Address>,
     pub final_priority_fee: Fees,

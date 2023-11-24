@@ -18,6 +18,10 @@ kaspa-consensus-core.workspace = true
 kaspa-consensus-notify.workspace = true
 kaspa-consensus.workspace = true
 kaspa-consensusmanager.workspace = true
+kaspad.workspace = true
+kaspa-grpc-client.workspace = true
+kaspa-rpc-core.workspace = true
+kaspa-notify.workspace = true
 
 faster-hex.workspace = true
 thiserror.workspace = true
@@ -41,9 +45,10 @@ kaspa-database.workspace = true
 kaspa-utxoindex.workspace = true
 kaspa-index-processor.workspace = true
 kaspa-bip32.workspace = true
+kaspa-wrpc-server.workspace = true
 
 crossbeam-channel = "0.5"
-async-channel = "1.8.0"
+async-channel.workspace = true
 secp256k1 = { version = "0.24", features = ["global-context", "rand-std"] }
 flate2 = "1"
 rand_distr = "0.4"
@@ -57,3 +62,4 @@ kaspa-txscript-errors.workspace = true
 
 [features]
 html_reports = []
+devnet-prealloc = ["kaspad/devnet-prealloc"]
