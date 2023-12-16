@@ -177,7 +177,6 @@ impl SignerT for HtlcReceiverSigner {
                 self.account.locktime,
             )
             .unwrap();
-            dbg!(faster_hex::hex_string(&script));
 
             let mut builder = ScriptBuilder::new();
             builder.add_data(&signature).unwrap();
@@ -188,6 +187,8 @@ impl SignerT for HtlcReceiverSigner {
 
             tx.tx.inputs[i].signature_script = builder.drain();
         }
+        dbg!(serde_json::to_string(&tx).unwrap());
+
         Ok(tx)
     }
 }

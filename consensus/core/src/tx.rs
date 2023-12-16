@@ -279,7 +279,7 @@ impl AsRef<Transaction> for Transaction {
 
 /// Represents a generic mutable/readonly/pointer transaction type along
 /// with partially filled UTXO entry data and optional fee and mass
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct MutableTransaction<T: AsRef<Transaction> = std::sync::Arc<Transaction>> {
     /// The inner transaction
     pub tx: T,

@@ -64,6 +64,20 @@ mod tests {
     }
 
     #[test]
+    fn test_redeem_x86() {
+        let raw = r#"{"tx":{"version":0,"inputs":[{"previousOutpoint":{"transactionId":"75b3d09f6d208e2bf1a64e2fd411a8a31cf0afae3b40a58a2ea52cc946c49b22","index":0},"signatureScript":"41a2bc1b31f191fa1a2c16dd6431f2c097c767d377beafd9d21451210f55bd7d041d9b5a5417ce20e42c58e95327e6b2e5962ad3a67b5e801e4cf6de7b761e581001203c419d39e0e944b9c9156ba2df6fae2319907a2d3a3cfb390ef3136bd6a167e506736563726574514c7063a8202bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b8876203c419d39e0e944b9c9156ba2df6fae2319907a2d3a3cfb390ef3136bd6a167e588ac6751b07620422a703f084f3ee442608bc740f6c4e71ab2a3b1644abda1f4f73e42731516ba88ac68","sequence":0,"sigOpCount":2}],"outputs":[{"value":50000000000,"scriptPublicKey":"000020422a703f084f3ee442608bc740f6c4e71ab2a3b1644abda1f4f73e42731516baac"},{"value":49899996953,"scriptPublicKey":"0000aa2090e21125133401c44fdf8fc692eca3df7463209807d20213c1221c09da2ce60c87"}],"lockTime":0,"subnetworkId":"0000000000000000000000000000000000000000","gas":0,"payload":"","id":"1cdceb1082147a7c53474af5b7ef7931678d181cb39fb4638b52bca747f0f569"},"entries":[{"amount":100000000000,"scriptPublicKey":"0000aa2090e21125133401c44fdf8fc692eca3df7463209807d20213c1221c09da2ce60c87","blockDaaScore":44,"isCoinbase":false}],"calculated_fee":null,"calculated_mass":null}"#;
+        let mut_tx: MutableTransaction<Transaction> = serde_json::from_str(raw).unwrap();
+        let cache = Cache::new(10_000);
+        let mut reused_values = SigHashReusedValues::new();
+        let entries = mut_tx.entries.first().cloned().unwrap().unwrap();
+
+        let tx = &mut_tx.as_verifiable();
+        let mut engine =
+            TxScriptEngine::from_transaction_input(tx, mut_tx.tx.inputs.first().unwrap(), 0, &entries, &mut reused_values, &cache)
+                .unwrap();
+        assert!(engine.execute().is_ok());
+    }
+    #[test]
     fn test_htlc() {
         let [receiver, sender, ..] = kp();
 
