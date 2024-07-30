@@ -41,6 +41,7 @@ use kaspa_muhash::MuHash;
 use kaspa_utils::iter::IterExtensions;
 use parking_lot::RwLockUpgradableReadGuard;
 use rocksdb::WriteBatch;
+use std::fs::File;
 use std::{
     collections::VecDeque,
     ops::Deref,
@@ -50,7 +51,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use std::fs::File;
 
 pub enum PruningProcessingMessage {
     Exit,
