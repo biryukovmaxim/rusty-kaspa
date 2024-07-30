@@ -476,7 +476,9 @@ impl PruningProcessor {
                 drop(pruning_point_write);
             }
         };
+        let start = Instant::now();
         prune();
+        info!("Pruning took {} secs", start.elapsed().as_secs());
         if let Ok(report) = guard.report().build() {
             use chrono::prelude::*;
             let file = File::create(format!("../pruning-report-{}.svg", Utc::now().format("%d-%m-%Y"))).unwrap();
