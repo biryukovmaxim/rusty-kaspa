@@ -44,8 +44,12 @@ tokio.workspace = true
 
 rand = { workspace = true, features = ["small_rng"] }
 
+pprof = { version = "0.13.0", features = ["flamegraph"] }
+chrono.workspace = true
+
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+
 
 [dev-dependencies]
 criterion.workspace = true
