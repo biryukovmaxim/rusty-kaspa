@@ -50,6 +50,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use std::fs::File;
 
 pub enum PruningProcessingMessage {
     Exit,
@@ -239,236 +240,248 @@ impl PruningProcessor {
     }
 
     fn prune(&self, new_pruning_point: Hash) {
-        if self.config.is_archival {
-            warn!("The node is configured as an archival node -- avoiding data pruning. Note this might lead to heavy disk usage.");
-            return;
-        }
-
-        info!("Header and Block pruning: preparing proof and anticone data...");
-
-        let proof = self.pruning_proof_manager.get_pruning_point_proof();
-        let data = self
-            .pruning_proof_manager
-            .get_pruning_point_anticone_and_trusted_data()
-            .expect("insufficient depth error is unexpected here");
-
-        let genesis = self.past_pruning_points_store.get(0).unwrap();
-
-        assert_eq!(new_pruning_point, proof[0].last().unwrap().hash);
-        assert_eq!(new_pruning_point, data.anticone[0]);
-        assert_eq!(genesis, self.config.genesis.hash);
-        assert_eq!(genesis, proof.last().unwrap().last().unwrap().hash);
-
-        // We keep full data for pruning point and its anticone, relations for DAA/GD
-        // windows and pruning proof, and only headers for past pruning points
-        let keep_blocks: BlockHashSet = data.anticone.iter().copied().collect();
-        let keep_relations: BlockHashSet = std::iter::empty()
-            .chain(data.anticone.iter().copied())
-            .chain(data.daa_window_blocks.iter().map(|th| th.header.hash))
-            .chain(data.ghostdag_blocks.iter().map(|gd| gd.hash))
-            .chain(proof.iter().flatten().map(|h| h.hash))
-            .collect();
-        let keep_headers: BlockHashSet = self.past_pruning_points();
-
-        info!("Header and Block pruning: waiting for consensus write permissions...");
-
-        let mut prune_guard = self.pruning_lock.blocking_write();
-        let mut lock_acquire_time = Instant::now();
-        let mut reachability_read = self.reachability_store.upgradable_read();
-
-        info!("Starting Header and Block pruning...");
-
-        {
-            let mut counter = 0;
-            let mut batch = WriteBatch::default();
-            for kept in keep_relations.iter().copied() {
-                let Some(ghostdag) = self.ghostdag_primary_store.get_data(kept).unwrap_option() else {
-                    continue;
-                };
-                if ghostdag.unordered_mergeset().any(|h| !keep_relations.contains(&h)) {
-                    let mut mutable_ghostdag: ExternalGhostdagData = ghostdag.as_ref().into();
-                    mutable_ghostdag.mergeset_blues.retain(|h| keep_relations.contains(h));
-                    mutable_ghostdag.mergeset_reds.retain(|h| keep_relations.contains(h));
-                    mutable_ghostdag.blues_anticone_sizes.retain(|k, _| keep_relations.contains(k));
-                    if !keep_relations.contains(&mutable_ghostdag.selected_parent) {
-                        mutable_ghostdag.selected_parent = ORIGIN;
-                    }
-                    counter += 1;
-                    self.ghostdag_primary_store.update_batch(&mut batch, kept, &Arc::new(mutable_ghostdag.into())).unwrap();
-                }
-            }
-            self.db.write(batch).unwrap();
-            info!("Header and Block pruning: updated ghostdag data for {} blocks", counter);
-        }
-
-        {
-            // Start with a batch for pruning body tips and selected chain stores
-            let mut batch = WriteBatch::default();
-
-            // Prune tips which can no longer be merged by virtual.
-            // By the prunality proof, any tip which isn't in future(pruning_point) will never be merged
-            // by virtual and hence can be safely deleted
-            let mut tips_write = self.body_tips_store.write();
-            let pruned_tips = tips_write
-                .get()
-                .unwrap()
-                .read()
-                .iter()
-                .copied()
-                .filter(|&h| !reachability_read.is_dag_ancestor_of_result(new_pruning_point, h).unwrap())
-                .collect_vec();
-            tips_write.prune_tips_with_writer(BatchDbWriter::new(&mut batch), &pruned_tips).unwrap();
-            if !pruned_tips.is_empty() {
-                info!(
-                    "Header and Block pruning: pruned {} tips: {}...{}",
-                    pruned_tips.len(),
-                    pruned_tips.iter().take(5.min((pruned_tips.len() + 1) / 2)).reusable_format(", "),
-                    pruned_tips.iter().rev().take(5.min(pruned_tips.len() / 2)).reusable_format(", ")
-                )
+        let guard =
+            pprof::ProfilerGuardBuilder::default().frequency(1000).blocklist(&["libc", "libgcc", "pthread", "vdso"]).build().unwrap();
+        let prune = || {
+            if self.config.is_archival {
+                warn!(
+                    "The node is configured as an archival node -- avoiding data pruning. Note this might lead to heavy disk usage."
+                );
+                return;
             }
 
-            // Prune the selected chain index below the pruning point
-            let mut selected_chain_write = self.selected_chain_store.write();
-            selected_chain_write.prune_below_pruning_point(BatchDbWriter::new(&mut batch), new_pruning_point).unwrap();
+            info!("Header and Block pruning: preparing proof and anticone data...");
 
-            // Flush the batch to the DB
-            self.db.write(batch).unwrap();
+            let proof = self.pruning_proof_manager.get_pruning_point_proof();
+            let data = self
+                .pruning_proof_manager
+                .get_pruning_point_anticone_and_trusted_data()
+                .expect("insufficient depth error is unexpected here");
 
-            // Calling the drops explicitly after the batch is written in order to avoid possible errors.
-            drop(selected_chain_write);
-            drop(tips_write);
-        }
+            let genesis = self.past_pruning_points_store.get(0).unwrap();
 
-        // Now we traverse the anti-future of the new pruning point starting from origin and going up.
-        // The most efficient way to traverse the entire DAG from the bottom-up is via the reachability tree
-        let mut queue = VecDeque::<Hash>::from_iter(reachability_read.get_children(ORIGIN).unwrap().iter().copied());
-        let (mut counter, mut traversed) = (0, 0);
-        info!("Header and Block pruning: starting traversal from: {} (genesis: {})", queue.iter().reusable_format(", "), genesis);
-        while let Some(current) = queue.pop_front() {
-            if reachability_read.is_dag_ancestor_of_result(new_pruning_point, current).unwrap() {
-                continue;
-            }
-            traversed += 1;
-            // Obtain the tree children of `current` and push them to the queue before possibly being deleted below
-            queue.extend(reachability_read.get_children(current).unwrap().iter());
+            assert_eq!(new_pruning_point, proof[0].last().unwrap().hash);
+            assert_eq!(new_pruning_point, data.anticone[0]);
+            assert_eq!(genesis, self.config.genesis.hash);
+            assert_eq!(genesis, proof.last().unwrap().last().unwrap().hash);
 
-            // If we have the lock for more than a few milliseconds, release and recapture to allow consensus progress during pruning
-            if lock_acquire_time.elapsed() > Duration::from_millis(5) {
-                drop(reachability_read);
-                // An exit signal was received. Exit from this long running process.
-                if self.is_consensus_exiting.load(Ordering::Relaxed) {
-                    drop(prune_guard);
-                    info!("Header and Block pruning interrupted: Process is exiting");
-                    return;
-                }
-                prune_guard.blocking_yield();
-                lock_acquire_time = Instant::now();
-                reachability_read = self.reachability_store.upgradable_read();
-            }
+            // We keep full data for pruning point and its anticone, relations for DAA/GD
+            // windows and pruning proof, and only headers for past pruning points
+            let keep_blocks: BlockHashSet = data.anticone.iter().copied().collect();
+            let keep_relations: BlockHashSet = std::iter::empty()
+                .chain(data.anticone.iter().copied())
+                .chain(data.daa_window_blocks.iter().map(|th| th.header.hash))
+                .chain(data.ghostdag_blocks.iter().map(|gd| gd.hash))
+                .chain(proof.iter().flatten().map(|h| h.hash))
+                .collect();
+            let keep_headers: BlockHashSet = self.past_pruning_points();
 
-            if traversed % 1000 == 0 {
-                info!("Header and Block pruning: traversed: {}, pruned {}...", traversed, counter);
-            }
+            info!("Header and Block pruning: waiting for consensus write permissions...");
 
-            // Remove window cache entries
-            self.block_window_cache_for_difficulty.remove(&current);
-            self.block_window_cache_for_past_median_time.remove(&current);
+            let mut prune_guard = self.pruning_lock.blocking_write();
+            let mut lock_acquire_time = Instant::now();
+            let mut reachability_read = self.reachability_store.upgradable_read();
 
-            if !keep_blocks.contains(&current) {
+            info!("Starting Header and Block pruning...");
+
+            {
+                let mut counter = 0;
                 let mut batch = WriteBatch::default();
-                let mut level_relations_write = self.relations_stores.write();
-                let mut reachability_relations_write = self.reachability_relations_store.write();
-                let mut staging_relations = StagingRelationsStore::new(&mut reachability_relations_write);
-                let mut staging_reachability = StagingReachabilityStore::new(reachability_read);
-                let mut statuses_write = self.statuses_store.write();
-
-                // Prune data related to block bodies and UTXO state
-                self.utxo_multisets_store.delete_batch(&mut batch, current).unwrap();
-                self.utxo_diffs_store.delete_batch(&mut batch, current).unwrap();
-                self.acceptance_data_store.delete_batch(&mut batch, current).unwrap();
-                self.block_transactions_store.delete_batch(&mut batch, current).unwrap();
-
-                if keep_relations.contains(&current) {
-                    if statuses_write.get(current).unwrap_option().is_some_and(|s| s.is_valid()) {
-                        // We set the status to header-only only if it was previously set to a valid
-                        // status. This is important since some proof headers might not have their status set
-                        // and we would like to preserve this semantic (having a valid status implies that
-                        // other parts of the code assume the existence of GD data etc.)
-                        statuses_write.set_batch(&mut batch, current, StatusHeaderOnly).unwrap();
-                    }
-                } else {
-                    // Count only blocks which get fully pruned including DAG relations
-                    counter += 1;
-                    // Prune data related to headers: relations, reachability, ghostdag
-                    let mergeset = relations::delete_reachability_relations(
-                        MemoryWriter, // Both stores are staging so we just pass a dummy writer
-                        &mut staging_relations,
-                        &staging_reachability,
-                        current,
-                    );
-                    reachability::delete_block(&mut staging_reachability, current, &mut mergeset.iter().copied()).unwrap();
-                    // TODO: consider adding block level to compact header data
-                    let block_level = self.headers_store.get_header_with_block_level(current).unwrap().block_level;
-                    (0..=block_level as usize).for_each(|level| {
-                        let mut staging_level_relations = StagingRelationsStore::new(&mut level_relations_write[level]);
-                        relations::delete_level_relations(MemoryWriter, &mut staging_level_relations, current).unwrap_option();
-                        staging_level_relations.commit(&mut batch).unwrap();
-                        self.ghostdag_stores[level].delete_batch(&mut batch, current).unwrap_option();
-                    });
-
-                    // Remove additional header related data
-                    self.daa_excluded_store.delete_batch(&mut batch, current).unwrap();
-                    self.depth_store.delete_batch(&mut batch, current).unwrap();
-                    // Remove status completely
-                    statuses_write.delete_batch(&mut batch, current).unwrap();
-
-                    if !keep_headers.contains(&current) {
-                        // Prune the actual headers
-                        self.headers_store.delete_batch(&mut batch, current).unwrap();
+                for kept in keep_relations.iter().copied() {
+                    let Some(ghostdag) = self.ghostdag_primary_store.get_data(kept).unwrap_option() else {
+                        continue;
+                    };
+                    if ghostdag.unordered_mergeset().any(|h| !keep_relations.contains(&h)) {
+                        let mut mutable_ghostdag: ExternalGhostdagData = ghostdag.as_ref().into();
+                        mutable_ghostdag.mergeset_blues.retain(|h| keep_relations.contains(h));
+                        mutable_ghostdag.mergeset_reds.retain(|h| keep_relations.contains(h));
+                        mutable_ghostdag.blues_anticone_sizes.retain(|k, _| keep_relations.contains(k));
+                        if !keep_relations.contains(&mutable_ghostdag.selected_parent) {
+                            mutable_ghostdag.selected_parent = ORIGIN;
+                        }
+                        counter += 1;
+                        self.ghostdag_primary_store.update_batch(&mut batch, kept, &Arc::new(mutable_ghostdag.into())).unwrap();
                     }
                 }
+                self.db.write(batch).unwrap();
+                info!("Header and Block pruning: updated ghostdag data for {} blocks", counter);
+            }
 
-                let reachability_write = staging_reachability.commit(&mut batch).unwrap();
-                staging_relations.commit(&mut batch).unwrap();
+            {
+                // Start with a batch for pruning body tips and selected chain stores
+                let mut batch = WriteBatch::default();
+
+                // Prune tips which can no longer be merged by virtual.
+                // By the prunality proof, any tip which isn't in future(pruning_point) will never be merged
+                // by virtual and hence can be safely deleted
+                let mut tips_write = self.body_tips_store.write();
+                let pruned_tips = tips_write
+                    .get()
+                    .unwrap()
+                    .read()
+                    .iter()
+                    .copied()
+                    .filter(|&h| !reachability_read.is_dag_ancestor_of_result(new_pruning_point, h).unwrap())
+                    .collect_vec();
+                tips_write.prune_tips_with_writer(BatchDbWriter::new(&mut batch), &pruned_tips).unwrap();
+                if !pruned_tips.is_empty() {
+                    info!(
+                        "Header and Block pruning: pruned {} tips: {}...{}",
+                        pruned_tips.len(),
+                        pruned_tips.iter().take(5.min((pruned_tips.len() + 1) / 2)).reusable_format(", "),
+                        pruned_tips.iter().rev().take(5.min(pruned_tips.len() / 2)).reusable_format(", ")
+                    )
+                }
+
+                // Prune the selected chain index below the pruning point
+                let mut selected_chain_write = self.selected_chain_store.write();
+                selected_chain_write.prune_below_pruning_point(BatchDbWriter::new(&mut batch), new_pruning_point).unwrap();
 
                 // Flush the batch to the DB
                 self.db.write(batch).unwrap();
 
                 // Calling the drops explicitly after the batch is written in order to avoid possible errors.
-                drop(reachability_write);
-                drop(statuses_write);
-                drop(reachability_relations_write);
-                drop(level_relations_write);
-
-                reachability_read = self.reachability_store.upgradable_read();
+                drop(selected_chain_write);
+                drop(tips_write);
             }
-        }
 
-        drop(reachability_read);
-        drop(prune_guard);
+            // Now we traverse the anti-future of the new pruning point starting from origin and going up.
+            // The most efficient way to traverse the entire DAG from the bottom-up is via the reachability tree
+            let mut queue = VecDeque::<Hash>::from_iter(reachability_read.get_children(ORIGIN).unwrap().iter().copied());
+            let (mut counter, mut traversed) = (0, 0);
+            info!("Header and Block pruning: starting traversal from: {} (genesis: {})", queue.iter().reusable_format(", "), genesis);
+            while let Some(current) = queue.pop_front() {
+                if reachability_read.is_dag_ancestor_of_result(new_pruning_point, current).unwrap() {
+                    continue;
+                }
+                traversed += 1;
+                // Obtain the tree children of `current` and push them to the queue before possibly being deleted below
+                queue.extend(reachability_read.get_children(current).unwrap().iter());
 
-        info!("Header and Block pruning completed: traversed: {}, pruned {}", traversed, counter);
-        info!(
-            "Header and Block pruning stats: proof size: {}, pruning point and anticone: {}, unique headers in proof and windows: {}, pruning points in history: {}",
-            proof.iter().map(|l| l.len()).sum::<usize>(),
-            keep_blocks.len(),
-            keep_relations.len(),
-            keep_headers.len()
-        );
+                // If we have the lock for more than a few milliseconds, release and recapture to allow consensus progress during pruning
+                if lock_acquire_time.elapsed() > Duration::from_millis(5) {
+                    drop(reachability_read);
+                    // An exit signal was received. Exit from this long running process.
+                    if self.is_consensus_exiting.load(Ordering::Relaxed) {
+                        drop(prune_guard);
+                        info!("Header and Block pruning interrupted: Process is exiting");
+                        return;
+                    }
+                    prune_guard.blocking_yield();
+                    lock_acquire_time = Instant::now();
+                    reachability_read = self.reachability_store.upgradable_read();
+                }
 
-        if self.config.enable_sanity_checks {
-            self.assert_proof_rebuilding(proof, new_pruning_point);
-            self.assert_data_rebuilding(data, new_pruning_point);
-        }
+                if traversed % 1000 == 0 {
+                    info!("Header and Block pruning: traversed: {}, pruned {}...", traversed, counter);
+                }
 
-        {
-            // Set the history root to the new pruning point only after we successfully pruned its past
-            let mut pruning_point_write = self.pruning_point_store.write();
-            let mut batch = WriteBatch::default();
-            pruning_point_write.set_history_root(&mut batch, new_pruning_point).unwrap();
-            self.db.write(batch).unwrap();
-            drop(pruning_point_write);
-        }
+                // Remove window cache entries
+                self.block_window_cache_for_difficulty.remove(&current);
+                self.block_window_cache_for_past_median_time.remove(&current);
+
+                if !keep_blocks.contains(&current) {
+                    let mut batch = WriteBatch::default();
+                    let mut level_relations_write = self.relations_stores.write();
+                    let mut reachability_relations_write = self.reachability_relations_store.write();
+                    let mut staging_relations = StagingRelationsStore::new(&mut reachability_relations_write);
+                    let mut staging_reachability = StagingReachabilityStore::new(reachability_read);
+                    let mut statuses_write = self.statuses_store.write();
+
+                    // Prune data related to block bodies and UTXO state
+                    self.utxo_multisets_store.delete_batch(&mut batch, current).unwrap();
+                    self.utxo_diffs_store.delete_batch(&mut batch, current).unwrap();
+                    self.acceptance_data_store.delete_batch(&mut batch, current).unwrap();
+                    self.block_transactions_store.delete_batch(&mut batch, current).unwrap();
+
+                    if keep_relations.contains(&current) {
+                        if statuses_write.get(current).unwrap_option().is_some_and(|s| s.is_valid()) {
+                            // We set the status to header-only only if it was previously set to a valid
+                            // status. This is important since some proof headers might not have their status set
+                            // and we would like to preserve this semantic (having a valid status implies that
+                            // other parts of the code assume the existence of GD data etc.)
+                            statuses_write.set_batch(&mut batch, current, StatusHeaderOnly).unwrap();
+                        }
+                    } else {
+                        // Count only blocks which get fully pruned including DAG relations
+                        counter += 1;
+                        // Prune data related to headers: relations, reachability, ghostdag
+                        let mergeset = relations::delete_reachability_relations(
+                            MemoryWriter, // Both stores are staging so we just pass a dummy writer
+                            &mut staging_relations,
+                            &staging_reachability,
+                            current,
+                        );
+                        reachability::delete_block(&mut staging_reachability, current, &mut mergeset.iter().copied()).unwrap();
+                        // TODO: consider adding block level to compact header data
+                        let block_level = self.headers_store.get_header_with_block_level(current).unwrap().block_level;
+                        (0..=block_level as usize).for_each(|level| {
+                            let mut staging_level_relations = StagingRelationsStore::new(&mut level_relations_write[level]);
+                            relations::delete_level_relations(MemoryWriter, &mut staging_level_relations, current).unwrap_option();
+                            staging_level_relations.commit(&mut batch).unwrap();
+                            self.ghostdag_stores[level].delete_batch(&mut batch, current).unwrap_option();
+                        });
+
+                        // Remove additional header related data
+                        self.daa_excluded_store.delete_batch(&mut batch, current).unwrap();
+                        self.depth_store.delete_batch(&mut batch, current).unwrap();
+                        // Remove status completely
+                        statuses_write.delete_batch(&mut batch, current).unwrap();
+
+                        if !keep_headers.contains(&current) {
+                            // Prune the actual headers
+                            self.headers_store.delete_batch(&mut batch, current).unwrap();
+                        }
+                    }
+
+                    let reachability_write = staging_reachability.commit(&mut batch).unwrap();
+                    staging_relations.commit(&mut batch).unwrap();
+
+                    // Flush the batch to the DB
+                    self.db.write(batch).unwrap();
+
+                    // Calling the drops explicitly after the batch is written in order to avoid possible errors.
+                    drop(reachability_write);
+                    drop(statuses_write);
+                    drop(reachability_relations_write);
+                    drop(level_relations_write);
+
+                    reachability_read = self.reachability_store.upgradable_read();
+                }
+            }
+
+            drop(reachability_read);
+            drop(prune_guard);
+
+            info!("Header and Block pruning completed: traversed: {}, pruned {}", traversed, counter);
+            info!(
+                "Header and Block pruning stats: proof size: {}, pruning point and anticone: {}, unique headers in proof and windows: {}, pruning points in history: {}",
+                proof.iter().map(|l| l.len()).sum::<usize>(),
+                keep_blocks.len(),
+                keep_relations.len(),
+                keep_headers.len()
+            );
+
+            if self.config.enable_sanity_checks {
+                self.assert_proof_rebuilding(proof, new_pruning_point);
+                self.assert_data_rebuilding(data, new_pruning_point);
+            }
+
+            {
+                // Set the history root to the new pruning point only after we successfully pruned its past
+                let mut pruning_point_write = self.pruning_point_store.write();
+                let mut batch = WriteBatch::default();
+                pruning_point_write.set_history_root(&mut batch, new_pruning_point).unwrap();
+                self.db.write(batch).unwrap();
+                drop(pruning_point_write);
+            }
+        };
+        prune();
+        if let Ok(report) = guard.report().build() {
+            use chrono::prelude::*;
+            let file = File::create(format!("../pruning-report-{}.svg", Utc::now().format("%d-%m-%Y"))).unwrap();
+            report.flamegraph(file).unwrap();
+        };
     }
 
     fn past_pruning_points(&self) -> BlockHashSet {
