@@ -41,6 +41,7 @@ use kaspa_muhash::MuHash;
 use kaspa_utils::iter::IterExtensions;
 use parking_lot::RwLockUpgradableReadGuard;
 use rocksdb::WriteBatch;
+use std::fs::File;
 use std::{
     collections::VecDeque,
     ops::Deref,
@@ -50,7 +51,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use std::fs::File;
 
 pub enum PruningProcessingMessage {
     Exit,
@@ -421,7 +421,7 @@ impl PruningProcessor {
                             staging_level_relations.commit(&mut batch).unwrap();
                         });
 
-                    self.ghostdag_store.delete_batch(&mut batch, current).unwrap_option();
+                        self.ghostdag_store.delete_batch(&mut batch, current).unwrap_option();
 
                         // Remove additional header related data
                         self.daa_excluded_store.delete_batch(&mut batch, current).unwrap();
