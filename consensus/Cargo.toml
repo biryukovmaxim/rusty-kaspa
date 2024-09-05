@@ -55,6 +55,12 @@ flate2.workspace = true
 rand_distr.workspace = true
 kaspa-txscript-errors.workspace = true
 
+hashbrown = { version = "0.14.5", features = ["raw"] }
+
+[[bench]]
+name = "index_set_vs_hashbrown"
+harness = false
+
 [[bench]]
 name = "hash_benchmarks"
 harness = false
