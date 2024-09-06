@@ -11,13 +11,20 @@ const INPUT_LEN: usize = SIZE * 10;
 fn brown_insert(set: &mut HashSet<Hash, BlockHasher>, value: Hash) -> Option<Hash> {
     if set.len() >= SIZE {
         let t = set.raw_table_mut();
-        let i = rand::thread_rng().gen_range(0..t.buckets());
-        unsafe {
-            if t.is_bucket_full(i) {
-                let ((hash, _), _) = t.remove(t.bucket(i));
-                Some(hash)
-            } else {
-                None
+        let buckets = t.buckets();
+
+        let mut i =  rand::thread_rng().gen_range(0..buckets);
+        loop {
+            unsafe {
+                if !t.is_bucket_full(i) {
+                    i = (i + 1) % buckets;
+                    // i =  rand::thread_rng().gen_range(0..buckets);
+                    continue;
+                }
+                // let ((hash, _), _) = t.remove(t.bucket(i));
+                // set.insert(value);
+                // return Some(hash);
+                return Some(Hash::from_bytes([0u8;32]))
             }
         }
     } else {
