@@ -50,26 +50,32 @@ fn bench_collections(c: &mut Criterion) {
         let mut set = HashSet::with_capacity_and_hasher(SIZE, BlockHasher::default());
         // Perform an initial insert to allocate memory before starting the benchmark
         let _ = brown_insert(&mut set, hashes[0]);
-
+        let mut mut_max_size = 0;
         b.iter(|| {
             for hash in &hashes[1..] {
                 let returned = black_box(brown_insert(&mut set, *hash));
                 _ = black_box(returned);
+                assert!(set.len() <= SIZE);
+                mut_max_size = mut_max_size.max(set.len());
             }
         });
+        assert_eq!(mut_max_size, SIZE);
     });
 
     group.bench_function("IndexSet", |b| {
         let mut set = IndexSet::with_capacity_and_hasher(SIZE, BlockHasher::default());
         // Perform an initial insert to allocate memory before starting the benchmark
         let _ = indexed_insert(&mut set, hashes[0]);
-
+        let mut mut_max_size = 0;
         b.iter(|| {
             for hash in &hashes[1..] {
                 let returned = black_box(indexed_insert(&mut set, *hash));
                 _ = black_box(returned);
+                assert!(set.len() <= SIZE);
+                mut_max_size = mut_max_size.max(set.len());
             }
         });
+        assert_eq!(mut_max_size, SIZE);
     });
     group.finish();
 }
