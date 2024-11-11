@@ -461,7 +461,7 @@ impl<'a, T: VerifiableTransaction, Reused: SigHashReusedValues> TxScriptEngine<'
             return Err(TxScriptError::NullFail);
         }
 
-        self.dstack.push_item(!failed);
+        self.dstack.push_item(!failed)?;
         Ok(())
     }
 

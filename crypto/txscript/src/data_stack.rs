@@ -2,7 +2,9 @@ use crate::TxScriptError;
 use core::fmt::Debug;
 use core::iter;
 use std::cmp::Ordering;
+use std::convert::Infallible;
 use std::ops::Deref;
+use thiserror::Error;
 
 const DEFAULT_SCRIPT_NUM_LEN: usize = 4;
 const DEFAULT_SCRIPT_NUM_LEN_KIP10: usize = 8;
@@ -13,18 +15,18 @@ pub(crate) struct SizedEncodeInt<const LEN: usize>(pub(crate) i64);
 pub(crate) type Stack = Vec<Vec<u8>>;
 
 pub(crate) trait DataStack {
-    fn pop_items<const SIZE: usize, T: Debug>(&mut self) -> Result<[T; SIZE], TxScriptError>
+    fn pop_items<const SIZE: usize, T: Debug, Err: Into<TxScriptError>>(&mut self) -> Result<[T; SIZE], TxScriptError>
     where
-        Vec<u8>: OpcodeData<T>;
+        Vec<u8>: OpcodeData<T, Err>;
     #[allow(dead_code)]
     fn peek_items<const SIZE: usize, T: Debug>(&self) -> Result<[T; SIZE], TxScriptError>
     where
         Vec<u8>: OpcodeData<T>;
     fn pop_raw<const SIZE: usize>(&mut self) -> Result<[Vec<u8>; SIZE], TxScriptError>;
     fn peek_raw<const SIZE: usize>(&self) -> Result<[Vec<u8>; SIZE], TxScriptError>;
-    fn push_item<T: Debug>(&mut self, item: T)
+    fn push_item<T: Debug, Err: Into<TxScriptError>>(&mut self, item: T) -> Result<(), TxScriptError>
     where
-        Vec<u8>: OpcodeData<T>;
+        Vec<u8>: OpcodeData<T, Err>;
     fn drop_items<const SIZE: usize>(&mut self) -> Result<(), TxScriptError>;
     fn dup_items<const SIZE: usize>(&mut self) -> Result<(), TxScriptError>;
     fn over_items<const SIZE: usize>(&mut self) -> Result<(), TxScriptError>;
@@ -32,9 +34,11 @@ pub(crate) trait DataStack {
     fn swap_items<const SIZE: usize>(&mut self) -> Result<(), TxScriptError>;
 }
 
-pub(crate) trait OpcodeData<T> {
+pub(crate) trait OpcodeData<T, Err: Into<TxScriptError> = Infallible> {
     fn deserialize(&self) -> Result<T, TxScriptError>;
-    fn serialize(from: &T) -> Self;
+    fn serialize(from: &T) -> Result<Self, Err>
+    where
+        Self: Sized;
 }
 
 fn check_minimal_data_encoding(v: &[u8]) -> Result<(), TxScriptError> {
@@ -60,6 +64,36 @@ fn check_minimal_data_encoding(v: &[u8]) -> Result<(), TxScriptError> {
     }
 
     Ok(())
+}
+
+#[inline]
+fn serialize_i64(from: &i64) -> Vec<u8> {
+    let sign = from.signum();
+    let mut positive = from.unsigned_abs();
+    let mut last_saturated = false;
+    let mut number_vec: Vec<u8> = iter::from_fn(move || {
+        if positive == 0 {
+            if last_saturated {
+                last_saturated = false;
+                Some(0)
+            } else {
+                None
+            }
+        } else {
+            let value = positive & 0xff;
+            last_saturated = (value & 0x80) != 0;
+            positive >>= 8;
+            Some(value as u8)
+        }
+    })
+    .collect();
+    if sign == -1 {
+        match number_vec.last_mut() {
+            Some(num) => *num |= 0x80,
+            _ => unreachable!(),
+        }
+    }
+    number_vec
 }
 
 fn deserialize_i64(v: &[u8]) -> Result<i64, TxScriptError> {
@@ -107,8 +141,16 @@ impl Deref for Kip10I64 {
         &self.0
     }
 }
+#[derive(Error, PartialEq, Eq, Debug, Clone, Copy)]
+#[error("Number exceeds 8 bytes: {0}")]
+pub struct NumberTooLong(pub i64);
 
-impl OpcodeData<Kip10I64> for Vec<u8> {
+impl From<NumberTooLong> for TxScriptError {
+    fn from(value: NumberTooLong) -> Self {
+        Self::NumberTooBig(value.to_string())
+    }
+}
+impl OpcodeData<Kip10I64, NumberTooLong> for Vec<u8> {
     #[inline]
     fn deserialize(&self) -> Result<Kip10I64, TxScriptError> {
         match self.len() > DEFAULT_SCRIPT_NUM_LEN_KIP10 {
@@ -123,12 +165,15 @@ impl OpcodeData<Kip10I64> for Vec<u8> {
     }
 
     #[inline]
-    fn serialize(from: &Kip10I64) -> Self {
-        Self::serialize(&from.0)
+    fn serialize(from: &Kip10I64) -> Result<Self, NumberTooLong> {
+        if from.0 == i64::MIN {
+            return Err(NumberTooLong(from.0));
+        }
+        OpcodeData::<_, NumberTooLong>::serialize(&from.0)
     }
 }
 
-impl OpcodeData<i64> for Vec<u8> {
+impl OpcodeData<i64, NumberTooLong> for Vec<u8> {
     #[inline]
     fn deserialize(&self) -> Result<i64, TxScriptError> {
         match self.len() > DEFAULT_SCRIPT_NUM_LEN {
@@ -143,47 +188,46 @@ impl OpcodeData<i64> for Vec<u8> {
     }
 
     #[inline]
-    fn serialize(from: &i64) -> Self {
-        let sign = from.signum();
-        let mut positive = from.unsigned_abs();
-        let mut last_saturated = false;
-        let mut number_vec: Vec<u8> = iter::from_fn(move || {
-            if positive == 0 {
-                if last_saturated {
-                    last_saturated = false;
-                    Some(0)
-                } else {
-                    None
-                }
-            } else {
-                let value = positive & 0xff;
-                last_saturated = (value & 0x80) != 0;
-                positive >>= 8;
-                Some(value as u8)
-            }
-        })
-        .collect();
-        if sign == -1 {
-            match number_vec.last_mut() {
-                Some(num) => *num |= 0x80,
-                _ => unreachable!(),
-            }
+    fn serialize(from: &i64) -> Result<Self, NumberTooLong> {
+        if from == &i64::MIN {
+            return Err(NumberTooLong(*from));
         }
-        number_vec
+        Ok(serialize_i64(from))
+    }
+}
+
+#[cfg(test)]
+impl OpcodeData<i64, Infallible> for Vec<u8> {
+    #[inline]
+    fn deserialize(&self) -> Result<i64, TxScriptError> {
+        match self.len() > DEFAULT_SCRIPT_NUM_LEN {
+            true => Err(TxScriptError::NumberTooBig(format!(
+                "numeric value encoded as {:x?} is {} bytes which exceeds the max allowed of {}",
+                self,
+                self.len(),
+                DEFAULT_SCRIPT_NUM_LEN
+            ))),
+            false => deserialize_i64(self),
+        }
+    }
+
+    #[inline]
+    fn serialize(from: &i64) -> Result<Self, Infallible> {
+        Ok(serialize_i64(from))
     }
 }
 
 impl OpcodeData<i32> for Vec<u8> {
     #[inline]
     fn deserialize(&self) -> Result<i32, TxScriptError> {
-        let res = OpcodeData::<i64>::deserialize(self)?;
+        let res = OpcodeData::<i64, NumberTooLong>::deserialize(self)?;
         i32::try_from(res.clamp(i32::MIN as i64, i32::MAX as i64))
             .map_err(|e| TxScriptError::InvalidState(format!("data is too big for `i32`: {e}")))
     }
 
     #[inline]
-    fn serialize(from: &i32) -> Self {
-        OpcodeData::<i64>::serialize(&(*from as i64))
+    fn serialize(from: &i32) -> Result<Self, Infallible> {
+        Ok(OpcodeData::<i64, NumberTooLong>::serialize(&(*from as i64)).expect("should never exceed"))
     }
 }
 
@@ -202,12 +246,12 @@ impl<const LEN: usize> OpcodeData<SizedEncodeInt<LEN>> for Vec<u8> {
     }
 
     #[inline]
-    fn serialize(from: &SizedEncodeInt<LEN>) -> Self {
-        OpcodeData::<i64>::serialize(&from.0)
+    fn serialize(from: &SizedEncodeInt<LEN>) -> Result<Self, Infallible> {
+        Ok(serialize_i64(&from.0))
     }
 }
 
-impl OpcodeData<bool> for Vec<u8> {
+impl OpcodeData<bool, Infallible> for Vec<u8> {
     #[inline]
     fn deserialize(&self) -> Result<bool, TxScriptError> {
         if self.is_empty() {
@@ -219,19 +263,19 @@ impl OpcodeData<bool> for Vec<u8> {
     }
 
     #[inline]
-    fn serialize(from: &bool) -> Self {
-        match from {
+    fn serialize(from: &bool) -> Result<Self, Infallible> {
+        Ok(match from {
             true => vec![1],
             false => vec![],
-        }
+        })
     }
 }
 
 impl DataStack for Stack {
     #[inline]
-    fn pop_items<const SIZE: usize, T: Debug>(&mut self) -> Result<[T; SIZE], TxScriptError>
+    fn pop_items<const SIZE: usize, T: Debug, Err: Into<TxScriptError>>(&mut self) -> Result<[T; SIZE], TxScriptError>
     where
-        Vec<u8>: OpcodeData<T>,
+        Vec<u8>: OpcodeData<T, Err>,
     {
         if self.len() < SIZE {
             return Err(TxScriptError::InvalidStackOperation(SIZE, self.len()));
@@ -269,11 +313,13 @@ impl DataStack for Stack {
     }
 
     #[inline]
-    fn push_item<T: Debug>(&mut self, item: T)
+    fn push_item<T: Debug, Err: Into<TxScriptError>>(&mut self, item: T) -> Result<(), TxScriptError>
     where
-        Vec<u8>: OpcodeData<T>,
+        Vec<u8>: OpcodeData<T, Err>,
     {
-        Vec::push(self, OpcodeData::serialize(&item));
+        let v = OpcodeData::serialize(&item).map_err(|err: Err| err.into())?;
+        Vec::push(self, v);
+        Ok(())
     }
 
     #[inline]
@@ -336,7 +382,7 @@ impl DataStack for Stack {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kip10I64, OpcodeData};
+    use super::{Kip10I64, NumberTooLong, OpcodeData};
     use crate::data_stack::SizedEncodeInt;
     use kaspa_txscript_errors::TxScriptError;
 
@@ -396,7 +442,7 @@ mod tests {
         ];
 
         for test in tests {
-            let serialized: Vec<u8> = OpcodeData::<i64>::serialize(&test.num);
+            let serialized: Vec<u8> = OpcodeData::<i64>::serialize(&test.num).unwrap();
             assert_eq!(serialized, test.serialized);
         }
     }
@@ -723,7 +769,7 @@ mod tests {
         for test in tests {
             // Ensure the error code is of the expected type and the error
             // code matches the value specified in the test instance.
-            assert_eq!(test.serialized.deserialize(), test.result);
+            assert_eq!(<std::vec::Vec<u8> as OpcodeData<i64, NumberTooLong>>::deserialize(&test.serialized), test.result);
         }
 
         for test in test_of_size_5 {
