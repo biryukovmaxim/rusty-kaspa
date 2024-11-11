@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use thiserror::Error;
 
 #[derive(Error, PartialEq, Eq, Debug, Clone)]
@@ -71,4 +72,10 @@ pub enum TxScriptError {
     ScriptSize(usize, usize),
     #[error("transaction output {0} is out of bounds, should be non-negative below {1}")]
     InvalidOutputIndex(i32, usize),
+}
+
+impl From<Infallible> for TxScriptError {
+    fn from(_: Infallible) -> Self {
+        unreachable!(); // the value/object of type Infallible is not possible to construct
+    }
 }

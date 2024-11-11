@@ -1,5 +1,6 @@
 use std::iter::once;
 
+use crate::data_stack::NumberTooLong;
 use crate::{
     data_stack::OpcodeData,
     opcodes::{codes::*, OP_1_NEGATE_VAL, OP_DATA_MAX_VAL, OP_DATA_MIN_VAL, OP_SMALL_INT_MAX_VAL},
@@ -31,6 +32,9 @@ pub enum ScriptBuilderError {
 
     #[error("adding integer {0} would exceed the maximum allowed canonical script length of {MAX_SCRIPTS_SIZE}")]
     IntegerRejected(i64),
+
+    #[error(transparent)]
+    NumberTooLong(#[from] NumberTooLong),
 }
 pub type ScriptBuilderResult<T> = std::result::Result<T, ScriptBuilderError>;
 
@@ -228,7 +232,30 @@ impl ScriptBuilder {
             return Ok(self);
         }
 
-        let bytes: Vec<_> = OpcodeData::serialize(&val);
+        let bytes: Vec<_> = OpcodeData::<i64, NumberTooLong>::serialize(&val)?;
+        self.add_data(&bytes)
+    }
+
+    #[cfg(test)]
+    pub fn add_i64_min(&mut self) -> ScriptBuilderResult<&mut Self> {
+        let val = i64::MIN;
+        // Pushes that would cause the script to exceed the largest allowed
+        // script size would result in a non-canonical script.
+        if self.script.len() + 1 > MAX_SCRIPTS_SIZE {
+            return Err(ScriptBuilderError::IntegerRejected(val));
+        }
+
+        // Fast path for small integers and Op1Negate.
+        if val == 0 {
+            self.script.push(Op0);
+            return Ok(self);
+        }
+        if val == -1 || (1..=16).contains(&val) {
+            self.script.push(((Op1 as i64 - 1) + val) as u8);
+            return Ok(self);
+        }
+
+        let bytes: Vec<_> = OpcodeData::<i64, std::convert::Infallible>::serialize(&val).expect("infallible");
         self.add_data(&bytes)
     }
 
@@ -360,11 +387,6 @@ mod tests {
                 val: 9223372036854775807,
                 expected: vec![OpData8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F],
             },
-            Test {
-                name: "push -9223372036854775808",
-                val: -9223372036854775808,
-                expected: vec![OpData9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x80],
-            },
         ];
 
         for test in tests {
@@ -372,6 +394,15 @@ mod tests {
             let result = builder.add_i64(test.val).expect("the script is canonical").script();
             assert_eq!(result, test.expected, "{} wrong result", test.name);
         }
+
+        // special case that used in bitcoind test
+        let mut builder = ScriptBuilder::new();
+        let result = builder.add_i64_min().expect("the script is canonical").script();
+        assert_eq!(
+            result,
+            vec![OpData9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x80],
+            "push -9223372036854775808 wrong result"
+        );
     }
 
     /// Tests that pushing data to a script via the ScriptBuilder API works as expected and conforms to BIP0062.

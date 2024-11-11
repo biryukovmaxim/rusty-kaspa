@@ -1,6 +1,7 @@
 #[macro_use]
 mod macros;
 
+use crate::data_stack::NumberTooLong;
 use crate::{
     data_stack::{DataStack, Kip10I64, OpcodeData},
     ScriptSource, SpkEncoding, TxScriptEngine, TxScriptError, LOCK_TIME_THRESHOLD, MAX_TX_IN_SEQUENCE_NUM, NO_COST_OPCODE,
@@ -212,7 +213,7 @@ fn push_number<T: VerifiableTransaction, Reused: SigHashReusedValues>(
     number: i64,
     vm: &mut TxScriptEngine<T, Reused>,
 ) -> OpCodeResult {
-    vm.dstack.push_item(number);
+    vm.dstack.push_item::<_, NumberTooLong>(number)?;
     Ok(())
 }
 
@@ -222,15 +223,15 @@ fn push_number<T: VerifiableTransaction, Reused: SigHashReusedValues>(
 macro_rules! numeric_op {
     ($vm: expr, $pattern: pat, $count: expr, $block: expr) => {
         if $vm.kip10_enabled {
-            let $pattern: [Kip10I64; $count] = $vm.dstack.pop_items()?;
+            let $pattern: [Kip10I64; $count] = $vm.dstack.pop_items::<$count, _, NumberTooLong>()?;
             let r = $block;
-            $vm.dstack.push_item(r);
+            $vm.dstack.push_item::<_, NumberTooLong>(r)?;
             Ok(())
         } else {
-            let $pattern: [i64; $count] = $vm.dstack.pop_items()?;
+            let $pattern: [i64; $count] = $vm.dstack.pop_items::<$count, _, NumberTooLong>()?;
             #[allow(clippy::useless_conversion)]
             let r = $block;
-            $vm.dstack.push_item(r);
+            $vm.dstack.push_item::<_, NumberTooLong>(r)?;
             Ok(())
         }
     };
@@ -543,7 +544,7 @@ opcode_list! {
     opcode OpSize<0x82, 1>(self, vm) {
         match vm.dstack.last() {
             Some(last) => {
-                vm.dstack.push_item(i64::try_from(last.len()).map_err(|e| TxScriptError::NumberTooBig(e.to_string()))?);
+                vm.dstack.push_item::<_, NumberTooLong>(i64::try_from(last.len()).map_err(|e| TxScriptError::NumberTooBig(e.to_string()))?)?;
                 Ok(())
             },
             None => Err(TxScriptError::InvalidStackOperation(1, 0))
@@ -648,7 +649,7 @@ opcode_list! {
                 false => Err(TxScriptError::VerifyError)
             }
         } else {
-            let [a,b]: [i64; 2] = vm.dstack.pop_items()?;
+            let [a,b]: [i64; 2] = vm.dstack.pop_items::<2, _, NumberTooLong>()?;
             match a == b {
                 true => Ok(()),
                 false => Err(TxScriptError::VerifyError)
@@ -721,7 +722,7 @@ opcode_list! {
                 let hash_type = SigHashType::from_u8(typ).map_err(|e| TxScriptError::InvalidSigHashType(typ))?;
                 match vm.check_ecdsa_signature(hash_type, key.as_slice(), sig.as_slice()) {
                     Ok(valid) => {
-                        vm.dstack.push_item(valid);
+                        vm.dstack.push_item(valid)?;
                         Ok(())
                     },
                     Err(e) => {
@@ -730,7 +731,7 @@ opcode_list! {
                 }
             }
             None => {
-                vm.dstack.push_item(false);
+                vm.dstack.push_item(false)?;
                 Ok(())
             }
         }
@@ -744,7 +745,7 @@ opcode_list! {
                 let hash_type = SigHashType::from_u8(typ).map_err(|e| TxScriptError::InvalidSigHashType(typ))?;
                 match vm.check_schnorr_signature(hash_type, key.as_slice(), sig.as_slice()) {
                     Ok(valid) => {
-                        vm.dstack.push_item(valid);
+                        vm.dstack.push_item(valid)?;
                         Ok(())
                     },
                     Err(e) => {
@@ -753,7 +754,7 @@ opcode_list! {
                 }
             }
             None => {
-                vm.dstack.push_item(false);
+                vm.dstack.push_item(false)?;
                 Ok(())
             }
         }
@@ -3000,6 +3001,7 @@ mod test {
 
     mod kip10 {
         use super::*;
+        use crate::data_stack::NumberTooLong;
         use crate::{
             data_stack::{DataStack, OpcodeData},
             opcodes::{codes::*, push_number},
@@ -3097,7 +3099,7 @@ mod test {
                     assert!(matches!(op_input_idx.execute(&mut vm), Err(TxScriptError::InvalidOpcode(_))));
                 } else {
                     let mut expected = vm.dstack.clone();
-                    expected.push_item(current_idx as i64);
+                    expected.push_item::<_, NumberTooLong>(current_idx as i64).unwrap();
                     op_input_idx.execute(&mut vm).unwrap();
                     assert_eq!(vm.dstack, expected);
                     vm.dstack.clear();
@@ -3207,7 +3209,7 @@ mod test {
                             index: 0,
                             expected_result: ExpectedResult {
                                 expected_spk: None,
-                                expected_amount: Some(OpcodeData::<i64>::serialize(&1111)),
+                                expected_amount: Some(OpcodeData::<i64>::serialize(&1111).unwrap()),
                             },
                         },
                         TestCase::Successful {
@@ -3215,7 +3217,7 @@ mod test {
                             index: 1,
                             expected_result: ExpectedResult {
                                 expected_spk: None,
-                                expected_amount: Some(OpcodeData::<i64>::serialize(&2222)),
+                                expected_amount: Some(OpcodeData::<i64>::serialize(&2222).unwrap()),
                             },
                         },
                     ],
@@ -3245,7 +3247,7 @@ mod test {
                             index: 0,
                             expected_result: ExpectedResult {
                                 expected_spk: None,
-                                expected_amount: Some(OpcodeData::<i64>::serialize(&3333)),
+                                expected_amount: Some(OpcodeData::<i64>::serialize(&3333).unwrap()),
                             },
                         },
                         TestCase::Successful {
@@ -3253,7 +3255,7 @@ mod test {
                             index: 1,
                             expected_result: ExpectedResult {
                                 expected_spk: None,
-                                expected_amount: Some(OpcodeData::<i64>::serialize(&4444)),
+                                expected_amount: Some(OpcodeData::<i64>::serialize(&4444).unwrap()),
                             },
                         },
                     ],
@@ -3367,7 +3369,7 @@ mod test {
                         op_input_count.execute(&mut vm).unwrap();
                         assert_eq!(
                             vm.dstack,
-                            vec![<Vec<u8> as OpcodeData<i64>>::serialize(&(input_count as i64))],
+                            vec![<Vec<u8> as OpcodeData<i64>>::serialize(&(input_count as i64)).unwrap()],
                             "Input count mismatch for {} inputs",
                             input_count
                         );
@@ -3377,7 +3379,7 @@ mod test {
                         op_output_count.execute(&mut vm).unwrap();
                         assert_eq!(
                             vm.dstack,
-                            vec![<Vec<u8> as OpcodeData<i64>>::serialize(&(output_count as i64))],
+                            vec![<Vec<u8> as OpcodeData<i64>>::serialize(&(output_count as i64)).unwrap()],
                             "Output count mismatch for {} outputs",
                             output_count
                         );
