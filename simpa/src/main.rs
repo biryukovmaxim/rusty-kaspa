@@ -218,6 +218,9 @@ fn main_impl(mut args: Args) {
         let mut config = (*config).clone();
         config.process_genesis = false;
         let config = Arc::new(config);
+        // Disable RocksDB auto compaction to avoid background operations interfering
+        // with simulation performance measurements
+        let conn_builder = conn_builder.disable_auto_compaction();
         let (lifetime, db) = match (args.rocksdb_stats, args.rocksdb_stats_period_sec) {
             (true, Some(rocksdb_stats_period_sec)) => {
                 load_existing_db!(input_dir, conn_builder.enable_stats().with_stats_period(rocksdb_stats_period_sec))
