@@ -20,6 +20,7 @@ pub mod error;
 pub mod model;
 pub mod notify;
 pub mod wasm;
+pub mod verbosity;
 
 pub mod prelude {
     //! Re-exports of the most commonly used types and traits in this crate.
@@ -33,3 +34,4 @@ pub use convert::utxo::*;
 pub use error::*;
 pub use model::script_class::*;
 pub use model::*;
+pub use verbosity::*;

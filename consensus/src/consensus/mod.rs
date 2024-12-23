@@ -884,6 +884,24 @@ impl ConsensusApi for Consensus {
         })
     }
 
+    fn get_block_transactions(&self, hash: Hash, indices: &[usize]) -> ConsensusResult<Arc<Vec<Transaction>>> {
+        if match self.statuses_store.read().get(hash).unwrap_option() {
+            Some(status) => !status.has_block_body(),
+            None => true,
+        } {
+            return Err(ConsensusError::BlockNotFound(hash));
+        }
+
+        let transactions = self.block_transactions_store.get(hash).unwrap_option().ok_or(ConsensusError::BlockNotFound(hash))?;
+        if indices.len() > transactions.len() {
+            return Err(ConsensusError::TransactionQueryTooLarge(hash, transactions.len(), indices.len()));
+        };
+        
+        let selected_transactions = Arc::new(indices.iter().map(|i| transactions.get(i).unwrap_option().ok_or(ConsensusError::TransactionIndexOutOfBounds(hash, i, transactions.len()))?.clone()).collect());
+
+        Ok(selected_transactions)
+    }
+
     fn get_block_even_if_header_only(&self, hash: Hash) -> ConsensusResult<Block> {
         let Some(status) = self.statuses_store.read().get(hash).unwrap_option().filter(|&status| status.has_block_header()) else {
             return Err(ConsensusError::HeaderNotFound(hash));

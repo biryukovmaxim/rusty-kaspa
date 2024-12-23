@@ -1,9 +1,13 @@
 use kaspa_hashes::Hash;
 use serde::{Deserialize, Serialize};
 
-use crate::tx::TransactionId;
+use crate::tx::{TransactionId, TransactionIndexType};
 
-pub type AcceptanceData = Vec<MergesetBlockAcceptanceData>;
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AcceptanceData {
+    pub mergeset: Vec<MergesetBlockAcceptanceData>,
+    pub accepting_blue_score: u64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MergesetBlockAcceptanceData {
@@ -14,5 +18,5 @@ pub struct MergesetBlockAcceptanceData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceptedTxEntry {
     pub transaction_id: TransactionId,
-    pub index_within_block: u32,
+    pub index_within_block: TransactionIndexType,
 }

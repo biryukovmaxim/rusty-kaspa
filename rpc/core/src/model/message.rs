@@ -889,6 +889,14 @@ impl Deserializer for GetVirtualChainFromBlockRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GetVirtualChainFromBlockResponseV1 {
+    pub removed_chain_block_hashes: Vec<RpcHash>,
+    pub added_chain_block_hashes: Vec<RpcHash>,
+    pub added_accepteance_data: Option<Vec<RpcAcceptanceData>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GetVirtualChainFromBlockResponse {
     pub removed_chain_block_hashes: Vec<RpcHash>,
     pub added_chain_block_hashes: Vec<RpcHash>,

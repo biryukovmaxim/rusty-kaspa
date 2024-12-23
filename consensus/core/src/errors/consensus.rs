@@ -34,6 +34,12 @@ pub enum ConsensusError {
 
     #[error("{0}")]
     General(&'static str),
+
+    #[error("transaction at block {0} and index {1} is above the bound of {2}")]
+    TransactionOutOfBounds(Hash, usize, usize),
+
+    #[error("block {0} holds {1} transactions, but trying to retrieve {2} transactions")]
+    TransactionQueryTooLarge(Hash, usize, usize),
 }
 
 pub type ConsensusResult<T> = std::result::Result<T, ConsensusError>;

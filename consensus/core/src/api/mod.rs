@@ -19,7 +19,7 @@ use crate::{
     header::Header,
     pruning::{PruningPointProof, PruningPointTrustedData, PruningPointsList, PruningProofMetadata},
     trusted::{ExternalGhostdagData, TrustedBlock},
-    tx::{MutableTransaction, Transaction, TransactionOutpoint, UtxoEntry},
+    tx::{MutableTransaction, Transaction, TransactionId, TransactionOutpoint, UtxoEntry},
     BlockHashSet, BlueWorkType, ChainPath,
 };
 use kaspa_hashes::Hash;
@@ -272,6 +272,14 @@ pub trait ConsensusApi: Send + Sync {
     }
 
     fn get_block(&self, hash: Hash) -> ConsensusResult<Block> {
+        unimplemented!()
+    }
+
+    fn get_block_transactions(&self, hash: Hash, indices: &[usize]) -> ConsensusResult<Arc<Vec<Transaction>>> {
+        unimplemented!()
+    }
+
+    fn get_accepted_transactions(&self, accepting_chain_block: Hash, transaction_ids: Vec<TransactionId>) -> ConsensusResult<Arc<Vec<Transaction>>> {
         unimplemented!()
     }
 

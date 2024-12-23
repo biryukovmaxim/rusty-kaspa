@@ -10,8 +10,14 @@ use workflow_serializer::prelude::*;
 
 use crate::prelude::{RpcHash, RpcScriptClass, RpcSubnetworkId};
 
+use super::RpcAddress;
+
 /// Represents the ID of a Kaspa transaction
 pub type RpcTransactionId = TransactionId;
+
+pub type RpcTransactionIndexType = TransactionIndexType;
+pub type RpcTransactionVersion = u16;
+pub type RpcTransactionPayload = Vec<u8>;
 
 pub type RpcScriptVec = ScriptVec;
 pub type RpcScriptPublicKey = ScriptPublicKey;
@@ -389,6 +395,28 @@ impl Deserializer for RpcTransactionVerboseData {
 
         Ok(Self { transaction_id, hash, compute_mass, block_hash, block_time })
     }
+}
+
+/// structs to define a compact transaction format, 
+/// This should hold enough data for preliminary analysis to determin if a tx is of interest to a potential listener
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcCompactTransactionHeader {
+    pub version: Option<RpcTransactionVersion>,
+    pub subnetwork_id: Option<RpcSubnetworkId>,
+    pub mass: Option<u64>,
+    #[serde(with = "hex::serde")]
+    pub payload: Option<RpcTransactionPayload>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcCompactTransaction {
+    pub compact_header: Option<RpcCompactTransactionHeader>,
+    pub input_addresses: Option<Vec<RpcAddress>>,
+    pub input_amounts: Option<Vec<u64>>,
+    pub output_addresses: Option<Vec<RpcAddress>>,
+    pub output_amounts: Option<Vec<u64>>,
 }
 
 /// Represents accepted transaction ids

@@ -974,3 +974,138 @@ message GetCurrentBlockColorResponseMessage {
 
   RPCError error = 1000;
 }
+
+// ### messages for vspcn v2 ###
+message RpcAcceptanceData {
+  string acceptingBlueScore = 1;
+  repeated RpcMergesetBlockAcceptanceData mergesetBlockAcceptanceData = 2;
+}
+
+message RpcMergesetBlockAcceptanceData {
+  string mergedBlockHash = 1;
+  repeated RpcAcceptedTxEntry acceptedTxEntry = 2;
+}
+
+message RpcAcceptedTxEntry {
+  string transactionId = 1;
+  uint32 indexWithinBlock = 2;
+  RpcCompactTransaction compactTransaction= 3;
+  RpcTransaction rawTransaction = 4;
+}
+
+message RpcAcceptedTxEntryVerbosity {
+  RpcCompactTransactionVerbosity compactTransactionVerbosity = 1;
+  bool includeRawTransaction = 2;
+  bool includeRawTransactionVerboseData = 3;
+}
+
+message RpcCompactTransaction {
+  string transactionHash = 1;
+  uint32 version = 2;
+  string subnetworkId = 3;
+  uint64 mass = 4;
+  uint64 fee = 5;
+  string payload = 6;
+  repeated string inputAddresses = 7; 
+  repeated uint64 inputAmounts = 8; 
+  repeated string outputAddresses = 9;
+  repeated uint64 ouputAmounts = 10;
+}
+
+message RpcCompactTransactionVerbosity {
+  bool includeTransactionHash = 1;
+  bool includeVersion = 2;
+  bool includeSubnetworkId = 3;
+  bool includeMass = 4;
+  bool includeFee = 5;
+  bool includePayload = 6;
+  bool includeInputAddresses = 7; 
+  bool includeInputAmounts = 8; 
+  bool includeOutputAddresses = 9;
+  bool includeOuputAmounts = 10;
+}
+
+/// GetVirtualChainFromBlockV2RequestMessage requests the virtual selected
+/// parent chain from some startHash to this kaspad's current virtual
+/// Note:
+///     this call batches the response to:
+///         a. the network's `mergeset size limit * 10` amount of added chain blocks, if `includeAddedTransactionData = false`
+///         b. or `mergeset size limit * 10` amount of merged blocks, if `includeAddedTransactionData = true`
+///         c. it does not batch the removed chain blocks, only the added ones.
+message GetVirtualChainFromBlockV2RequestMessage{
+  string startHash = 1;
+  bool includeAddedAcceptanceData = 2; // if false will only retrive info on added chain blocks 
+  bool includeAddedTransactionData = 3; // if false will only display changes of merged blocks (not the transactions)
+  RpcAcceptedTxEntryVerbosity addedAcceptedTxEntryVerbosity = 4;  // holds switches for the verbosity of the accepted txs.
+}
+
+message GetVirtualChainFromBlockV2ResponseMessage{
+  // The chain blocks that were removed, in high-to-low order
+  repeated string removedChainBlockHashes = 1;
+
+  // The chain blocks that were added, in low-to-high order
+  repeated string addedChainBlockHashes = 2;
+
+  // The mergeset data accepted by each block in addedChainBlockHashes.
+  // Will be filled only if `addedAcceptanceData = true` in the request.
+  repeated RpcAcceptanceData addedAcceptanceData = 3;
+
+  RPCError error = 1000;
+}
+
+// NotifyVirtualChainChangedRequestMessage registers this connection for virtualChainChanged notifications.
+//
+// See: VirtualChainChangedNotificationMessage
+message NotifyVirtualChainChangedV2RequestMessage{
+  bool includeAddedAcceptanceData = 2; // if false will only retrive info on added chain blocks 
+  bool includeAddedTransactionData = 3; // if false will only display changes of merged blocks (not the transactions)
+  RpcAcceptedTxEntryVerbosity addedAcceptedTxEntryVerbosity = 4;  // holds switches for the verbosity of the accepted txs.
+
+  RpcNotifyCommand command = 101;
+}
+
+message NotifyVirtualChainChangedV2ResponseMessage{
+  RPCError error = 1000;
+}
+
+// VirtualChainChangedNotificationMessage is sent whenever the DAG's selected parent
+// chain had changed.
+//
+// See: NotifyVirtualChainChangedRequestMessage
+message VirtualChainChangedV2NotificationMessage{
+  // The chain blocks that were removed, in high-to-low order
+  repeated string removedChainBlockHashes = 1;
+
+  // The chain blocks that were added, in low-to-high order
+  repeated string addedChainBlockHashes = 2;
+
+  // The mergeset data accepted by each block in addedChainBlockHashes.
+  // Will be filled only if `addedAcceptanceData = true` in the request.
+  repeated RpcAcceptanceData addedAcceptanceData = 3;
+}
+
+// ### messages for new GetTransaction endpoint ###
+
+message TransactionAcceptanceLocator {
+  repeated string transactionIds = 1;
+  string acceptingChainBlock = 2;
+}
+
+message TransactionInclusionLocator {
+  string includingBlockHash = 1;
+  repeated uint32 indicesWithinBlock = 2;
+}
+
+message GetTransactionsRequestMessage {
+  oneof transactionLocator {
+    TransactionAcceptanceLocator byAcceptance = 1;
+    TransactionInclusionLocator byInclusition = 2;
+  }
+  bool includeVerboseData = 2;
+}
+
+message GetTransactionsResponseMessage {
+  repeated RpcTransaction transaction = 1;
+
+  RPCError error = 1000;
+}

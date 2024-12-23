@@ -1,12 +1,7 @@
 use async_trait::async_trait;
 use kaspa_addresses::Address;
 use kaspa_consensus_core::{
-    block::Block,
-    config::Config,
-    hashing::tx::hash,
-    header::Header,
-    tx::{MutableTransaction, Transaction, TransactionId, TransactionInput, TransactionOutput},
-    ChainPath,
+    acceptance_data::{self, AcceptedTxEntry}, block::Block, config::Config, hashing::tx::hash, header::Header, tx::{MutableTransaction, Transaction, TransactionId, TransactionInput, TransactionOutput}, ChainPath
 };
 use kaspa_consensus_notify::notification::{self as consensus_notify, Notification as ConsensusNotification};
 use kaspa_consensusmanager::{ConsensusManager, ConsensusProxy};
@@ -14,12 +9,12 @@ use kaspa_math::Uint256;
 use kaspa_mining::model::{owner_txs::OwnerTransactions, TransactionIdSet};
 use kaspa_notify::converter::Converter;
 use kaspa_rpc_core::{
-    BlockAddedNotification, Notification, RpcAcceptedTransactionIds, RpcBlock, RpcBlockVerboseData, RpcHash, RpcMempoolEntry,
-    RpcMempoolEntryByAddress, RpcResult, RpcTransaction, RpcTransactionInput, RpcTransactionOutput, RpcTransactionOutputVerboseData,
-    RpcTransactionVerboseData,
+    BlockAddedNotification, Notification, RpcAcceptanceData, RpcAcceptedTransactionIds, RpcBlock, RpcBlockVerboseData, RpcHash, RpcMempoolEntry, RpcMempoolEntryByAddress, RpcResult, RpcTransaction, RpcTransactionInput, RpcTransactionOutput, RpcTransactionOutputVerboseData, RpcTransactionVerboseData
 };
 use kaspa_txscript::{extract_script_pub_key_address, script_class::ScriptClass};
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
+
+use super::verbosity::RpcCompactTransactionVerbosity;
 
 /// Conversion of consensus_core to rpc_core structures
 pub struct ConsensusConverter {
@@ -156,6 +151,33 @@ impl ConsensusConverter {
         let verbose_data =
             address.map(|address| RpcTransactionOutputVerboseData { script_public_key_type, script_public_key_address: address });
         RpcTransactionOutput { value: output.value, script_public_key: output.script_public_key.clone(), verbose_data }
+    }
+
+    fn get_accepted_transaction(&self, accepted_tx_entry: AcceptedTxEntry, compact_tx_verbosity: Option<RpcCompactTransactionVerbosity>, include_raw_transactions: Option<RpcTransactionVerbosity>) {
+
+    } 
+
+    pub async fn get_virtual_chain_accepted_transaction_entries(
+        &self,
+        consensus: &ConsensusProxy,
+        chain_path: &ChainPath,
+        merged_blocks_limit: Option<usize>,
+    ) -> RpcResult<Vec<RpcAcceptanceData>> {
+        let acceptance_data = consensus.async_get_blocks_acceptance_data(chain_path.added.clone(), merged_blocks_limit).await.unwrap();
+        acceptance_data.iter().map(|ad| ad.mergeset.iter().map(RpcAcceptanceData::from)).collect()
+        Ok(RpcAcceptanceData {
+            accepting_chain_block: chain_path.accepting.clone(),
+            accepting_blue_score: consensus.async_get_block_blue_score(&chain_path.accepting).await.unwrap(),
+            mergeset_block_acceptance_data: chain_path
+                .added
+                .iter()
+                .zip(acceptance_data.iter())
+                .map(|(hash, block_data)| RpcMergesetBlockAcceptanceData {
+                    merged_block_hash: hash.to_owned(),
+                    accepted_transaction_entries: block_data.iter().map(|x| x.into()).collect(),
+                })
+                .collect(),
+        })
     }
 
     pub async fn get_virtual_chain_accepted_transaction_ids(
