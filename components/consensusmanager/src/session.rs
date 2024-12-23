@@ -358,8 +358,8 @@ impl ConsensusSessionOwned {
         self.clone().spawn_blocking(move |c| c.get_block(hash)).await
     }
 
-    pub async fn async_get_block_transactions(&self, hash: Hash, indices: &[usize]) -> ConsensusResult<Arc<Vec<Transaction>>> {
-        self.clone().spawn_blocking(move |c| c.get_block_transactions(hash, indices)).await
+    pub async fn async_get_block_transactions(&self, hash: Hash, indices: Box<[usize]>) -> ConsensusResult<Arc<Vec<Transaction>>> {
+        self.clone().spawn_blocking(move |c| c.get_block_transactions(hash, indices.as_ref())).await
     }
 
     pub async fn async_get_block_even_if_header_only(&self, hash: Hash) -> ConsensusResult<Block> {

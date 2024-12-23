@@ -84,7 +84,7 @@ impl Deserializer for RpcUtxoEntry {
 }
 
 /// Represents a Kaspa transaction outpoint
-#[derive(Eq, Hash, PartialEq, Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Eq, Hash, PartialEq, Debug, Copy, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcTransactionOutpoint {
     #[serde(with = "serde_bytes_fixed_ref")]
@@ -137,7 +137,7 @@ impl Deserializer for RpcTransactionOutpoint {
 }
 
 /// Represents a Kaspa transaction input
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcTransactionInput {
     pub previous_outpoint: RpcTransactionOutpoint,
@@ -205,7 +205,7 @@ impl Deserializer for RpcTransactionInput {
 }
 
 /// Represent Kaspa transaction input verbose data
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcTransactionInputVerboseData {}
 
@@ -224,7 +224,7 @@ impl Deserializer for RpcTransactionInputVerboseData {
 }
 
 /// Represents a Kaspad transaction output
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcTransactionOutput {
     pub value: u64,
@@ -267,7 +267,7 @@ impl Deserializer for RpcTransactionOutput {
 }
 
 /// Represent Kaspa transaction output verbose data
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcTransactionOutputVerboseData {
     pub script_public_key_type: RpcScriptClass,
@@ -295,7 +295,7 @@ impl Deserializer for RpcTransactionOutputVerboseData {
 }
 
 /// Represents a Kaspa transaction
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcTransaction {
     pub version: u16,
@@ -361,7 +361,7 @@ impl Deserializer for RpcTransaction {
 }
 
 /// Represent Kaspa transaction verbose data
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcTransactionVerboseData {
     pub transaction_id: RpcTransactionId,
@@ -405,7 +405,7 @@ pub struct RpcCompactTransactionHeader {
     pub version: Option<RpcTransactionVersion>,
     pub subnetwork_id: Option<RpcSubnetworkId>,
     pub mass: Option<u64>,
-    #[serde(with = "hex::serde")]
+    #[serde(with = "kaspa_utils::serde_bytes_optional")]
     pub payload: Option<RpcTransactionPayload>,
 }
 

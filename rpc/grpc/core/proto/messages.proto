@@ -65,9 +65,8 @@ message KaspadRequest {
     GetFeeEstimateRequestMessage getFeeEstimateRequest = 1106;
     GetFeeEstimateExperimentalRequestMessage getFeeEstimateExperimentalRequest = 1108;
     GetCurrentBlockColorRequestMessage getCurrentBlockColorRequest = 1110;
-    GetVirtualChainFromBlockV2RequestMessage getVirtualChainFromBlockRequest = 1112;
-    NotifyVirtualChainChangedV2RequestMessage notifyVirtualChainChangedRequest = 1114;
-    
+    GetVirtualChainFromBlockV2RequestMessage getVirtualChainFromBlockV2Request = 1112;
+    NotifyVirtualChainChangedV2RequestMessage notifyVirtualChainChangedV2Request = 1114;
   }
 }
 
@@ -133,7 +132,8 @@ message KaspadResponse {
     GetFeeEstimateResponseMessage getFeeEstimateResponse = 1107;
     GetFeeEstimateExperimentalResponseMessage getFeeEstimateExperimentalResponse = 1109;
     GetCurrentBlockColorResponseMessage getCurrentBlockColorResponse = 1111;
-    GetVirtualChainFromBlockV2ResponseMessage getVirtualChainFromBlockResponse  = 1113;
+    GetVirtualChainFromBlockV2ResponseMessage getVirtualChainFromBlockV2Response  = 1113;
+    VirtualChainChangedV2NotificationMessage virtualChainChangedV2Notification = 1115;
   }
 }
 

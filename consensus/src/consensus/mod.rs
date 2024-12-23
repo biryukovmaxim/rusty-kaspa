@@ -896,8 +896,13 @@ impl ConsensusApi for Consensus {
         if indices.len() > transactions.len() {
             return Err(ConsensusError::TransactionQueryTooLarge(hash, transactions.len(), indices.len()));
         };
-        
-        let selected_transactions = Arc::new(indices.iter().map(|i| transactions.get(i).unwrap_option().ok_or(ConsensusError::TransactionIndexOutOfBounds(hash, i, transactions.len()))?.clone()).collect());
+
+        let selected_transactions = Arc::new(
+            indices
+                .into_iter()
+                .map(|i| transactions.get(*i).ok_or(ConsensusError::TransactionOutOfBounds(hash, *i, transactions.len())).cloned())
+                .collect::<ConsensusResult<Vec<_>>>()?,
+        );
 
         Ok(selected_transactions)
     }
@@ -968,7 +973,7 @@ impl ConsensusApi for Consensus {
             .copied()
             .map_while(|hash| {
                 let entry = self.acceptance_data_store.get(hash).unwrap_option().ok_or(ConsensusError::MissingData(hash));
-                num_of_merged_blocks += entry.as_ref().map_or(0, |entry| entry.len());
+                num_of_merged_blocks += entry.as_ref().map_or(0, |entry| entry.mergeset.len());
                 if num_of_merged_blocks > merged_blocks_limit {
                     None
                 } else {

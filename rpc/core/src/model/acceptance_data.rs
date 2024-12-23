@@ -1,3 +1,6 @@
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
+use crate::RpcCompactTransaction;
 use super::{RpcAddress, RpcHash, RpcSubnetworkId, RpcTransaction, RpcTransactionId, RpcTransactionIndexType, RpcTransactionPayload};
 
 
@@ -6,7 +9,7 @@ use super::{RpcAddress, RpcHash, RpcSubnetworkId, RpcTransaction, RpcTransaction
 pub struct RpcAcceptedTxEntry {
     pub transaction_id: RpcTransactionId,
     pub index_within_block: RpcTransactionIndexType,
-    pub compact_transaction: Option<RpcAcceptedTxEntryVerbsoseData>,
+    pub compact_transaction: Option<RpcCompactTransaction>,
     pub raw_transaction: Option<RpcTransaction>,
 }
 

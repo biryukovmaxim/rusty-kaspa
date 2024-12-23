@@ -1072,7 +1072,7 @@ message NotifyVirtualChainChangedV2ResponseMessage{
 // chain had changed.
 //
 // See: NotifyVirtualChainChangedRequestMessage
-message VirtualChainChangedV2NotificationMessage{
+message VirtualChainChangedV2NotificationMessage {
   // The chain blocks that were removed, in high-to-low order
   repeated string removedChainBlockHashes = 1;
 
@@ -1101,7 +1101,7 @@ message GetTransactionsRequestMessage {
     TransactionAcceptanceLocator byAcceptance = 1;
     TransactionInclusionLocator byInclusition = 2;
   }
-  bool includeVerboseData = 2;
+  bool includeVerboseData = 3;
 }
 
 message GetTransactionsResponseMessage {

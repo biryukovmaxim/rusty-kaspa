@@ -1,3 +1,6 @@
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
+use crate::{RpcHash, RpcTransaction};
 use super::tx::RpcCompactTransactionHeaderVerbosity;
 
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]

@@ -1,5 +1,5 @@
 use kaspa_consensus_core::acceptance_data::{AcceptanceData, AcceptedTxEntry, MergesetBlockAcceptanceData};
-
+use kaspa_hashes::Hash;
 use crate::{RpcAcceptanceData, RpcAcceptedTxEntry, RpcCompactTransaction, RpcMergesetBlockAcceptanceData, RpcTransaction};
 
 impl From<&AcceptedTxEntry> for RpcAcceptedTxEntry {
@@ -17,7 +17,7 @@ impl From<&MergesetBlockAcceptanceData> for RpcMergesetBlockAcceptanceData {
     fn from(item: &MergesetBlockAcceptanceData) -> Self {
         Self {
             merged_block_hash: item.block_hash.clone(),
-            accepted_transaction_entries: item.accepted_transaction_entry.iter().map(RpcAcceptedTxEntry::from).collect(),
+            accepted_transaction_entries: Some(item.accepted_transactions.iter().map(RpcAcceptedTxEntry::from).collect()), // todo possibly should be none in some cases
         }
     }
 }

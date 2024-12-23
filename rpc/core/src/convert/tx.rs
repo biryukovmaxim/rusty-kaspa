@@ -1,20 +1,22 @@
 //! Conversion of Transaction related types
 
-use crate::{RpcError, RpcResult, RpcTransaction, RpcTransactionInput, RpcTransactionOutput};
+use crate::{RpcAcceptedTxEntry, RpcError, RpcResult, RpcTransaction, RpcTransactionInput, RpcTransactionOutput};
 use kaspa_consensus_core::{acceptance_data::AcceptedTxEntry, tx::{Transaction, TransactionInput, TransactionOutput}};
 
 // ----------------------------------------------------------------------------
 // consensus_core to rpc_core
 // ----------------------------------------------------------------------------
 
-impl From<&AcceptedTxEntry> for RpcAcceptedTxEntry {
-    fn from(item: &AcceptedTxEntry) -> Self {
-        Self {
-            transaction_id: item.transaction_id.clone(),
-            index_within_block: item.index_within_block,
-        }
-    }
-}
+// impl From<&AcceptedTxEntry> for RpcAcceptedTxEntry {
+//     fn from(item: &AcceptedTxEntry) -> Self {
+//         Self {
+//             transaction_id: item.transaction_id.clone(),
+//             index_within_block: item.index_within_block,
+//             compact_transaction: None, // todo
+//             raw_transaction: None, // todo
+//         }
+//     }
+// }
 
 
 impl From<&Transaction> for RpcTransaction {

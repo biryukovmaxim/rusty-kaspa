@@ -431,13 +431,15 @@ impl VirtualStateProcessor {
                     let header = self.headers_store.get_header(current).unwrap();
                     let mergeset_data = self.ghostdag_store.get_data(current).unwrap();
                     let pov_daa_score = header.daa_score;
+                    let pov_blue_score = header.blue_score;
+
 
                     let selected_parent_multiset_hash = self.utxo_multisets_store.get(selected_parent).unwrap();
                     let selected_parent_utxo_view = (&stores.utxo_set).compose(&*diff);
 
                     let mut ctx = UtxoProcessingContext::new(mergeset_data.into(), selected_parent_multiset_hash);
 
-                    self.calculate_utxo_state(&mut ctx, &selected_parent_utxo_view, pov_daa_score);
+                    self.calculate_utxo_state(&mut ctx, &selected_parent_utxo_view, pov_daa_score, pov_blue_score);
                     let res = self.verify_expected_utxo_state(&mut ctx, &selected_parent_utxo_view, &header);
 
                     if let Err(rule_error) = res {
@@ -517,7 +519,7 @@ impl VirtualStateProcessor {
         let virtual_past_median_time = self.window_manager.calc_past_median_time(&virtual_ghostdag_data)?.0;
 
         // Calc virtual UTXO state relative to selected parent
-        self.calculate_utxo_state(&mut ctx, &selected_parent_utxo_view, virtual_daa_window.daa_score);
+        self.calculate_utxo_state(&mut ctx, &selected_parent_utxo_view, virtual_daa_window.daa_score, todo!("pov blue score"));
 
         // Update the accumulated diff
         accumulated_diff.with_diff_in_place(&ctx.mergeset_diff).unwrap();

@@ -120,7 +120,7 @@ impl VirtualStateProcessor {
                         .collect(),
                 });
             } else {
-                ctx.mergeset_acceptance_data.push(MergesetBlockAcceptanceData {
+                ctx.mergeset_acceptance_data.mergeset.push(MergesetBlockAcceptanceData {
                     block_hash: merged_block,
                     accepted_transactions: validated_transactions
                         .into_iter()

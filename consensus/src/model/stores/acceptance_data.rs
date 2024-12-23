@@ -29,8 +29,8 @@ struct AcceptanceDataEntry(Arc<AcceptanceData>);
 
 impl MemSizeEstimator for AcceptanceDataEntry {
     fn estimate_mem_bytes(&self) -> usize {
-        self.0.iter().map(|l| l.accepted_transactions.len()).sum::<usize>() * size_of::<AcceptedTxEntry>()
-            + self.0.len() * size_of::<MergesetBlockAcceptanceData>()
+        self.0.mergeset.iter().map(|l| l.accepted_transactions.len()).sum::<usize>() * size_of::<AcceptedTxEntry>()
+            + self.0.mergeset.len() * size_of::<MergesetBlockAcceptanceData>()
             + size_of::<AcceptanceData>()
             + size_of::<Self>()
     }
