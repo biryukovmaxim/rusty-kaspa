@@ -57,11 +57,11 @@ impl Service {
 
     // TODO: maybe create custom error type
     pub async fn calculate_fee_limits(&self, fee_policy: Option<kaspawalletd::FeePolicy>) -> Result<(f64, u64), Status> {
-        if let Some(fee_policy) = fee_policy {
-            self._calculate_fee_limits(fee_policy.fee_policy).await
-        } else {
-            todo!()
-        }
+        let fee_policy = match fee_policy {
+            Some(fee_policy) => fee_policy.fee_policy,
+            None => None,
+        };
+        self._calculate_fee_limits(fee_policy).await
     }
 
     // TODO: rename
