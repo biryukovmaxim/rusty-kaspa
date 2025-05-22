@@ -94,13 +94,13 @@ impl Service {
         let fees: (f64, u64) = if let Some(policy) = fee_policy {
             match policy {
                 FeePolicy::MaxFeeRate(max_fee_rate) => {
-                    let estimate = self.wallet.rpc_api().get_fee_estimate().await.unwrap();
                     if max_fee_rate < MIN_FEE_RATE {
                         return Err(Status::invalid_argument(format!(
                             "requested max fee rate {} is too low, minimum fee rate is {}",
                             max_fee_rate, MIN_FEE_RATE
                         )));
                     };
+                    let estimate = self.wallet.rpc_api().get_fee_estimate().await.unwrap();
                     let fee_rate = max_fee_rate.min(estimate.normal_buckets[0].feerate);
                     (fee_rate, u64::MAX)
                 }
