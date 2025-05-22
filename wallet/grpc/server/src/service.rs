@@ -7,6 +7,7 @@ use kaspa_wallet_core::{
     prelude::{AccountDescriptor, Address},
     wallet::Wallet,
 };
+use kaspa_wallet_grpc_core::kaspawalletd;
 use kaspa_wallet_grpc_core::kaspawalletd::fee_policy;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
@@ -55,40 +56,15 @@ impl Service {
     }
 
     // TODO: maybe create custom error type
-    pub async fn calculate_fee_limits(&self, fee_policy: Option<FeePolicy>) -> Result<(f64, u64), Status> {
-        const MIN_FEE_RATE: f64 = 1.0;
-        let mut fee_rate = MIN_FEE_RATE;
-        let mut max_fee = u64::MAX;
-        let Some(fee_policy) = fee_policy else { todo!() };
-        match fee_policy {
-            FeePolicy::MaxFeeRate(max_fee_rate) => {
-                let fee_estimate = self.wallet.rpc_api().get_fee_estimate().await.unwrap();
-                if max_fee_rate < MIN_FEE_RATE {
-                    return Err(Status::invalid_argument(format!(
-                        "requested max fee rate {} is too low, minimum fee rate is {}",
-                        max_fee_rate, MIN_FEE_RATE
-                    )));
-                };
-                fee_rate = max_fee_rate.min(fee_estimate.normal_buckets[0].feerate);
-            }
-            FeePolicy::ExactFeeRate(exact_fee_rate) => {
-                if exact_fee_rate < MIN_FEE_RATE {
-                    return Err(Status::invalid_argument(format!(
-                        "requested fee rate {} is too low, minimum fee rate is {}",
-                        exact_fee_rate, MIN_FEE_RATE
-                    )));
-                };
-                fee_rate = exact_fee_rate;
-            }
-            FeePolicy::MaxFee(max) => {
-                let estimate = self.wallet.rpc_api().get_fee_estimate().await.unwrap();
-                fee_rate = estimate.normal_buckets[0].feerate;
-                max_fee = max;
-            } // TODO: nil case
-        };
-        Ok((fee_rate, max_fee))
+    pub async fn calculate_fee_limits(&self, fee_policy: Option<kaspawalletd::FeePolicy>) -> Result<(f64, u64), Status> {
+        if let Some(fee_policy) = fee_policy {
+            self._calculate_fee_limits(fee_policy.fee_policy).await
+        } else {
+            todo!()
+        }
     }
 
+    // TODO: rename
     pub async fn _calculate_fee_limits(&self, fee_policy: Option<FeePolicy>) -> Result<(f64, u64), Status> {
         const MIN_FEE_RATE: f64 = 1.0;
         let fees: (f64, u64) = if let Some(policy) = fee_policy {

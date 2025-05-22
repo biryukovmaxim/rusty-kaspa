@@ -47,7 +47,7 @@ impl Kaspawalletd for Service {
     ) -> Result<Response<CreateUnsignedTransactionsResponse>, Status> {
         let request = request.into_inner();
         // TODO: check is wallet daemon synced
-        let (_fee_rate, _max_fee) = self.calculate_fee_limits(request.fee_policy.unwrap().fee_policy).await.unwrap();
+        let (_fee_rate, _max_fee) = self.calculate_fee_limits(request.fee_policy).await.unwrap();
         let unsigned_transactions: Vec<Vec<u8>> = vec![];
         Ok(Response::new(CreateUnsignedTransactionsResponse { unsigned_transactions }))
     }
