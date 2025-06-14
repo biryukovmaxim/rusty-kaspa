@@ -1,6 +1,12 @@
 use fee_policy::FeePolicy;
-use futures_util::{select, FutureExt};
+use futures_util::{select, FutureExt, TryStreamExt};
+use kaspa_addresses::Prefix;
 use kaspa_consensus_core::constants::SOMPI_PER_KASPA;
+use kaspa_consensus_core::tx::Transaction;
+use kaspa_wallet_core::api::NewAddressKind;
+use kaspa_wallet_core::prelude::{PaymentDestination, PaymentOutput, PaymentOutputs};
+use kaspa_wallet_core::tx::{Fees, Generator, GeneratorSettings};
+use kaspa_wallet_core::utxo::UtxoEntryReference;
 use kaspa_wallet_core::{
     api::WalletApi,
     events::Events,
@@ -129,5 +135,72 @@ impl Service {
     /// or transaction structure with this field.
     pub fn use_ecdsa(&self) -> bool {
         self.ecdsa
+    }
+
+    pub async fn unsigned_txs(
+        &self,
+        to: Address,
+        amount: u64,
+        use_existing_change_address: bool,
+        is_send_all: bool,
+        fee_rate: f64,
+        max_fee: u64,
+        from_addresses: Vec<Address>,
+    ) -> Result<Vec<Transaction>, Status> {
+        let current_network = self.wallet().network_id().map_err(|err| Status::internal(err.to_string()))?;
+        if to.prefix != Prefix::from(current_network) {
+            return Err(Status::invalid_argument(format!(
+                "decoded address is of wrong network. Expected {} but got {}",
+                Prefix::from(current_network),
+                to.prefix
+            )));
+        }
+
+        let account = self.wallet().account().map_err(|err| Status::internal(err.to_string()))?;
+        let addresses = account.account_addresses().map_err(|err| Status::internal(err.to_string()))?;
+        if let Some(non_existent_address) = from_addresses.iter().find(|from| addresses.iter().all(|address| &address != from)) {
+            return Err(Status::invalid_argument(format!("specified from address {non_existent_address} does not exists")));
+        }
+        let change_address = if !use_existing_change_address {
+            self.wallet()
+                .accounts_create_new_address(self.descriptor().account_id, NewAddressKind::Change)
+                .await
+                .map_err(|err| Status::internal(err.to_string()))?
+                .address
+        } else {
+            self.descriptor().change_address.ok_or(Status::internal("change address doesn't exist"))?.clone()
+        };
+        let utxos = account.clone().get_utxos(Some(addresses), None).await.map_err(|err| Status::internal(err.to_string()))?;
+        let output_amount = if is_send_all { utxos.iter().map(|utxo| utxo.amount).sum::<u64>() } else { amount };
+        let settings = GeneratorSettings::try_new_with_iterator(
+            current_network,
+            Box::new(utxos.into_iter().map(|utxo| UtxoEntryReference { utxo: Arc::new(utxo) })),
+            None,
+            change_address,
+            account.sig_op_count(),
+            account.minimum_signatures(),
+            PaymentDestination::PaymentOutputs(PaymentOutputs { outputs: vec![PaymentOutput { address: to, amount: output_amount }] }),
+            Some(fee_rate),
+            Fees::None, // todo does it work?
+            None,
+            None,
+        )
+        .map_err(|err| Status::internal(err.to_string()))?;
+
+        let generator = Generator::try_new(settings, None, None).map_err(|err| Status::internal(err.to_string()))?;
+
+        let mut stream = generator.stream();
+        let mut txs = vec![];
+        while let Some(transaction) = stream.try_next().await.map_err(|err| Status::internal(err.to_string()))? {
+            txs.push(transaction.transaction());
+        }
+        if generator.summary().aggregate_fees > max_fee {
+            return Err(Status::failed_precondition(format!(
+                "aggregate fees {} exceeds requested max {}",
+                generator.summary().aggregate_fees,
+                max_fee
+            )));
+        }
+        Ok(txs)
     }
 }

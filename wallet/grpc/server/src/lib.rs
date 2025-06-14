@@ -45,9 +45,18 @@ impl Kaspawalletd for Service {
         &self,
         request: Request<CreateUnsignedTransactionsRequest>,
     ) -> Result<Response<CreateUnsignedTransactionsResponse>, Status> {
-        let request = request.into_inner();
-        // TODO: check is wallet daemon synced
-        let (_fee_rate, _max_fee) = self.calculate_fee_limits(request.fee_policy).await.unwrap();
+        let CreateUnsignedTransactionsRequest { address, amount, from, use_existing_change_address, is_send_all, fee_policy } =
+            request.into_inner();
+        let to_address = Address::try_from(address).map_err(|err| Status::invalid_argument(err.to_string()))?;
+        let (fee_rate, max_fee) = self.calculate_fee_limits(fee_policy).await?;
+        let from_addresses = from
+            .iter()
+            .map(|a| Address::try_from(a.as_str()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| Status::invalid_argument(err.to_string()))?;
+        let _transactions =
+            self.unsigned_txs(to_address, amount, use_existing_change_address, is_send_all, fee_rate, max_fee, from_addresses).await?;
+        // todo serialize to proto
         let unsigned_transactions: Vec<Vec<u8>> = vec![];
         Ok(Response::new(CreateUnsignedTransactionsResponse { unsigned_transactions }))
     }
@@ -59,8 +68,12 @@ impl Kaspawalletd for Service {
     }
 
     async fn new_address(&self, _request: Request<NewAddressRequest>) -> Result<Response<NewAddressResponse>, Status> {
-        let address =
-            self.wallet().accounts_create_new_address(self.descriptor().account_id, NewAddressKind::Receive).await.unwrap().address;
+        let address = self
+            .wallet()
+            .accounts_create_new_address(self.descriptor().account_id, NewAddressKind::Receive)
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?
+            .address;
         let response = NewAddressResponse { address: address.to_string() };
         Ok(Response::new(response))
     }
