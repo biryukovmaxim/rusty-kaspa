@@ -1,5 +1,6 @@
 pub mod service;
 
+use kaspa_addresses::Version;
 use kaspa_wallet_core::api::WalletApi;
 use kaspa_wallet_core::{
     api::{AccountsGetUtxosRequest, AccountsSendRequest, NewAddressKind},
@@ -125,6 +126,16 @@ impl Kaspawalletd for Service {
     }
 
     async fn send(&self, _request: Request<SendRequest>) -> Result<Response<SendResponse>, Status> {
+        let acc = self.wallet().account().map_err(|err| Status::internal(err.to_string()))?;
+        if acc.minimum_signatures() != 1 {
+            return Err(Status::unimplemented("Only single signature wallets are supported"));
+        }
+        if acc.receive_address().map_err(|err| Status::internal(err.to_string()))?.version == Version::PubKeyECDSA {
+            return Err(Status::unimplemented("Ecdsa wallets are not supported yet"));
+        }
+
+        // todo call unsigned tx and sign it to be consistent
+
         let data = _request.get_ref();
         let fee_rate_estimate = self.wallet().fee_rate_estimate().await.unwrap();
         let fee_rate = data.fee_policy.and_then(|policy| match policy.fee_policy.unwrap() {
@@ -150,6 +161,7 @@ impl Kaspawalletd for Service {
             .await
             .map_err(|err| Status::new(tonic::Code::Internal, format!("Generator: {}", err)))?;
         let final_transaction = result.final_transaction_id.unwrap().to_string();
+        // todo return all transactions
         let response = SendResponse { tx_ids: vec![final_transaction], signed_transactions: vec![] };
         Ok(Response::new(response))
     }
@@ -164,6 +176,7 @@ impl Kaspawalletd for Service {
     }
 
     async fn bump_fee(&self, _request: Request<BumpFeeRequest>) -> Result<Response<BumpFeeResponse>, Status> {
-        todo!();
+        // wallet api doesnt support RBF, probably requires manual implementation
+        Err(Status::unimplemented("Bump fee is not implemented yet"))
     }
 }
