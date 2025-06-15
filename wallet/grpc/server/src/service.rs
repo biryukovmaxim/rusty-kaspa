@@ -62,7 +62,7 @@ impl Service {
     }
 
     pub async fn calculate_fee_limits(&self, fee_policy: Option<kaspawalletd::FeePolicy>) -> Result<(f64, u64), Status> {
-        let fee_policy = fee_policy.map(|fee_policy| fee_policy.fee_policy).flatten();
+        let fee_policy = fee_policy.and_then(|fee_policy| fee_policy.fee_policy);
         const MIN_FEE_RATE: f64 = 1.0;
         let fees: (f64, u64) = if let Some(policy) = fee_policy {
             match policy {
