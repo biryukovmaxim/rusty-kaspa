@@ -2,7 +2,7 @@ use fee_policy::FeePolicy;
 use futures_util::{select, FutureExt, TryStreamExt};
 use kaspa_addresses::Prefix;
 use kaspa_consensus_core::constants::SOMPI_PER_KASPA;
-use kaspa_consensus_core::tx::Transaction;
+use kaspa_rpc_core::RpcTransaction;
 use kaspa_wallet_core::api::NewAddressKind;
 use kaspa_wallet_core::prelude::{PaymentDestination, PaymentOutput, PaymentOutputs};
 use kaspa_wallet_core::tx::{Fees, Generator, GeneratorSettings};
@@ -61,17 +61,8 @@ impl Service {
         Service { wallet, shutdown_sender: Arc::new(Mutex::new(Some(shutdown_sender))), ecdsa }
     }
 
-    // TODO: maybe create custom error type
     pub async fn calculate_fee_limits(&self, fee_policy: Option<kaspawalletd::FeePolicy>) -> Result<(f64, u64), Status> {
-        let fee_policy = match fee_policy {
-            Some(fee_policy) => fee_policy.fee_policy,
-            None => None,
-        };
-        self._calculate_fee_limits(fee_policy).await
-    }
-
-    // TODO: rename
-    pub async fn _calculate_fee_limits(&self, fee_policy: Option<FeePolicy>) -> Result<(f64, u64), Status> {
+        let fee_policy = fee_policy.map(|fee_policy| fee_policy.fee_policy).flatten();
         const MIN_FEE_RATE: f64 = 1.0;
         let fees: (f64, u64) = if let Some(policy) = fee_policy {
             match policy {
@@ -146,7 +137,7 @@ impl Service {
         fee_rate: f64,
         max_fee: u64,
         from_addresses: Vec<Address>,
-    ) -> Result<Vec<Transaction>, Status> {
+    ) -> Result<Vec<RpcTransaction>, Status> {
         let current_network = self.wallet().network_id().map_err(|err| Status::internal(err.to_string()))?;
         if to.prefix != Prefix::from(current_network) {
             return Err(Status::invalid_argument(format!(
@@ -181,7 +172,7 @@ impl Service {
             account.minimum_signatures(),
             PaymentDestination::PaymentOutputs(PaymentOutputs { outputs: vec![PaymentOutput { address: to, amount: output_amount }] }),
             Some(fee_rate),
-            Fees::None, // todo does it work?
+            Fees::None,
             None,
             None,
         )
@@ -192,7 +183,7 @@ impl Service {
         let mut stream = generator.stream();
         let mut txs = vec![];
         while let Some(transaction) = stream.try_next().await.map_err(|err| Status::internal(err.to_string()))? {
-            txs.push(transaction.transaction());
+            txs.push(transaction.rpc_transaction());
         }
         if generator.summary().aggregate_fees > max_fee {
             return Err(Status::failed_precondition(format!(
