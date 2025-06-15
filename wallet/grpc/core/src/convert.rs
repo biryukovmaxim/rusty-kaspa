@@ -4,7 +4,7 @@ use crate::protoserialization::{PartiallySignedInput, PartiallySignedTransaction
 use kaspa_bip32::secp256k1::PublicKey;
 use kaspa_bip32::{DerivationPath, Error, ExtendedKey, ExtendedPublicKey};
 use kaspa_rpc_core::{
-    RpcScriptPublicKey, RpcScriptVec, RpcSubnetworkId, RpcTransaction, RpcTransactionInput, RpcTransactionOutpoint,
+    RpcScriptPublicKey, RpcScriptVec, RpcSubnetworkId, RpcTransaction, RpcTransactionId, RpcTransactionInput, RpcTransactionOutpoint,
     RpcTransactionOutput,
 };
 use kaspa_txscript::script_builder::ScriptBuilder;
@@ -236,10 +236,13 @@ impl TryFrom<protoserialization::ScriptPublicKey> for RpcScriptPublicKey {
 impl TryFrom<protoserialization::Outpoint> for RpcTransactionOutpoint {
     type Error = Status;
 
-    fn try_from(
-        _: protoserialization::Outpoint, /*protoserialization::Outpoint{ transaction_id, index }: protoserialization::Outpoint*/
-    ) -> Result<Self, Self::Error> {
-        todo!()
-        // Ok(RpcTransactionOutpoint { transaction_id: Default::default(), index: 0 })
+    fn try_from(protoserialization::Outpoint { transaction_id, index }: protoserialization::Outpoint) -> Result<Self, Self::Error> {
+        Ok(RpcTransactionOutpoint {
+            transaction_id: RpcTransactionId::try_from_slice(
+                transaction_id.ok_or(Status::invalid_argument("Outppoint is missing"))?.bytes.as_slice(),
+            )
+            .map_err(|err| Status::invalid_argument(err.to_string()))?,
+            index,
+        })
     }
 }
