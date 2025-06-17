@@ -1,13 +1,15 @@
 pub mod service;
 
 use kaspa_addresses::Version;
+use kaspa_consensus_core::tx::{SignableTransaction, Transaction, UtxoEntry};
 use kaspa_wallet_core::api::WalletApi;
+use kaspa_wallet_core::tx::{Signer, SignerT};
 use kaspa_wallet_core::{
     api::{AccountsGetUtxosRequest, AccountsSendRequest, NewAddressKind},
     prelude::Address,
     tx::{Fees, PaymentDestination, PaymentOutputs},
 };
-use kaspa_wallet_grpc_core::convert::deserialize_txs;
+use kaspa_wallet_grpc_core::convert::{deserialize_txs, extract_tx};
 use kaspa_wallet_grpc_core::kaspawalletd::{
     fee_policy::FeePolicy, kaspawalletd_server::Kaspawalletd, BroadcastRequest, BroadcastResponse, BumpFeeRequest, BumpFeeResponse,
     CreateUnsignedTransactionsRequest, CreateUnsignedTransactionsResponse, GetBalanceRequest, GetBalanceResponse,
@@ -58,7 +60,8 @@ impl Kaspawalletd for Service {
             .map_err(|err| Status::invalid_argument(err.to_string()))?;
         let transactions =
             self.unsigned_txs(to_address, amount, use_existing_change_address, is_send_all, fee_rate, max_fee, from_addresses).await?;
-        let unsigned_transactions = transactions.into_iter().map(|tx| PartiallySignedTransaction::from(tx).encode_to_vec()).collect();
+        let unsigned_transactions =
+            transactions.into_iter().map(|tx| PartiallySignedTransaction::from_unsigned(tx).encode_to_vec()).collect();
         Ok(Response::new(CreateUnsignedTransactionsResponse { unsigned_transactions }))
     }
 
@@ -166,8 +169,47 @@ impl Kaspawalletd for Service {
         Ok(Response::new(response))
     }
 
-    async fn sign(&self, _request: Request<SignRequest>) -> Result<Response<SignResponse>, Status> {
-        todo!();
+    async fn sign(&self, request: Request<SignRequest>) -> Result<Response<SignResponse>, Status> {
+        if self.use_ecdsa() {
+            return Err(Status::unimplemented("Ecdsa signing is not supported yet"));
+        }
+        let SignRequest { unsigned_transactions, password } = request.into_inner();
+        let account = self.wallet().account().map_err(|err| Status::internal(err.to_string()))?;
+        let txs = unsigned_transactions
+            .iter()
+            .map(|tx| extract_tx(tx.as_slice(), self.use_ecdsa()))
+            // todo convert directly to consensus::transaction
+            .map(|r| r
+                .and_then(|rtx| Transaction::try_from(rtx)
+                .map_err(|err| Status::internal(err.to_string()))))
+            .collect::<Result<Vec<_>, _>>()?;
+        let utxos = account.clone().get_utxos(None, None).await.map_err(|err| Status::internal(err.to_string()))?;
+        let signable_txs: Vec<SignableTransaction> = txs
+            .into_iter()
+            .map(|tx| {
+                let utxos = tx
+                    .inputs
+                    .iter()
+                    .map(|input| {
+                        utxos
+                            .iter()
+                            .find(|utxo| utxo.outpoint != input.previous_outpoint)
+                            .map(UtxoEntry::from)
+                            .ok_or(Status::invalid_argument(format!("Wallet does not have mature utxo for input {input:?}")))
+                    })
+                    .collect::<Result<_, Status>>()?;
+                Ok(SignableTransaction::with_entries(tx, utxos))
+            })
+            .collect::<Result<_, Status>>()?;
+        let addresses: Vec<_> = account.utxo_context().addresses().iter().map(|addr| addr.as_ref().clone()).collect();
+        let signer = Signer::new(
+            account.clone(),
+            account.prv_key_data(password.into()).await.map_err(|err| Status::internal(err.to_string()))?,
+            None,
+        );
+        let _signed_txs = signable_txs.into_iter().map(|tx| signer.try_sign(tx, addresses.as_slice()));
+        // todo fill all required fields, serialize and return
+        todo!()
     }
 
     async fn get_version(&self, _request: Request<GetVersionRequest>) -> Result<Response<GetVersionResponse>, Status> {
@@ -176,7 +218,7 @@ impl Kaspawalletd for Service {
     }
 
     async fn bump_fee(&self, _request: Request<BumpFeeRequest>) -> Result<Response<BumpFeeResponse>, Status> {
-        // wallet api doesnt support RBF, probably requires manual implementation
+        // wallet api doesnt support RBF, requires manual implementation
         Err(Status::unimplemented("Bump fee is not implemented yet"))
     }
 }

@@ -47,7 +47,7 @@ fn deserialize_domain_tx(tx: &[u8]) -> Result<RpcTransaction, Status> {
 ///
 /// # Returns
 /// * `Result<RpcTransaction, Status>` - Deserialized transaction or error status
-fn extract_tx(tx: &[u8], ecdsa: bool) -> Result<RpcTransaction, Status> {
+pub fn extract_tx(tx: &[u8], ecdsa: bool) -> Result<RpcTransaction, Status> {
     let tx = protoserialization::PartiallySignedTransaction::decode(tx).map_err(|err| Status::invalid_argument(err.to_string()))?;
     let tx_message = extract_tx_deserialized(tx, ecdsa).map_err(|err| Status::invalid_argument(err.to_string()))?;
     RpcTransaction::try_from(tx_message)
@@ -256,8 +256,8 @@ impl TryFrom<protoserialization::Outpoint> for RpcTransactionOutpoint {
     }
 }
 
-impl From<RpcTransaction> for protoserialization::PartiallySignedTransaction {
-    fn from(value: RpcTransaction) -> Self {
+impl protoserialization::PartiallySignedTransaction {
+    pub fn from_unsigned(value: RpcTransaction) -> Self {
         protoserialization::PartiallySignedTransaction {
             partially_signed_inputs: vec![],
             tx: Some(protoserialization::TransactionMessage::from(value)),
