@@ -8,6 +8,8 @@ use kaspa_utils::{
 use serde::{Deserialize, Serialize};
 use std::mem::size_of;
 
+pub mod flat_parents;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 
 pub struct CompressedParents(Vec<(u8, Vec<Hash>)>);
