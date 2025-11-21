@@ -50,7 +50,7 @@ impl FlatParents {
     pub fn iter_levels<'a>(&'a self) -> impl Iterator<Item = &'a [Hash]> + 'a {
         self.counts.iter().zip(self.offsets.windows(2)).flat_map(|(&count, window)| {
             let slice = &self.parents[window[0] as usize..window[1] as usize];
-            iter::repeat(slice).take(count as usize)
+            iter::repeat_n(slice, count as usize)
         })
     }
 
@@ -156,8 +156,8 @@ mod tests {
             assert_eq!(flat.expand(), expanded);
 
             // Check random level access matches
-            for level in 0..expanded.len() {
-                assert_eq!(flat.parents_of_level(level), &expanded[level][..]);
+            for (level, hashes) in expanded.iter().enumerate() {
+                assert_eq!(flat.parents_of_level(level), &hashes[..]);
                 // Simulate old access: old.expand()[level] but we already checked full expand
             }
         }

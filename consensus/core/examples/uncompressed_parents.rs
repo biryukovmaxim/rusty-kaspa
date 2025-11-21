@@ -1,5 +1,4 @@
-use borsh::{BorshDeserialize, BorshSerialize};
-use dhat;
+use borsh::BorshDeserialize;
 use kaspa_hashes::Hash;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::hint::black_box;
@@ -41,8 +40,8 @@ fn main() {
     let start = Instant::now();
 
     // Looped work: deserialize each + black_box the structure
-    for i in 0..1000 {
-        let uncompressed: Vec<Vec<Hash>> = Vec::<Vec<Hash>>::try_from_slice(&serialized_vec[i]).unwrap();
+    for serialized in &serialized_vec {
+        let uncompressed: Vec<Vec<Hash>> = Vec::<Vec<Hash>>::try_from_slice(serialized).unwrap();
         black_box(&uncompressed);
     }
 

@@ -1,5 +1,4 @@
-use borsh::{BorshDeserialize, BorshSerialize};
-use dhat;
+use borsh::BorshDeserialize;
 use kaspa_consensus_core::header::flat_parents::FlatParents;
 use kaspa_hashes::Hash;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
@@ -43,8 +42,8 @@ fn main() {
     let start = Instant::now();
 
     // Looped work: deserialize each + black_box the structure
-    for i in 0..1000 {
-        let flat: FlatParents = FlatParents::try_from_slice(&serialized_vec[i]).unwrap();
+    for serialized in &serialized_vec {
+        let flat: FlatParents = FlatParents::try_from_slice(serialized).unwrap();
         black_box(&flat);
     }
 
