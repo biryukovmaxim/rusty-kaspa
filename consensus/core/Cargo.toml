@@ -52,6 +52,7 @@ criterion.workspace = true
 bincode.workspace = true
 wasm-bindgen-test.workspace = true
 web-sys.workspace = true
+dhat.workspace = true
 
 [[bench]]
 name = "serde_benchmark"
