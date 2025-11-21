@@ -47,6 +47,7 @@ workflow-serializer.workspace = true
 workflow-wasm.workspace = true
 
 [dev-dependencies]
+rand =  { workspace = true, features = ["small_rng"] }
 criterion.workspace = true
 bincode.workspace = true
 wasm-bindgen-test.workspace = true
@@ -54,6 +55,10 @@ web-sys.workspace = true
 
 [[bench]]
 name = "serde_benchmark"
+harness = false
+
+[[bench]]
+name = "parents"
 harness = false
 
 [lints]
