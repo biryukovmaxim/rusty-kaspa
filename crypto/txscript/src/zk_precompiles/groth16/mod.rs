@@ -3,15 +3,9 @@ use ark_bn254::{Bn254, G1Projective};
 use ark_groth16::{Groth16, PreparedVerifyingKey, Proof};
 use ark_serialize::CanonicalDeserialize;
 
-
 pub use error::Groth16Error;
 
-use crate::{
-    data_stack::{DataStack, Stack},
-    zk_precompiles::{
-        ZkPrecompile, error::ZkIntegrityError,
-    },
-};
+use crate::{data_stack::Stack, zk_precompiles::ZkPrecompile};
 
 pub struct Groth16Precompile;
 impl ZkPrecompile for Groth16Precompile {

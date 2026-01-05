@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Groth16Error {
-     #[error("ARK R1CS error: {0}")]
+    #[error("ARK R1CS error: {0}")]
     ArkR1CS(#[from] ark_relations::r1cs::SynthesisError),
     #[error("Groth16 verification failed")]
     VerificationFailed,

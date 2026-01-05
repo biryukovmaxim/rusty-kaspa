@@ -1,15 +1,16 @@
 use crate::{
-    data_stack::{DataStack, Stack},
+    data_stack::Stack,
     zk_precompiles::{
-        ZkPrecompile, error::ZkIntegrityError, risc0::{ inner::Inner, receipt_claim::compute_assert_claim}
+        risc0::{inner::Inner, receipt_claim::compute_assert_claim},
+        ZkPrecompile,
     },
 };
 use kaspa_txscript_errors::TxScriptError;
 use risc0_zkp::core::digest::Digest;
-mod inner;
-mod receipt_claim;
-mod merkle;
 mod error;
+mod inner;
+mod merkle;
+mod receipt_claim;
 pub struct R0SuccinctPrecompile;
 pub use error::R0Error;
 impl ZkPrecompile for R0SuccinctPrecompile {

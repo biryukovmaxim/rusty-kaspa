@@ -14,13 +14,14 @@ pub enum ZkIntegrityError {
     Io(#[from] std::io::Error),
     #[error("Txscript error: {0}")]
     TxScript(#[from] TxScriptError),
+    #[allow(unused)] // todo
     #[error("Digest parsing error: {0:?}")]
     Digest(Vec<u8>),
+    #[allow(unused)] // todo
     #[error("Mekle proof verification failed")]
     Merkle,
     #[error("Unknown tag: {0}")]
     UnknownTag(u8),
-
 }
 
 impl From<VerificationError> for ZkIntegrityError {

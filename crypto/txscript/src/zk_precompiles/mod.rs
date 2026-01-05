@@ -1,19 +1,17 @@
-mod error;
-mod risc0;
-mod groth16;
 mod benchmarks;
+mod error;
+mod groth16;
+mod risc0;
 mod tags;
 use crate::{
-    data_stack::{DataStack, Stack},
-    zk_precompiles::{
-        error::ZkIntegrityError, groth16::Groth16Precompile, risc0::R0SuccinctPrecompile, tags::ZkTag
-    },
+    data_stack::Stack,
+    zk_precompiles::{error::ZkIntegrityError, groth16::Groth16Precompile, risc0::R0SuccinctPrecompile, tags::ZkTag},
 };
 use kaspa_txscript_errors::TxScriptError;
 
 trait ZkPrecompile {
     type Error: Into<ZkIntegrityError> + std::fmt::Display;
-    fn verify_zk(dstack: &mut Stack) -> Result<(),Self::Error>;
+    fn verify_zk(dstack: &mut Stack) -> Result<(), Self::Error>;
 }
 
 pub fn parse_tag(dstack: &mut Stack) -> Result<ZkTag, TxScriptError> {
