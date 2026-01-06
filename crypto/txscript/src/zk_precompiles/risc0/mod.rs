@@ -6,13 +6,14 @@ use crate::{
     },
 };
 use kaspa_txscript_errors::TxScriptError;
-use risc0_zkp::core::digest::Digest;
+pub use risc0_zkp::core::digest::Digest;
 mod error;
-mod inner;
-mod merkle;
-mod receipt_claim;
+pub mod inner;
+pub mod merkle;
+pub mod receipt_claim;
 pub struct R0SuccinctPrecompile;
 pub use error::R0Error;
+
 impl ZkPrecompile for R0SuccinctPrecompile {
     type Error = R0Error;
     fn verify_zk(dstack: &mut Stack) -> Result<(), Self::Error> {
