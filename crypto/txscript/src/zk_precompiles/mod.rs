@@ -2,7 +2,7 @@ mod benchmarks;
 mod error;
 mod groth16;
 pub mod risc0;
-mod tags;
+pub mod tags;
 use crate::{
     data_stack::Stack,
     zk_precompiles::{error::ZkIntegrityError, groth16::Groth16Precompile, risc0::R0SuccinctPrecompile, tags::ZkTag},
