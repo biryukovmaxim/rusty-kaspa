@@ -513,8 +513,11 @@ opcode_list! {
         if vm.flags.covenants_enabled{
             let b = vm.dstack.pop()?;
             let a = vm.dstack.pop()?;
+            println!("Cat, left: {}, right: {}", hex::encode(&a), hex::encode(&b));
+
             let mut r = a;
             r.extend_from_slice(&b);
+            println!("concatenated: {}", hex::encode(&r));
             vm.dstack.push(r)
         } else {
             Err(TxScriptError::OpcodeDisabled(format!("{self:?}")))
@@ -839,6 +842,7 @@ opcode_list! {
         let [last] = vm.dstack.pop_raw()?;
         //let hash = blake2b(last.as_slice());
         let hash = Params::new().hash_length(32).to_state().update(&last).finalize();
+        println!("hash {}", hex::encode(hash.as_bytes()));
         vm.dstack.push(hash.as_bytes().to_vec())
     }
 
@@ -1134,6 +1138,8 @@ opcode_list! {
                     let idx = i32_to_usize(idx)?;
                     let start = i32_to_usize(start)?;
                     let end = i32_to_usize(end)?;
+                    println!("OpTxInputScriptSigSubStr: idx={idx}, start={start}, end={end}");
+
                     let input = tx.inputs().get(idx).ok_or_else(|| TxScriptError::InvalidInputIndex(idx as i32, tx.inputs().len()))?;
                     let substr = substring(&input.signature_script, start, end)?;
                     push_data(substr, vm)

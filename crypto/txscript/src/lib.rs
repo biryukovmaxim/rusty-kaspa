@@ -634,7 +634,8 @@ impl<'a, T: VerifiableTransaction, Reused: SigHashReusedValues> TxScriptEngine<'
     }
 }
 
-trait SpkEncoding {
+// todo remove pub modifer
+pub trait SpkEncoding {
     fn to_bytes(&self) -> Vec<u8>;
 }
 
