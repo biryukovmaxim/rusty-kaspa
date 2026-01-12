@@ -285,7 +285,6 @@ where
             }),
             prefix_len: prefix_key.prefix_len(),
             data: Default::default(),
-            _lifetime: Default::default(),
         }
     }
 
@@ -305,14 +304,13 @@ self_cell!(
     }
 );
 
-pub struct OwnedIter<'b, TData> {
+pub struct OwnedIter<TData> {
     db_iter_cell: DbIterCell,
     prefix_len: usize,
     data: PhantomData<fn() -> TData>,
-    _lifetime: PhantomData<&'b ()>,
 }
 
-impl<'b, TData> Iterator for OwnedIter<'b, TData>
+impl<TData> Iterator for OwnedIter<TData>
 where
     TData: DeserializeOwned,
 {
