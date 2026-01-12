@@ -13,17 +13,6 @@ use kaspa_hashes::Hash;
 use rocksdb::WriteBatch;
 use std::{error::Error, fmt::Display, sync::Arc};
 
-// pub trait IntoOutpointAndUtxo {
-//     fn into_outpoint_and_utxo(self) -> (TransactionOutpoint, UtxoEntry);
-// }
-// impl IntoOutpointAndUtxo for (Box<[u8]>, Arc<UtxoEntry>) {
-//     fn into_outpoint_and_utxo(self) -> (TransactionOutpoint, UtxoEntry) {
-//         let outpoint: TransactionOutpoint = UtxoKey::try_from(self.0.as_ref()).unwrap().into();
-//         let entry = UtxoEntry::clone(&self.1);
-//         (outpoint, entry)
-//     }
-// }
-
 type UtxoCollectionIterator<'a> = Box<dyn Iterator<Item = Result<(TransactionOutpoint, UtxoEntry), Box<dyn Error>>> + 'a>;
 pub trait UtxoSetStoreReader {
     fn get(&self, outpoint: &TransactionOutpoint) -> Result<Arc<UtxoEntry>, StoreError>;
