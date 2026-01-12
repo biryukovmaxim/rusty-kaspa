@@ -223,6 +223,10 @@ pub trait ConsensusApi: Send + Sync {
         unimplemented!()
     }
 
+    fn get_virtual_utxo_iter_owned(&self) -> Box<dyn Iterator<Item = (TransactionOutpoint, UtxoEntry)>> {
+        unimplemented!()
+    }
+
     fn get_tips(&self) -> Vec<Hash> {
         unimplemented!()
     }

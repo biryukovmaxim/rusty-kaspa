@@ -151,6 +151,8 @@ impl UtxoIndexApi for UtxoIndex {
         let consensus_tips = session.get_virtual_parents();
         let mut circulating_supply: CirculatingSupply = 0;
 
+        let iter = session.get_virtual_utxo_iter_owned();
+        todo!();
         //Initial batch is without specified seek and none-skipping.
         let mut virtual_utxo_batch = session.get_virtual_utxos(None, RESYNC_CHUNK_SIZE, false);
         let mut current_chunk_size = virtual_utxo_batch.len();

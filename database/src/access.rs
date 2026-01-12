@@ -2,8 +2,10 @@ use crate::{cache::CachePolicy, db::DB, errors::StoreError};
 
 use super::prelude::{Cache, DbKey, DbWriter};
 use kaspa_utils::mem_size::MemSizeEstimator;
-use rocksdb::{Direction, IterateBounds, IteratorMode, ReadOptions};
+use rocksdb::{DBIteratorWithThreadMode, DBWithThreadMode, Direction, IterateBounds, IteratorMode, MultiThreaded, ReadOptions};
+use self_cell::self_cell;
 use serde::{de::DeserializeOwned, Serialize};
+use std::marker::PhantomData;
 use std::{collections::hash_map::RandomState, error::Error, hash::BuildHasher, sync::Arc};
 
 /// A concurrent DB store access with typed caching.
@@ -257,8 +259,67 @@ where
         })
     }
 
+    /// A dynamic iterator that can iterate through a specific prefix / bucket, or from a certain start point.
+    // TODO: loop and chain iterators for multi-prefix / bucket iterator.
+    pub fn iterator_owned(&self) -> impl Iterator<Item = KeyDataResult<TData>> + 'static
+    where
+        TKey: Clone + AsRef<[u8]>,
+        TData: DeserializeOwned + 'static,
+    {
+        let db = self.db.clone();
+        let prefix_key = DbKey::prefix_only(&self.prefix);
+        OwnedIter {
+            db_iter_cell: DbIterCell::new(db, |db| {
+                let mut read_opts = ReadOptions::default();
+                read_opts.set_iterate_range(rocksdb::PrefixRange(prefix_key.as_ref()));
+                db.iterator_opt(IteratorMode::From(prefix_key.as_ref(), Direction::Forward), read_opts)
+            }),
+            prefix_len: prefix_key.prefix_len(),
+            data: Default::default(),
+            _lifetime: Default::default(),
+        }
+    }
+
     pub fn prefix(&self) -> &[u8] {
         &self.prefix
+    }
+}
+
+type DbIterator<'a> = DBIteratorWithThreadMode<'a, DBWithThreadMode<MultiThreaded>>;
+
+self_cell!(
+    struct DbIterCell {
+        owner: Arc<DB>,
+
+        #[covariant]
+        dependent: DbIterator,
+    }
+);
+
+pub struct OwnedIter<'b, TData> {
+    db_iter_cell: DbIterCell,
+    prefix_len: usize,
+    data: PhantomData<fn() -> TData>,
+    _lifetime: PhantomData<&'b ()>,
+}
+
+impl<'b, TData> Iterator for OwnedIter<'b, TData>
+where
+    TData: DeserializeOwned,
+{
+    type Item = KeyDataResult<TData>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.db_iter_cell.with_dependent_mut(|_, db_iterator| match db_iterator.next() {
+            Some(item) => match item {
+                Ok((key_bytes, value_bytes)) => match bincode::deserialize::<TData>(value_bytes.as_ref()) {
+                    Ok(value) => Some(Ok((key_bytes[self.prefix_len..].into(), value))),
+                    Err(err) => Some(Err(err.into())),
+                },
+                Err(err) => Some(Err(err.into())),
+            },
+            None => None,
+        })
     }
 }
 

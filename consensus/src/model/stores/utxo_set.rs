@@ -13,11 +13,23 @@ use kaspa_hashes::Hash;
 use rocksdb::WriteBatch;
 use std::{error::Error, fmt::Display, sync::Arc};
 
-type UtxoCollectionIterator<'a> = Box<dyn Iterator<Item = Result<(TransactionOutpoint, UtxoEntry), Box<dyn Error>>> + 'a>;
+// pub trait IntoOutpointAndUtxo {
+//     fn into_outpoint_and_utxo(self) -> (TransactionOutpoint, UtxoEntry);
+// }
+// impl IntoOutpointAndUtxo for (Box<[u8]>, Arc<UtxoEntry>) {
+//     fn into_outpoint_and_utxo(self) -> (TransactionOutpoint, UtxoEntry) {
+//         let outpoint: TransactionOutpoint = UtxoKey::try_from(self.0.as_ref()).unwrap().into();
+//         let entry = UtxoEntry::clone(&self.1);
+//         (outpoint, entry)
+//     }
+// }
 
+type UtxoCollectionIterator<'a> = Box<dyn Iterator<Item = Result<(TransactionOutpoint, UtxoEntry), Box<dyn Error>>> + 'a>;
 pub trait UtxoSetStoreReader {
     fn get(&self, outpoint: &TransactionOutpoint) -> Result<Arc<UtxoEntry>, StoreError>;
     fn seek_iterator(&self, from_outpoint: Option<TransactionOutpoint>, limit: usize, skip_first: bool) -> UtxoCollectionIterator<'_>;
+
+    fn iterator_owned(&self) -> impl Iterator<Item = Result<(TransactionOutpoint, UtxoEntry), Box<dyn Error>>> + 'static;
 }
 
 pub trait UtxoSetStore: UtxoSetStoreReader {
@@ -158,6 +170,19 @@ impl UtxoSetStoreReader for DbUtxoSetStore {
             let outpoint: TransactionOutpoint = UtxoKey::try_from(key.as_ref()).unwrap().into();
             Ok((outpoint, UtxoEntry::clone(&entry)))
         }))
+    }
+
+    fn iterator_owned(&self) -> impl Iterator<Item = Result<(TransactionOutpoint, UtxoEntry), Box<dyn Error>>> + 'static {
+        self.access.iterator_owned().map(|iter_result| match iter_result {
+            Ok((key_bytes, utxo_entry)) => match UtxoKey::try_from(key_bytes.as_ref()) {
+                Ok(utxo_key) => {
+                    let outpoint: TransactionOutpoint = utxo_key.into();
+                    Ok((outpoint, UtxoEntry::clone(&utxo_entry)))
+                }
+                Err(e) => Err(e.into()),
+            },
+            Err(e) => Err(e),
+        })
     }
 }
 

@@ -1016,6 +1016,12 @@ impl ConsensusApi for Consensus {
         iter.map(|item| item.unwrap()).collect()
     }
 
+    fn get_virtual_utxo_iter_owned(&self) -> Box<dyn Iterator<Item = (TransactionOutpoint, UtxoEntry)>> {
+        let virtual_stores = self.virtual_stores.read();
+        let iter = virtual_stores.utxo_set.iterator_owned();
+        Box::new(iter.map(|item| item.unwrap()))
+    }
+
     fn get_tips(&self) -> Vec<Hash> {
         self.body_tips_store.read().get().unwrap().read().iter().copied().collect_vec()
     }
