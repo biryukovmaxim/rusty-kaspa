@@ -271,6 +271,15 @@ where
         OwnedIter {
             db_iter_cell: DbIterCell::new(db, |db| {
                 let mut read_opts = ReadOptions::default();
+
+                read_opts.fill_cache(false);
+                read_opts.set_async_io(true);
+                read_opts.set_verify_checksums(false);
+                // guess for ssd
+                read_opts.set_readahead_size(256 * 1024);
+                // // guess for hdd
+                // read_opts.set_readahead_size(4 * 1024 * 1024);
+
                 read_opts.set_iterate_range(rocksdb::PrefixRange(prefix_key.as_ref()));
                 db.iterator_opt(IteratorMode::From(prefix_key.as_ref(), Direction::Forward), read_opts)
             }),
