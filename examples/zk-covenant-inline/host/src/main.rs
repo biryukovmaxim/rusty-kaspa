@@ -1,4 +1,3 @@
-use std::time::Instant;
 use kaspa_consensus_core::constants::{SOMPI_PER_KASPA, TX_VERSION};
 use kaspa_consensus_core::hashing::sighash::SigHashReusedValuesUnsync;
 use kaspa_consensus_core::subnets::SUBNETWORK_ID_NATIVE;
@@ -7,15 +6,15 @@ use kaspa_consensus_core::tx::{
 };
 use kaspa_txscript::caches::Cache;
 use kaspa_txscript::opcodes::codes::{
-    OpAdd, OpBlake2b, OpCat, OpData32, OpData8, OpDup, OpEqual, OpEqualVerify, OpSHA256, OpSwap,
-    OpTxInputIndex, OpTxInputScriptSigLen, OpTxInputScriptSigSubStr, OpTxOutputSpk, OpTxPayloadSubstr, OpZkPrecompile,
+    OpAdd, OpBlake2b, OpCat, OpData32, OpData8, OpDup, OpEqual, OpEqualVerify, OpSHA256, OpSwap, OpTxInputIndex,
+    OpTxInputScriptSigLen, OpTxInputScriptSigSubStr, OpTxOutputSpk, OpTxPayloadSubstr, OpZkPrecompile,
 };
+use kaspa_txscript::zk_precompiles::risc0::rcpt::SuccinctReceipt;
 use kaspa_txscript::zk_precompiles::tags::ZkTag;
-use kaspa_txscript::{
-    pay_to_script_hash_script, script_builder::ScriptBuilder, EngineFlags, SpkEncoding, TxScriptEngine,
-};
+use kaspa_txscript::{pay_to_script_hash_script, script_builder::ScriptBuilder, EngineFlags, SpkEncoding, TxScriptEngine};
 use risc0_zkvm::sha::Digestible;
 use risc0_zkvm::{default_prover, ExecutorEnv, Prover, ProverOpts};
+use std::time::Instant;
 use zk_covenant_inline_core::PublicInput;
 use zk_covenant_inline_methods::{ZK_COVENANT_INLINE_GUEST_ELF, ZK_COVENANT_INLINE_GUEST_ID};
 
@@ -68,9 +67,8 @@ fn main() {
     assert_eq!(output, &public_input);
 
     let script_precompile_inner = {
-        use kaspa_txscript::zk_precompiles::risc0::inner::Inner;
         use kaspa_txscript::zk_precompiles::risc0::merkle::MerkleProof;
-        Inner {
+        SuccinctReceipt {
             seal: receipt_inner.seal.clone(),
             control_id: receipt_inner.control_id,
             claim: receipt_inner.claim.digest(),
@@ -201,7 +199,10 @@ fn build_redeem_script(old_state: u64, redeem_script_len: i64) -> Vec<u8> {
 /// Expects on stack: [proof, program_id, new_state]
 ///
 /// Leaves on stack: [proof, program_id, old_state, new_state, new_state]
-fn add_state_preparation(builder: &mut ScriptBuilder, old_state: u64) -> kaspa_txscript::script_builder::ScriptBuilderResult<&mut ScriptBuilder> {
+fn add_state_preparation(
+    builder: &mut ScriptBuilder,
+    old_state: u64,
+) -> kaspa_txscript::script_builder::ScriptBuilderResult<&mut ScriptBuilder> {
     // Push the old state (prev_state) onto the stack
     builder.add_data(&old_state.to_le_bytes())?;
     // Swap the top two items: new_state and old_state
@@ -231,7 +232,10 @@ fn add_new_redeem_prefix(builder: &mut ScriptBuilder) -> kaspa_txscript::script_
 /// Expects on stack: [..., (OpData8 || new_state)] (prefix on top)
 ///
 /// Leaves on stack: [..., new_redeem_script]
-fn add_suffix_extraction_and_cat(builder: &mut ScriptBuilder, redeem_script_len: i64) -> kaspa_txscript::script_builder::ScriptBuilderResult<&mut ScriptBuilder> {
+fn add_suffix_extraction_and_cat(
+    builder: &mut ScriptBuilder,
+    redeem_script_len: i64,
+) -> kaspa_txscript::script_builder::ScriptBuilderResult<&mut ScriptBuilder> {
     // Compute offset: sig_script_len + (-redeem_script_len + 1 + 8) to point after old_state push
     builder.add_op(OpTxInputIndex)?;
     builder.add_op(OpTxInputIndex)?;
@@ -302,7 +306,9 @@ fn add_verify_output_spk(builder: &mut ScriptBuilder) -> kaspa_txscript::script_
 /// Expects on stack: [..., old_state, new_state]
 ///
 /// Leaves on stack: [..., preimage] where preimage = old_state || new_state || payload_diff
-fn add_construct_journal_preimage(builder: &mut ScriptBuilder) -> kaspa_txscript::script_builder::ScriptBuilderResult<&mut ScriptBuilder> {
+fn add_construct_journal_preimage(
+    builder: &mut ScriptBuilder,
+) -> kaspa_txscript::script_builder::ScriptBuilderResult<&mut ScriptBuilder> {
     // Concatenate old_state || new_state
     builder.add_op(OpCat)?;
 
@@ -357,7 +363,9 @@ fn add_zk_verification(builder: &mut ScriptBuilder) -> kaspa_txscript::script_bu
 /// Expects on stack: []
 ///
 /// Leaves on stack: [] (after verification)
-fn add_verify_input_index_zero(builder: &mut ScriptBuilder) -> kaspa_txscript::script_builder::ScriptBuilderResult<&mut ScriptBuilder> {
+fn add_verify_input_index_zero(
+    builder: &mut ScriptBuilder,
+) -> kaspa_txscript::script_builder::ScriptBuilderResult<&mut ScriptBuilder> {
     // Push current input index
     builder.add_op(OpTxInputIndex)?;
 

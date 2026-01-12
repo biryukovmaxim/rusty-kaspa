@@ -39,7 +39,7 @@ use crate::zk_precompiles::risc0::R0Error;
 #[derive(Debug, Serialize, BorshSerialize, BorshDeserialize)]
 #[cfg_attr(test, derive(PartialEq))]
 // #[non_exhaustive] todo imposible to create the structure without constructor and with non-exhaustive
-pub struct Inner {
+pub struct SuccinctReceipt {
     /// The cryptographic seal of this receipt. This seal is a STARK proving an execution of the
     /// recursion circuit.
     pub seal: Vec<u32>,
@@ -68,13 +68,13 @@ pub struct Inner {
     pub control_inclusion_proof: MerkleProof,
 }
 
-impl Inner {
+impl SuccinctReceipt {
     pub fn claim(&self) -> &Digest {
         &self.claim
     }
 }
 
-impl Inner {
+impl SuccinctReceipt {
     /// Verify the integrity of this receipt, ensuring the claim is attested
     /// to by the seal.
     pub fn verify_integrity(&self) -> Result<(), R0Error> {
