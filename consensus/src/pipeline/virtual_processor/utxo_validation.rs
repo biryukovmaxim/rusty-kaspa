@@ -36,7 +36,7 @@ use kaspa_consensus_core::{
     BlockHashMap, BlockHashSet, HashMapCustomHasher,
 };
 use kaspa_core::{info, trace};
-use kaspa_hashes::Hash;
+use kaspa_hashes::{Hash, SeqCommitmentMerkleBranchHash};
 use kaspa_muhash::MuHash;
 use kaspa_utils::refs::Refs;
 
@@ -427,9 +427,16 @@ impl VirtualStateProcessor {
         accepted_tx_ids: impl ExactSizeIterator<Item = Hash>,
         selected_parent: Hash,
     ) -> Hash {
-        kaspa_merkle::merkle_hash(
+        // todo proper transition logic
+        // kaspa_merkle::merkle_hash(
+        //     self.headers_store.get_header(selected_parent).unwrap().accepted_id_merkle_root,
+        //     kaspa_merkle::calc_merkle_root(accepted_tx_ids),
+        // )
+        const HASH_SINGLE_ENTRY: bool = true;
+        kaspa_merkle::merkle_hash_with_hasher(
             self.headers_store.get_header(selected_parent).unwrap().accepted_id_merkle_root,
-            kaspa_merkle::calc_merkle_root(accepted_tx_ids),
+            kaspa_merkle::calc_merkle_root_with_hasher::<SeqCommitmentMerkleBranchHash, HASH_SINGLE_ENTRY>(accepted_tx_ids),
+            SeqCommitmentMerkleBranchHash::new(),
         )
     }
 }
