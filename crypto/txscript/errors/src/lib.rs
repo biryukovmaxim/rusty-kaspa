@@ -81,6 +81,15 @@ pub enum TxScriptError {
     OutOfBoundsSubstring(usize, usize, usize),
     #[error("{0} cannot be used as an array index")]
     InvalidIndex(i32),
+
+    #[error("blockhash must be exactly 32 bytes long, got {0} bytes instead")]
+    InvalidLengthOfBlockHash(usize),
+    #[error("block {0} not selected")]
+    BlockNotSelected(String),
+    #[error("block {0} already pruned")]
+    BlockAlreadyPruned(String),
+    #[error("block {0} is too deep")]
+    BlockIsTooDeep(String),
 }
 
 #[derive(Error, PartialEq, Eq, Debug, Clone, Copy)]

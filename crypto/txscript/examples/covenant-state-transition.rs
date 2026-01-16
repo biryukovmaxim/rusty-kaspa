@@ -125,7 +125,8 @@ fn main() {
     let reused_values = SigHashReusedValuesUnsync::new();
     let flags = EngineFlags { covenants_enabled: true };
 
-    let mut engine = TxScriptEngine::from_transaction_input(&tx, &tx.tx.inputs[0], 0, &utxo_entry, &reused_values, &sig_cache, flags);
+    let mut engine =
+        TxScriptEngine::from_transaction_input(&tx, &tx.tx.inputs[0], 0, &utxo_entry, &reused_values, &sig_cache, flags, None);
 
     match engine.execute() {
         Ok(_) => println!("Script execution succeeded with checks!"),

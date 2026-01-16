@@ -134,6 +134,7 @@ fn threshold_scenario() -> ScriptBuilderResult<()> {
             &reused_values,
             &sig_cache,
             Default::default(),
+            None,
         );
         assert_eq!(vm.execute(), Ok(()));
         println!("[STANDARD] Owner branch execution successful");
@@ -152,6 +153,7 @@ fn threshold_scenario() -> ScriptBuilderResult<()> {
             &reused_values,
             &sig_cache,
             Default::default(),
+            None,
         );
         assert_eq!(vm.execute(), Ok(()));
         println!("[STANDARD] Borrower branch execution successful");
@@ -171,6 +173,7 @@ fn threshold_scenario() -> ScriptBuilderResult<()> {
             &reused_values,
             &sig_cache,
             Default::default(),
+            None,
         );
         assert_eq!(vm.execute(), Err(EvalFalse));
         println!("[STANDARD] Borrower branch with threshold not reached failed as expected");
@@ -327,6 +330,7 @@ fn threshold_scenario_limited_one_time() -> ScriptBuilderResult<()> {
             &reused_values,
             &sig_cache,
             Default::default(),
+            None,
         );
         assert_eq!(vm.execute(), Ok(()));
         println!("[ONE-TIME] Owner branch execution successful");
@@ -345,6 +349,7 @@ fn threshold_scenario_limited_one_time() -> ScriptBuilderResult<()> {
             &reused_values,
             &sig_cache,
             Default::default(),
+            None,
         );
         assert_eq!(vm.execute(), Ok(()));
         println!("[ONE-TIME] Borrower branch execution successful");
@@ -364,6 +369,7 @@ fn threshold_scenario_limited_one_time() -> ScriptBuilderResult<()> {
             &reused_values,
             &sig_cache,
             Default::default(),
+            None,
         );
         assert_eq!(vm.execute(), Err(EvalFalse));
         println!("[ONE-TIME] Borrower branch with threshold not reached failed as expected");
@@ -394,6 +400,7 @@ fn threshold_scenario_limited_one_time() -> ScriptBuilderResult<()> {
             &reused_values,
             &sig_cache,
             Default::default(),
+            None,
         );
         assert_eq!(vm.execute(), Err(VerifyError));
         println!("[ONE-TIME] Borrower branch with output going to wrong address failed as expected");
@@ -511,6 +518,7 @@ fn threshold_scenario_limited_2_times() -> ScriptBuilderResult<()> {
             &reused_values,
             &sig_cache,
             Default::default(),
+            None,
         );
         assert_eq!(vm.execute(), Ok(()));
         println!("[TWO-TIMES] Owner branch execution successful");
@@ -529,6 +537,7 @@ fn threshold_scenario_limited_2_times() -> ScriptBuilderResult<()> {
             &reused_values,
             &sig_cache,
             Default::default(),
+            None,
         );
         assert_eq!(vm.execute(), Ok(()));
         println!("[TWO-TIMES] Borrower branch (first borrowing) execution successful");
@@ -548,6 +557,7 @@ fn threshold_scenario_limited_2_times() -> ScriptBuilderResult<()> {
             &reused_values,
             &sig_cache,
             Default::default(),
+            None,
         );
         assert_eq!(vm.execute(), Err(EvalFalse));
         println!("[TWO-TIMES] Borrower branch with threshold not reached failed as expected");
@@ -578,6 +588,7 @@ fn threshold_scenario_limited_2_times() -> ScriptBuilderResult<()> {
             &reused_values,
             &sig_cache,
             Default::default(),
+            None,
         );
         assert_eq!(vm.execute(), Err(VerifyError));
         println!("[TWO-TIMES] Borrower branch with output going to wrong address failed as expected");
@@ -697,6 +708,7 @@ fn shared_secret_scenario() -> ScriptBuilderResult<()> {
             &reused_values,
             &sig_cache,
             Default::default(),
+            None,
         );
         assert_eq!(vm.execute(), Ok(()));
         println!("[SHARED-SECRET] Owner branch execution successful");
@@ -723,6 +735,7 @@ fn shared_secret_scenario() -> ScriptBuilderResult<()> {
             &reused_values,
             &sig_cache,
             Default::default(),
+            None,
         );
         assert_eq!(vm.execute(), Ok(()));
         println!("[SHARED-SECRET] Borrower branch with correct shared secret execution successful");
@@ -749,6 +762,7 @@ fn shared_secret_scenario() -> ScriptBuilderResult<()> {
             &reused_values,
             &sig_cache,
             Default::default(),
+            None,
         );
         assert_eq!(vm.execute(), Err(VerifyError));
         println!("[SHARED-SECRET] Borrower branch with incorrect secret failed as expected");

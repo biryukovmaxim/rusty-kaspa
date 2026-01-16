@@ -9,6 +9,7 @@ use blake2b_simd::Params;
 use kaspa_consensus_core::hashing::sighash::SigHashReusedValues;
 use kaspa_consensus_core::hashing::sighash_type::SigHashType;
 use kaspa_consensus_core::tx::VerifiableTransaction;
+use kaspa_hashes::Hash;
 use sha2::{Digest, Sha256};
 use std::{
     fmt::{Debug, Formatter},
@@ -1372,7 +1373,24 @@ opcode_list! {
         Ok(())
     }
 
-    opcode OpUnknown204<0xcc, 1>(self, vm) Err(TxScriptError::InvalidOpcode(format!("{self:?}")))
+    opcode OpChainblockSeqCommit<0xcc, 1>(self, vm) {
+        match vm.script_source {
+            ScriptSource::TxInput{tx, seq_commit_access: Some(seq_commit_access),..} => {
+                let [block]: [Hash; 1] = vm.dstack.pop_items()?; // todo we actually could convert slice ref into hash ref if it was repr(transparent)
+                match seq_commit_access.is_selected_block(block) {
+                    None => return Err(TxScriptError::BlockAlreadyPruned(block.to_string())),
+                    Some(false) => return Err(TxScriptError::BlockNotSelected(block.to_string())),
+                    Some(true) => {}
+                };
+                let commitment = seq_commit_access.seq_commitment_within_depth(block)
+                    .ok_or_else(|| TxScriptError::BlockIsTooDeep(block.to_string()))?;
+                vm.dstack.push_item(commitment)?;
+                Ok(())
+            },
+            // seq_commit_access is none if only opcode is not enabled
+            _ => Err(TxScriptError::InvalidOpcode(format!("{self:?}")))
+        }
+    }
     opcode OpUnknown205<0xcd, 1>(self, vm) Err(TxScriptError::InvalidOpcode(format!("{self:?}")))
     opcode OpUnknown206<0xce, 1>(self, vm) Err(TxScriptError::InvalidOpcode(format!("{self:?}")))
     opcode OpUnknown207<0xcf, 1>(self, vm) Err(TxScriptError::InvalidOpcode(format!("{self:?}")))
@@ -1571,7 +1589,7 @@ mod test {
             opcodes::OpTxInputScriptSigLen::empty().expect("Should accept empty"),
             opcodes::OpTxInputScriptSigSubstr::empty().expect("Should accept empty"),
             opcodes::OpBlake2bWithKey::empty().expect("Should accept empty"),
-            opcodes::OpUnknown204::empty().expect("Should accept empty"),
+            opcodes::OpChainblockSeqCommit::empty().expect("Should accept empty"),
             opcodes::OpUnknown205::empty().expect("Should accept empty"),
             opcodes::OpUnknown206::empty().expect("Should accept empty"),
             opcodes::OpUnknown207::empty().expect("Should accept empty"),
@@ -3216,8 +3234,16 @@ mod test {
         ] {
             let mut tx = base_tx.clone();
             tx.0.lock_time = tx_lock_time;
-            let mut vm =
-                TxScriptEngine::from_transaction_input(&tx, &input, 0, &utxo_entry, &reused_values, &sig_cache, Default::default());
+            let mut vm = TxScriptEngine::from_transaction_input(
+                &tx,
+                &input,
+                0,
+                &utxo_entry,
+                &reused_values,
+                &sig_cache,
+                Default::default(),
+                None,
+            );
             vm.dstack = vec![lock_time.clone()].into();
             match code.execute(&mut vm) {
                 // Message is based on the should_fail values
@@ -3259,8 +3285,16 @@ mod test {
         ] {
             let mut input = base_input.clone();
             input.sequence = tx_sequence;
-            let mut vm =
-                TxScriptEngine::from_transaction_input(&tx, &input, 0, &utxo_entry, &reused_values, &sig_cache, Default::default());
+            let mut vm = TxScriptEngine::from_transaction_input(
+                &tx,
+                &input,
+                0,
+                &utxo_entry,
+                &reused_values,
+                &sig_cache,
+                Default::default(),
+                None,
+            );
             vm.dstack = vec![sequence.clone()].into();
             match code.execute(&mut vm) {
                 // Message is based on the should_fail values
@@ -3453,6 +3487,7 @@ mod test {
                     &reused_values,
                     &sig_cache,
                     Default::default(),
+                    None,
                 );
 
                 // Check input index opcode first
@@ -3687,6 +3722,7 @@ mod test {
                     &reused_values,
                     &sig_cache,
                     Default::default(),
+                    None,
                 );
 
                 let op_input_count = opcodes::OpTxInputCount::empty().expect("Should accept empty");
@@ -3754,6 +3790,7 @@ mod test {
                     &reused_values,
                     &sig_cache,
                     Default::default(),
+                    None,
                 );
 
                 assert_eq!(vm.execute(), Ok(()));
@@ -3778,6 +3815,7 @@ mod test {
                     &reused_values,
                     &sig_cache,
                     Default::default(),
+                    None,
                 );
 
                 assert_eq!(vm.execute(), Err(TxScriptError::EvalFalse));
@@ -3818,6 +3856,7 @@ mod test {
                     &reused_values,
                     &sig_cache,
                     Default::default(),
+                    None,
                 );
 
                 assert_eq!(vm.execute(), Ok(()));
@@ -3844,6 +3883,7 @@ mod test {
                     &reused_values,
                     &sig_cache,
                     Default::default(),
+                    None,
                 );
 
                 assert_eq!(vm.execute(), Err(TxScriptError::EvalFalse));
@@ -3873,6 +3913,7 @@ mod test {
                 &reused_values,
                 &sig_cache,
                 Default::default(),
+                None,
             );
 
             // OpInputSpk should push input's SPK onto stack, making it non-empty
@@ -3904,6 +3945,7 @@ mod test {
                 &reused_values,
                 &sig_cache,
                 Default::default(),
+                None,
             );
 
             // Should succeed because the SPKs are different
@@ -3936,6 +3978,7 @@ mod test {
                 &reused_values,
                 &sig_cache,
                 Default::default(),
+                None,
             );
 
             // Should succeed because both SPKs are identical
@@ -3981,6 +4024,7 @@ mod test {
                     &reused_values,
                     &sig_cache,
                     Default::default(),
+                    None,
                 );
 
                 assert_eq!(vm.execute(), Ok(()));
@@ -4007,6 +4051,7 @@ mod test {
                     &reused_values,
                     &sig_cache,
                     Default::default(),
+                    None,
                 );
 
                 assert_eq!(vm.execute(), Err(TxScriptError::EvalFalse));
@@ -4040,6 +4085,7 @@ mod test {
                     &reused_values,
                     &sig_cache,
                     Default::default(),
+                    None,
                 );
 
                 assert_eq!(vm.execute(), Ok(()));
@@ -4064,6 +4110,7 @@ mod test {
                     &reused_values,
                     &sig_cache,
                     Default::default(),
+                    None,
                 );
 
                 // Should fail because script expects index 0 but we're at index 1
@@ -4110,6 +4157,7 @@ mod test {
                     &reused_values,
                     &sig_cache,
                     Default::default(),
+                    None,
                 );
 
                 assert_eq!(vm.execute(), Ok(()));
@@ -4129,6 +4177,7 @@ mod test {
                     &reused_values,
                     &sig_cache,
                     Default::default(),
+                    None,
                 );
 
                 assert_eq!(vm.execute(), Ok(()));
@@ -4152,6 +4201,7 @@ mod test {
                     &reused_values,
                     &sig_cache,
                     Default::default(),
+                    None,
                 );
 
                 assert_eq!(vm.execute(), Err(TxScriptError::EvalFalse));
@@ -4174,6 +4224,7 @@ mod test {
                     &reused_values,
                     &sig_cache,
                     Default::default(),
+                    None,
                 );
 
                 assert_eq!(vm.execute(), Err(TxScriptError::EvalFalse));
@@ -4258,6 +4309,7 @@ mod test {
                 &reused_values,
                 &sig_cache,
                 EngineFlags { covenants_enabled: true },
+                None,
             );
             vm.execute()
         }

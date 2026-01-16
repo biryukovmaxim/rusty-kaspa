@@ -34,7 +34,10 @@ pub mod prelude {
     pub use super::standard::*;
 }
 use crate::runtime_sig_op_counter::RuntimeSigOpCounter;
+pub use crate::seq_commit_accessor::SeqCommitAccessor;
 pub use standard::*;
+
+pub mod seq_commit_accessor;
 
 pub const MAX_SCRIPT_PUBLIC_KEY_VERSION: u16 = 0;
 pub const MAX_STACK_SIZE: usize = 244;
@@ -74,7 +77,14 @@ pub struct SigCacheKey {
 }
 
 enum ScriptSource<'a, T: VerifiableTransaction> {
-    TxInput { tx: &'a T, input: &'a TransactionInput, idx: usize, utxo_entry: &'a UtxoEntry, is_p2sh: bool },
+    TxInput {
+        tx: &'a T,
+        input: &'a TransactionInput,
+        idx: usize,
+        utxo_entry: &'a UtxoEntry,
+        is_p2sh: bool,
+        seq_commit_access: Option<&'a dyn SeqCommitAccessor>,
+    },
     StandAloneScripts(Vec<&'a [u8]>),
 }
 
@@ -137,7 +147,11 @@ fn parse_script<T: VerifiableTransaction, Reused: SigHashReusedValues>(
 /// # Returns
 /// * `Ok(u8)` - The exact number of signature operations executed
 /// * `Err(TxScriptError)` - If script execution fails or input index is invalid
-pub fn get_sig_op_count<T: VerifiableTransaction>(tx: &T, input_idx: usize) -> Result<u16, TxScriptError> {
+pub fn get_sig_op_count<T: VerifiableTransaction>(
+    tx: &T,
+    input_idx: usize,
+    dag: Option<&dyn SeqCommitAccessor>,
+) -> Result<u16, TxScriptError> {
     let sig_cache = Cache::new(0);
     let reused_values = SigHashReusedValuesUnsync::new();
     let mut vm = TxScriptEngine::from_transaction_input(
@@ -148,6 +162,7 @@ pub fn get_sig_op_count<T: VerifiableTransaction>(tx: &T, input_idx: usize) -> R
         &reused_values,
         &sig_cache,
         Default::default(),
+        dag,
     );
     vm.execute()?;
     Ok(vm.used_sig_ops())
@@ -287,6 +302,7 @@ impl<'a, T: VerifiableTransaction, Reused: SigHashReusedValues> TxScriptEngine<'
         reused_values: &'a Reused,
         sig_cache: &'a Cache<SigCacheKey, bool>,
         flags: EngineFlags,
+        dag: Option<&'a dyn SeqCommitAccessor>,
     ) -> Self {
         let script_public_key = utxo_entry.script_public_key.script();
         // The script_public_key in P2SH is just validating the hash on the OpMultiSig script
@@ -296,7 +312,7 @@ impl<'a, T: VerifiableTransaction, Reused: SigHashReusedValues> TxScriptEngine<'
         Self {
             dstack: Self::new_stack(flags),
             astack: Self::new_stack(flags),
-            script_source: ScriptSource::TxInput { tx, input, idx: input_idx, utxo_entry, is_p2sh },
+            script_source: ScriptSource::TxInput { tx, input, idx: input_idx, utxo_entry, is_p2sh, seq_commit_access: dag },
             reused_values,
             sig_cache,
             cond_stack: Default::default(),
@@ -419,8 +435,7 @@ impl<'a, T: VerifiableTransaction, Reused: SigHashReusedValues> TxScriptEngine<'
         // try_for_each quits only if an error occurred. So, we always run over all scripts if
         // each is successful
         scripts.iter().enumerate().filter(|(_, s)| !s.is_empty()).try_for_each(|(idx, s)| {
-            let verify_only_push =
-                idx == 0 && matches!(self.script_source, ScriptSource::TxInput { tx: _, input: _, idx: _, utxo_entry: _, is_p2sh: _ });
+            let verify_only_push = idx == 0 && matches!(self.script_source, ScriptSource::TxInput { .. });
             // Save script in p2sh
             if is_p2sh && idx == 1 {
                 saved_stack = Some(self.dstack.clone());
@@ -723,6 +738,7 @@ mod tests {
                 &reused_values,
                 &sig_cache,
                 Default::default(),
+                None,
             );
             assert_eq!(vm.execute(), test.expected_result);
         }
@@ -1290,6 +1306,7 @@ mod tests {
                 &reused_values,
                 &sig_cache,
                 Default::default(),
+                None,
             );
 
             let result = vm.execute().map(|_| vm.used_sig_ops());
@@ -1435,6 +1452,7 @@ mod bitcoind_tests {
                 &reused_values,
                 &sig_cache,
                 flags,
+                None,
             );
             vm.execute().map_err(UnifiedError::TxScriptError)
         }

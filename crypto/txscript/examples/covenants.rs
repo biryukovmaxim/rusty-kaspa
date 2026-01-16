@@ -168,7 +168,8 @@ fn run_vm(
     flags: EngineFlags,
 ) -> Result<(), TxScriptError> {
     let populated = PopulatedTransaction::new(tx, vec![utxo_entry.clone()]);
-    let mut vm = TxScriptEngine::from_transaction_input(&populated, &tx.inputs[0], 0, utxo_entry, reused_values, sig_cache, flags);
+    let mut vm =
+        TxScriptEngine::from_transaction_input(&populated, &tx.inputs[0], 0, utxo_entry, reused_values, sig_cache, flags, None);
     vm.execute()
 }
 

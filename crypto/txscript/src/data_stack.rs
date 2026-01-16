@@ -1,6 +1,7 @@
 use crate::TxScriptError;
 use core::fmt::Debug;
 use core::iter;
+use kaspa_hashes::Hash;
 use kaspa_txscript_errors::SerializationError;
 use std::cmp::Ordering;
 use std::num::TryFromIntError;
@@ -234,6 +235,18 @@ impl OpcodeData<bool> for Vec<u8> {
             true => vec![1],
             false => vec![],
         })
+    }
+}
+
+impl OpcodeData<Hash> for Vec<u8> {
+    #[inline]
+    fn deserialize(&self) -> Result<Hash, TxScriptError> {
+        Hash::try_from_slice(self).map_err(|_| TxScriptError::InvalidLengthOfBlockHash(self.len()))
+    }
+
+    #[inline]
+    fn serialize(from: &Hash) -> Result<Self, SerializationError> {
+        Ok(from.as_bytes().to_vec())
     }
 }
 

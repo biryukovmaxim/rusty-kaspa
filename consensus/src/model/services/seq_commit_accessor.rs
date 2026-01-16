@@ -1,0 +1,42 @@
+use crate::model::services::reachability::{MTReachabilityService, ReachabilityService};
+use crate::model::stores::headers::{DbHeadersStore, HeaderStoreReader};
+use crate::model::stores::reachability::DbReachabilityStore;
+use kaspa_database::prelude::StoreResultExt;
+use kaspa_hashes::Hash;
+
+#[derive(Copy, Clone)]
+pub struct SeqCommitAccessor<'a> {
+    pub threshold: u64,
+
+    pub sp: Hash,
+    pub sp_blue_score: Option<u64>,
+    pub reachability_service: &'a MTReachabilityService<DbReachabilityStore>,
+    pub headers_store: &'a DbHeadersStore,
+}
+
+impl<'a> SeqCommitAccessor<'a> {
+    pub fn new(
+        sp: Hash,
+        reachability_service: &'a MTReachabilityService<DbReachabilityStore>,
+        headers_store: &'a DbHeadersStore,
+    ) -> Self {
+        Self { threshold: 0, sp, sp_blue_score: None, reachability_service, headers_store }
+    }
+}
+
+impl<'a> kaspa_txscript::SeqCommitAccessor for SeqCommitAccessor<'a> {
+    fn is_selected_block(&self, block_hash: Hash) -> Option<bool> {
+        self.reachability_service.try_is_chain_ancestor_of(self.sp, block_hash).ok()
+    }
+
+    fn seq_commitment_within_depth(&self, block_hash: Hash) -> Option<Hash> {
+        let header = self.headers_store.get_header(block_hash).optional().unwrap()?;
+        let sp_blue_score =
+            self.sp_blue_score.unwrap_or_else(|| self.headers_store.get_compact_header_data(self.sp).unwrap().blue_score);
+        if sp_blue_score < header.daa_score + self.threshold {
+            Some(header.accepted_id_merkle_root)
+        } else {
+            None
+        }
+    }
+}
