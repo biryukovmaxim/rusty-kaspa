@@ -18,7 +18,7 @@ pub mod runtime_sig_op_counter;
 use std::ops::Deref;
 
 use crate::caches::Cache;
-use crate::covenants::{CovenantsContext, EMPTY_COV_CONTEXT};
+use crate::covenants::CovenantsContext;
 use crate::data_stack::Stack;
 use crate::opcodes::{deserialize_next_opcode, OpCodeImplementation};
 use itertools::Itertools;
@@ -37,7 +37,14 @@ pub mod prelude {
     pub use super::standard::*;
 }
 use crate::runtime_sig_op_counter::RuntimeSigOpCounter;
+pub use crate::seq_commit_accessor::SeqCommitAccessor;
 pub use standard::*;
+
+pub mod seq_commit_accessor;
+
+pub mod engine_context;
+
+pub use engine_context::EngineContext;
 
 pub const MAX_SCRIPT_PUBLIC_KEY_VERSION: u16 = 0;
 pub const MAX_STACK_SIZE: usize = 244;
@@ -85,34 +92,6 @@ enum ScriptSource<'a, T: VerifiableTransaction> {
 pub struct EngineFlags {
     pub covenants_enabled: bool,
 }
-
-pub struct EngineContext<'a, Reused: SigHashReusedValues> {
-    reused_values: &'a Reused,
-    sig_cache: &'a Cache<SigCacheKey, bool>,
-    covenants_ctx: &'a CovenantsContext,
-}
-
-impl<'a, Reused: SigHashReusedValues> EngineContext<'a, Reused> {
-    pub fn new(reused_values: &'a Reused, sig_cache: &'a Cache<SigCacheKey, bool>) -> Self {
-        Self { reused_values, sig_cache, covenants_ctx: &EMPTY_COV_CONTEXT }
-    }
-
-    pub fn with_covenants_ctx(
-        reused_values: &'a Reused,
-        sig_cache: &'a Cache<SigCacheKey, bool>,
-        covenants_ctx: &'a CovenantsContext,
-    ) -> Self {
-        Self { reused_values, sig_cache, covenants_ctx }
-    }
-}
-
-impl<'a, Reused: SigHashReusedValues> Clone for EngineContext<'a, Reused> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<'a, Reused: SigHashReusedValues> Copy for EngineContext<'a, Reused> {}
 
 impl<'a, T: VerifiableTransaction, Reused: SigHashReusedValues> Deref for TxScriptEngine<'a, T, Reused> {
     type Target = EngineContext<'a, Reused>;
@@ -178,10 +157,11 @@ pub fn get_sig_op_count<T: VerifiableTransaction>(
     tx: &T,
     input_idx: usize,
     covenants_ctx: &CovenantsContext,
+    dag: Option<&dyn SeqCommitAccessor>,
 ) -> Result<u8, TxScriptError> {
     let sig_cache = Cache::new(0);
     let reused_values = SigHashReusedValuesUnsync::new();
-    let ctx = EngineContext::with_covenants_ctx(&reused_values, &sig_cache, covenants_ctx);
+    let ctx = EngineContext::new(&reused_values, &sig_cache).with_covenants_ctx(covenants_ctx).with_seq_commit_accessor_opt(dag);
     let mut vm = TxScriptEngine::from_transaction_input(
         tx,
         &tx.inputs()[input_idx],
@@ -448,8 +428,7 @@ impl<'a, T: VerifiableTransaction, Reused: SigHashReusedValues> TxScriptEngine<'
         // try_for_each quits only if an error occurred. So, we always run over all scripts if
         // each is successful
         scripts.iter().enumerate().filter(|(_, s)| !s.is_empty()).try_for_each(|(idx, s)| {
-            let verify_only_push =
-                idx == 0 && matches!(self.script_source, ScriptSource::TxInput { tx: _, input: _, idx: _, utxo_entry: _, is_p2sh: _ });
+            let verify_only_push = idx == 0 && matches!(self.script_source, ScriptSource::TxInput { .. });
             // Save script in p2sh
             if is_p2sh && idx == 1 {
                 saved_stack = Some(self.dstack.clone());

@@ -92,7 +92,8 @@ fn benchmark_check_scripts(c: &mut Criterion) {
                 let cache = Cache::new(inputs_count as u64);
                 b.iter(|| {
                     cache.clear();
-                    check_scripts_sequential(black_box(&cache), black_box(&tx.as_verifiable()), Default::default(), flags).unwrap();
+                    check_scripts_sequential(black_box(&cache), black_box(&tx.as_verifiable()), Default::default(), flags, None)
+                        .unwrap();
                 })
             });
 
@@ -101,7 +102,8 @@ fn benchmark_check_scripts(c: &mut Criterion) {
                 let cache = Cache::new(inputs_count as u64);
                 b.iter(|| {
                     cache.clear();
-                    check_scripts_par_iter(black_box(&cache), black_box(&tx.as_verifiable()), Default::default(), flags).unwrap();
+                    check_scripts_par_iter(black_box(&cache), black_box(&tx.as_verifiable()), Default::default(), flags, None)
+                        .unwrap();
                 })
             });
 
@@ -119,6 +121,7 @@ fn benchmark_check_scripts(c: &mut Criterion) {
                                 Default::default(),
                                 black_box(&pool),
                                 flags,
+                                None,
                             )
                             .unwrap();
                         })
@@ -156,8 +159,14 @@ fn benchmark_check_scripts_with_payload(c: &mut Criterion) {
                 let cache = Cache::new(inputs_count as u64);
                 b.iter(|| {
                     cache.clear();
-                    check_scripts_par_iter(black_box(&cache), black_box(&tx.as_verifiable()), Default::default(), Default::default())
-                        .unwrap();
+                    check_scripts_par_iter(
+                        black_box(&cache),
+                        black_box(&tx.as_verifiable()),
+                        Default::default(),
+                        Default::default(),
+                        None,
+                    )
+                    .unwrap();
                 })
             });
         }
