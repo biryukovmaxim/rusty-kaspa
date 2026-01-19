@@ -156,7 +156,7 @@ fn verify_zk_succinct(tx: &Transaction, utxo_entry: &UtxoEntry) {
     let flags = EngineFlags { covenants_enabled: true };
 
     let populated = PopulatedTransaction::new(tx, vec![utxo_entry.clone()]);
-    let mut vm = TxScriptEngine::from_transaction_input(&populated, &tx.inputs[0], 0, utxo_entry, &reused_values, &sig_cache, flags);
+    let mut vm = TxScriptEngine::from_transaction_input(&populated, &tx.inputs[0], 0, utxo_entry, &reused_values, &sig_cache, flags, None);
     vm.execute().unwrap();
 }
 
