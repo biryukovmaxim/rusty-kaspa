@@ -6,7 +6,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 pub use error::Groth16Error;
 
 use crate::{
-    data_stack::{DataStack, Stack},
+    data_stack::Stack,
     zk_precompiles::{fields::fr_from_bytes, ZkPrecompile},
 };
 
@@ -24,7 +24,7 @@ impl ZkPrecompile for Groth16Precompile {
         let [n_inputs] = dstack.pop_raw()?;
 
         // Retrieve public inputs
-        let n_inputs = u16::from_le_bytes(n_inputs.as_slice().try_into()?) as u16;
+        let n_inputs = u16::from_le_bytes(n_inputs.as_slice().try_into()?);
         let mut unprepared_public_inputs = Vec::new();
 
         // For each public input, pop from the stack and convert to Fr
@@ -76,15 +76,15 @@ mod tests {
 
         println!("unprepared key len: {}, proof len: {}", unprepared_compressed_vk.len(), proof.len());
 
-        let mut stack = Stack::new();
-        stack.push(input4);
-        stack.push(input3);
-        stack.push(input2);
-        stack.push(input1);
-        stack.push(input0);
-        stack.push((5u16).to_le_bytes().to_vec());
-        stack.push(proof);
-        stack.push(unprepared_compressed_vk);
+        let mut stack = Stack::new(vec![], usize::MAX);
+        stack.push(input4).unwrap();
+        stack.push(input3).unwrap();
+        stack.push(input2).unwrap();
+        stack.push(input1).unwrap();
+        stack.push(input0).unwrap();
+        stack.push((5u16).to_le_bytes().to_vec()).unwrap();
+        stack.push(proof).unwrap();
+        stack.push(unprepared_compressed_vk).unwrap();
         Groth16Precompile::verify_zk(&mut stack).unwrap();
     }
 }
