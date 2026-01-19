@@ -1,11 +1,12 @@
 mod benchmarks;
 mod error;
-// mod groth16;
+mod fields;
+mod groth16;
 pub mod risc0;
 pub mod tags;
 use crate::{
     data_stack::Stack,
-    zk_precompiles::{error::ZkIntegrityError, risc0::R0SuccinctPrecompile, tags::ZkTag},
+    zk_precompiles::{error::ZkIntegrityError, groth16::Groth16Precompile, risc0::R0SuccinctPrecompile, tags::ZkTag},
 };
 use kaspa_txscript_errors::TxScriptError;
 
@@ -27,7 +28,7 @@ pub(crate) fn parse_tag(dstack: &mut Stack) -> Result<ZkTag, TxScriptError> {
 pub(crate) fn verify_zk(tag: ZkTag, dstack: &mut Stack) -> Result<(), TxScriptError> {
     // Matcth the tag and verify the proof accordingly
     match tag {
-        //ZkTag::R0Groth16 => Groth16Precompile::verify_zk(dstack).map_err(|e| TxScriptError::ZkIntegrity(e.to_string())),
+        ZkTag::Groth16 => Groth16Precompile::verify_zk(dstack).map_err(|e| TxScriptError::ZkIntegrity(e.to_string())),
         ZkTag::R0Succinct => R0SuccinctPrecompile::verify_zk(dstack).map_err(|e| TxScriptError::ZkIntegrity(e.to_string())),
     }
 }
