@@ -350,8 +350,8 @@ impl VirtualStateProcessor {
         }
 
         let populated_tx = PopulatedTransaction::new(transaction, entries);
-        let seq_commit_accessor = if pov_daa_score > 0 {
-            // todo replace zero with activation daa
+
+        let seq_commit_accessor = if self.covenants_activation.is_active(pov_daa_score) {
             Some(SeqCommitAccessor::new(sp, &self.reachability_service, &self.headers_store, self.finality_depth))
         } else {
             None
@@ -425,8 +425,7 @@ impl VirtualStateProcessor {
             .feerate_threshold
             .map(|threshold| (contextual_mass.max(mutable_tx.calculated_non_contextual_masses.unwrap()), threshold));
 
-        let seq_commit_accessor = if pov_daa_score > 0 {
-            // todo replace zero with activation daa
+        let seq_commit_accessor = if self.covenants_activation.is_active(pov_daa_score) {
             Some(SeqCommitAccessor::new(sp, &self.reachability_service, &self.headers_store, self.finality_depth))
         } else {
             None
