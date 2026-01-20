@@ -201,7 +201,7 @@ impl VirtualStateProcessor {
 
         // Verify header accepted_id_merkle_root
         let expected_accepted_id_merkle_root =
-            self.calc_accepted_id_merkle_root(ctx.accepted_tx_ids.iter().copied(), ctx.selected_parent());
+            self.calc_accepted_id_merkle_root(header.daa_score, ctx.accepted_tx_ids.iter().copied(), ctx.selected_parent());
 
         if expected_accepted_id_merkle_root != header.accepted_id_merkle_root {
             return Err(BadAcceptedIDMerkleRoot(header.hash, header.accepted_id_merkle_root, expected_accepted_id_merkle_root));
@@ -448,20 +448,23 @@ impl VirtualStateProcessor {
     /// refer KIP-15 for more details
     pub(super) fn calc_accepted_id_merkle_root(
         &self,
+        daa_score: u64, // virtual in case of template, block in case of verification
         accepted_tx_ids: impl ExactSizeIterator<Item = Hash>,
         selected_parent: Hash,
     ) -> Hash {
-        // todo proper transition logic
-        // kaspa_merkle::merkle_hash(
-        //     self.headers_store.get_header(selected_parent).unwrap().accepted_id_merkle_root,
-        //     kaspa_merkle::calc_merkle_root(accepted_tx_ids),
-        // )
-        const HASH_SINGLE_ENTRY: bool = true;
-        kaspa_merkle::merkle_hash_with_hasher(
-            self.headers_store.get_header(selected_parent).unwrap().accepted_id_merkle_root,
-            kaspa_merkle::calc_merkle_root_with_hasher::<SeqCommitmentMerkleBranchHash, HASH_SINGLE_ENTRY>(accepted_tx_ids),
-            SeqCommitmentMerkleBranchHash::new(),
-        )
+        if self.covenants_activation.is_active(daa_score) {
+            const HASH_SINGLE_ENTRY: bool = true;
+            kaspa_merkle::merkle_hash_with_hasher(
+                self.headers_store.get_header(selected_parent).unwrap().accepted_id_merkle_root,
+                kaspa_merkle::calc_merkle_root_with_hasher::<SeqCommitmentMerkleBranchHash, HASH_SINGLE_ENTRY>(accepted_tx_ids),
+                SeqCommitmentMerkleBranchHash::new(),
+            )
+        } else {
+            kaspa_merkle::merkle_hash(
+                self.headers_store.get_header(selected_parent).unwrap().accepted_id_merkle_root,
+                kaspa_merkle::calc_merkle_root(accepted_tx_ids),
+            )
+        }
     }
 }
 
