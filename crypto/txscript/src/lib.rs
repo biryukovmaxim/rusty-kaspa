@@ -1342,6 +1342,7 @@ mod bitcoind_tests {
     use kaspa_consensus_core::tx::{
         PopulatedTransaction, ScriptPublicKey, Transaction, TransactionId, TransactionOutpoint, TransactionOutput,
     };
+    use kaspa_hashes::Hash;
 
     #[derive(PartialEq, Eq, Debug, Clone)]
     enum UnifiedError {
@@ -1436,12 +1437,46 @@ mod bitcoind_tests {
             // Run transaction
             let sig_cache = Cache::new(10_000);
             let reused_values = SigHashReusedValuesUnsync::new();
+
+            struct MockSeqCommitAccessor;
+            const EXPECTED_INPUT_BLOCK_HASH: [u8; 32] = {
+                let mut block = [b'f'; 32];
+                let input = b"input_block";
+                let mut i = 0;
+                while i < input.len() {
+                    block[i] = input[i];
+                    i += 1;
+                }
+                block
+            };
+
+            const EXPECTED_OUTPUT_ROOT_HASH: [u8; 32] = {
+                let mut block = [b'f'; 32];
+                let input = b"output_root_hash";
+                let mut i = 0;
+                while i < input.len() {
+                    block[i] = input[i];
+                    i += 1;
+                }
+                block
+            };
+            impl SeqCommitAccessor for MockSeqCommitAccessor {
+                fn is_selected_block(&self, block_hash: Hash) -> Option<bool> {
+                    (block_hash == Hash::from(EXPECTED_INPUT_BLOCK_HASH)).then_some(true)
+                }
+
+                fn seq_commitment_within_depth(&self, block_hash: Hash) -> Option<Hash> {
+                    (block_hash == Hash::from(EXPECTED_INPUT_BLOCK_HASH)).then_some(Hash::from(EXPECTED_OUTPUT_ROOT_HASH))
+                }
+            }
+
             let mut vm = TxScriptEngine::from_transaction_input(
                 &populated_tx,
                 &populated_tx.tx().inputs[0],
                 0,
                 &populated_tx.entries[0],
-                EngineContext::new(&reused_values, &sig_cache),
+                EngineContext::new(&reused_values, &sig_cache)
+                    .with_seq_commit_accessor_opt(flags.covenants_enabled.then_some(&MockSeqCommitAccessor)),
                 flags,
             );
             vm.execute().map_err(UnifiedError::TxScriptError)
