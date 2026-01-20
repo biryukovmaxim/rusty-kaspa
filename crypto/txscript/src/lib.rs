@@ -1461,7 +1461,7 @@ mod bitcoind_tests {
                 block
             };
             impl SeqCommitAccessor for MockSeqCommitAccessor {
-                fn is_selected_block(&self, block_hash: Hash) -> Option<bool> {
+                fn is_chain_ancestor_from_pov(&self, block_hash: Hash) -> Option<bool> {
                     (block_hash == Hash::from(EXPECTED_INPUT_BLOCK_HASH)).then_some(true)
                 }
 

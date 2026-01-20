@@ -26,8 +26,8 @@ impl<'a> SeqCommitAccessor<'a> {
 }
 
 impl<'a> kaspa_txscript::SeqCommitAccessor for SeqCommitAccessor<'a> {
-    fn is_selected_block(&self, block_hash: Hash) -> Option<bool> {
-        self.reachability_service.try_is_chain_ancestor_of(self.sp, block_hash).ok()
+    fn is_chain_ancestor_from_pov(&self, block_hash: Hash) -> Option<bool> {
+        self.reachability_service.try_is_chain_ancestor_of(block_hash, self.sp).optional().unwrap()
     }
 
     fn seq_commitment_within_depth(&self, block_hash: Hash) -> Option<Hash> {

@@ -1421,7 +1421,7 @@ opcode_list! {
             return Err(TxScriptError::InvalidOpcode(format!("{self:?}")))
         };
         let [block]: [Hash; 1] = vm.dstack.pop_items()?; // todo we actually could convert slice ref into hash ref if it was repr(transparent)
-        match seq_commit_accessor.is_selected_block(block) {
+        match seq_commit_accessor.is_chain_ancestor_from_pov(block) {
             None => return Err(TxScriptError::BlockAlreadyPruned(block.to_string())),
             Some(false) => return Err(TxScriptError::BlockNotSelected(block.to_string())),
             Some(true) => {}
