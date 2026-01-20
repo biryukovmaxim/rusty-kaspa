@@ -145,7 +145,7 @@ impl VirtualStateProcessor {
                 pov_daa_score,
                 self.headers_store.get_daa_score(merged_block).unwrap(),
                 validation_flags,
-                ctx.selected_parent(), // todo is selected parent already set here?
+                ctx.selected_parent(),
             );
 
             ctx.multiset_hash.combine(&inner_multiset);
