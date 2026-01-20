@@ -19,8 +19,9 @@ impl<'a> SeqCommitAccessor<'a> {
         sp: Hash,
         reachability_service: &'a MTReachabilityService<DbReachabilityStore>,
         headers_store: &'a DbHeadersStore,
+        threshold: u64,
     ) -> Self {
-        Self { threshold: 0, sp, sp_blue_score: None, reachability_service, headers_store }
+        Self { threshold, sp, sp_blue_score: None, reachability_service, headers_store }
     }
 }
 
