@@ -32,8 +32,7 @@ impl<'a> kaspa_txscript::SeqCommitAccessor for SeqCommitAccessor<'a> {
 
     fn seq_commitment_within_depth(&self, block_hash: Hash) -> Option<Hash> {
         let header = self.headers_store.get_header(block_hash).optional().unwrap()?;
-        let sp_blue_score =
-            self.sp_blue_score.unwrap_or_else(|| self.headers_store.get_blue_score(self.sp).unwrap());
+        let sp_blue_score = self.sp_blue_score.unwrap_or_else(|| self.headers_store.get_blue_score(self.sp).unwrap());
         if sp_blue_score < header.daa_score + self.threshold {
             Some(header.accepted_id_merkle_root)
         } else {
