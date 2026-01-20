@@ -859,7 +859,7 @@ impl VirtualStateProcessor {
         let virtual_daa_score = virtual_state.daa_score;
         let virtual_past_median_time = virtual_state.past_median_time;
 
-        let sp = virtual_state.parents[0];
+        let sp = virtual_state.ghostdag_data.selected_parent;
         // Run within the thread pool since par_iter might be internally applied to inputs
         self.thread_pool.install(|| {
             self.validate_mempool_transaction_impl(
@@ -883,7 +883,7 @@ impl VirtualStateProcessor {
         let virtual_utxo_view = &virtual_read.utxo_set;
         let virtual_daa_score = virtual_state.daa_score;
         let virtual_past_median_time = virtual_state.past_median_time;
-        let virtual_sp = virtual_state.parents[0];
+        let virtual_sp = virtual_state.ghostdag_data.selected_parent;
         self.thread_pool.install(|| {
             mutable_txs
                 .par_iter_mut()
@@ -957,7 +957,7 @@ impl VirtualStateProcessor {
             virtual_state.daa_score,
             virtual_state.daa_score,
             TxValidationFlags::Full,
-            virtual_state.parents[0],
+            virtual_state.ghostdag_data.selected_parent,
         )?;
         Ok(calculated_fee)
     }
@@ -1196,8 +1196,8 @@ impl VirtualStateProcessor {
         }
 
         let virtual_read = self.virtual_stores.upgradable_read();
-        let sp = virtual_read.state.get().unwrap().parents[0]; // todo is that correct source of sp?
-                                                               // Validate transactions of the pruning point itself
+        let sp = virtual_read.state.get().unwrap().ghostdag_data.selected_parent;
+        // Validate transactions of the pruning point itself
         let new_pruning_point_transactions = self.block_transactions_store.get(new_pruning_point).unwrap();
         let validated_transactions = self.validate_transactions_in_parallel(
             &new_pruning_point_transactions,
