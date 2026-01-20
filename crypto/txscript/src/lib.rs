@@ -86,23 +86,46 @@ pub struct EngineFlags {
     pub covenants_enabled: bool,
 }
 
-pub struct EngineContext<'a, Reused: SigHashReusedValues> {
+/// Marker type indicating that sig-hash reused values have not been bound yet.
+#[derive(Default)]
+pub struct MissingReusedValues;
+
+/// Shared execution context for script evaluation.
+///
+/// Parameterized by the availability/type of sig-hash reused values.
+pub struct EngineContext<'a, Reused> {
     reused_values: &'a Reused,
     sig_cache: &'a Cache<SigCacheKey, bool>,
     covenants_ctx: &'a CovenantsContext,
 }
 
+impl<'a, Reused> EngineContext<'a, Reused> {
+    /// Attach a covenants context to an existing engine context.
+    pub fn with_covenants_ctx(mut self, covenants_ctx: &'a CovenantsContext) -> Self {
+        self.covenants_ctx = covenants_ctx;
+        self
+    }
+}
+
 impl<'a, Reused: SigHashReusedValues> EngineContext<'a, Reused> {
+    /// Create a context with bound reused values, using an empty covenants context.
     pub fn new(reused_values: &'a Reused, sig_cache: &'a Cache<SigCacheKey, bool>) -> Self {
         Self { reused_values, sig_cache, covenants_ctx: &EMPTY_COV_CONTEXT }
     }
+}
 
-    pub fn with_covenants_ctx(
-        reused_values: &'a Reused,
-        sig_cache: &'a Cache<SigCacheKey, bool>,
-        covenants_ctx: &'a CovenantsContext,
-    ) -> Self {
-        Self { reused_values, sig_cache, covenants_ctx }
+impl<'a> EngineContext<'a, MissingReusedValues> {
+    const MISSING: MissingReusedValues = MissingReusedValues;
+
+    /// Create a context without bound reused values, using an empty covenants context.
+    pub fn with_missing(sig_cache: &'a Cache<SigCacheKey, bool>) -> Self {
+        Self { reused_values: &Self::MISSING, sig_cache, covenants_ctx: &EMPTY_COV_CONTEXT }
+    }
+
+    /// Upgrade the context by binding concrete sig-hash reused values (one-way).
+    #[inline]
+    pub fn with_reused<New: SigHashReusedValues>(self, reused_values: &'a New) -> EngineContext<'a, New> {
+        EngineContext { reused_values, sig_cache: self.sig_cache, covenants_ctx: self.covenants_ctx }
     }
 }
 
@@ -181,7 +204,7 @@ pub fn get_sig_op_count<T: VerifiableTransaction>(
 ) -> Result<u8, TxScriptError> {
     let sig_cache = Cache::new(0);
     let reused_values = SigHashReusedValuesUnsync::new();
-    let ctx = EngineContext::with_covenants_ctx(&reused_values, &sig_cache, covenants_ctx);
+    let ctx = EngineContext::new(&reused_values, &sig_cache).with_covenants_ctx(covenants_ctx);
     let mut vm = TxScriptEngine::from_transaction_input(
         tx,
         &tx.inputs()[input_idx],

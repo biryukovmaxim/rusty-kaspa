@@ -4,9 +4,8 @@ use kaspa_consensus_core::{
     tx::{TransactionInput, VerifiableTransaction},
 };
 use kaspa_txscript::{
-    caches::Cache,
     covenants::{CovenantGlobalContext, CovenantLocalContext, CovenantsContext},
-    get_sig_op_count_upper_bound, EngineContext, EngineFlags, SigCacheKey, TxScriptEngine,
+    get_sig_op_count_upper_bound, EngineContext, EngineFlags, MissingReusedValues, TxScriptEngine,
 };
 use kaspa_txscript_errors::TxScriptError;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -59,7 +58,7 @@ impl TransactionValidator {
 
         match flags {
             TxValidationFlags::Full | TxValidationFlags::SkipMassCheck => {
-                self.check_scripts_with_covenants(tx, covenants_ctx, block_daa_score)?;
+                self.check_scripts(tx, covenants_ctx, block_daa_score)?;
             }
             TxValidationFlags::SkipScriptChecks => {}
         }
@@ -171,27 +170,15 @@ impl TransactionValidator {
         Ok(())
     }
 
-    pub fn check_scripts(&self, tx: &(impl VerifiableTransaction + Sync), block_daa_score: u64) -> TxResult<()> {
-        check_scripts(
-            &self.sig_cache,
-            tx,
-            Default::default(),
-            EngineFlags { covenants_enabled: self.covenants_activation.is_active(block_daa_score) },
-        )
-    }
-
-    pub fn check_scripts_with_covenants(
+    pub fn check_scripts(
         &self,
         tx: &(impl VerifiableTransaction + Sync),
         covenants_ctx: CovenantsContext,
         block_daa_score: u64,
     ) -> TxResult<()> {
-        check_scripts(
-            &self.sig_cache,
-            tx,
-            covenants_ctx,
-            EngineFlags { covenants_enabled: self.covenants_activation.is_active(block_daa_score) },
-        )
+        let ctx = EngineContext::with_missing(&self.sig_cache).with_covenants_ctx(&covenants_ctx);
+        let flags = EngineFlags { covenants_enabled: self.covenants_activation.is_active(block_daa_score) };
+        check_scripts(tx, ctx, flags)
     }
 
     fn check_covenant_info(&self, tx: &impl VerifiableTransaction, block_daa_score: u64) -> TxResult<CovenantsContext> {
@@ -259,26 +246,24 @@ impl TransactionValidator {
 }
 
 pub fn check_scripts(
-    sig_cache: &Cache<SigCacheKey, bool>,
     tx: &(impl VerifiableTransaction + Sync),
-    covenants_ctx: CovenantsContext,
+    ctx: EngineContext<'_, MissingReusedValues>,
     flags: EngineFlags,
 ) -> TxResult<()> {
     if tx.inputs().len() > CHECK_SCRIPTS_PARALLELISM_THRESHOLD {
-        check_scripts_par_iter(sig_cache, tx, covenants_ctx, flags)
+        let reused_values = SigHashReusedValuesSync::new();
+        check_scripts_par_iter(tx, ctx.with_reused(&reused_values), flags)
     } else {
-        check_scripts_sequential(sig_cache, tx, covenants_ctx, flags)
+        let reused_values = SigHashReusedValuesUnsync::new();
+        check_scripts_sequential(tx, ctx.with_reused(&reused_values), flags)
     }
 }
 
 pub fn check_scripts_sequential(
-    sig_cache: &Cache<SigCacheKey, bool>,
     tx: &impl VerifiableTransaction,
-    covenants_ctx: CovenantsContext,
+    ctx: EngineContext<'_, SigHashReusedValuesUnsync>,
     flags: EngineFlags,
 ) -> TxResult<()> {
-    let reused_values = SigHashReusedValuesUnsync::new();
-    let ctx = EngineContext::with_covenants_ctx(&reused_values, sig_cache, &covenants_ctx);
     for (i, (input, entry)) in tx.populated_inputs().enumerate() {
         TxScriptEngine::from_transaction_input(tx, input, i, entry, ctx, flags).execute().map_err(|err| map_script_err(err, input))?;
     }
@@ -286,13 +271,10 @@ pub fn check_scripts_sequential(
 }
 
 pub fn check_scripts_par_iter(
-    sig_cache: &Cache<SigCacheKey, bool>,
     tx: &(impl VerifiableTransaction + Sync),
-    covenants_ctx: CovenantsContext,
+    ctx: EngineContext<'_, SigHashReusedValuesSync>,
     flags: EngineFlags,
 ) -> TxResult<()> {
-    let reused_values = SigHashReusedValuesSync::new();
-    let ctx = EngineContext::with_covenants_ctx(&reused_values, sig_cache, &covenants_ctx);
     (0..tx.inputs().len()).into_par_iter().try_for_each(|idx| {
         let (input, utxo) = tx.populated_input(idx);
         TxScriptEngine::from_transaction_input(tx, input, idx, utxo, ctx, flags).execute().map_err(|err| map_script_err(err, input))
@@ -300,13 +282,12 @@ pub fn check_scripts_par_iter(
 }
 
 pub fn check_scripts_par_iter_pool(
-    sig_cache: &Cache<SigCacheKey, bool>,
     tx: &(impl VerifiableTransaction + Sync),
-    covenants_ctx: CovenantsContext,
-    pool: &ThreadPool,
+    ctx: EngineContext<'_, SigHashReusedValuesSync>,
     flags: EngineFlags,
+    pool: &ThreadPool,
 ) -> TxResult<()> {
-    pool.install(|| check_scripts_par_iter(sig_cache, tx, covenants_ctx, flags))
+    pool.install(|| check_scripts_par_iter(tx, ctx, flags))
 }
 
 fn map_script_err(script_err: TxScriptError, input: &TransactionInput) -> TxRuleError {
@@ -411,13 +392,13 @@ mod tests {
         );
 
         let flags = Default::default();
-        tv.check_scripts(&populated_tx, flags).expect("Signature check failed");
+        tv.check_scripts(&populated_tx, Default::default(), flags).expect("Signature check failed");
 
         // Test a tx with 2 inputs to cover parallelism split points in inner script checking code
         let (tx2, entries2) = duplicate_input(&tx, &populated_tx.entries);
         // Duplicated sigs should fail due to wrong sighash
         assert_eq!(
-            tv.check_scripts(&PopulatedTransaction::new(&tx2, entries2), flags),
+            tv.check_scripts(&PopulatedTransaction::new(&tx2, entries2), Default::default(), flags),
             Err(TxRuleError::SignatureInvalid(TxScriptError::EvalFalse))
         );
     }
@@ -491,11 +472,12 @@ mod tests {
         );
 
         let flags = Default::default();
-        assert!(tv.check_scripts(&populated_tx, flags).is_err(), "Expecting signature check to fail");
+        assert!(tv.check_scripts(&populated_tx, Default::default(), flags).is_err(), "Expecting signature check to fail");
 
         // Test a tx with 2 inputs to cover parallelism split points in inner script checking code
         let (tx2, entries2) = duplicate_input(&tx, &populated_tx.entries);
-        tv.check_scripts(&PopulatedTransaction::new(&tx2, entries2), flags).expect_err("Expecting signature check to fail");
+        tv.check_scripts(&PopulatedTransaction::new(&tx2, entries2), Default::default(), flags)
+            .expect_err("Expecting signature check to fail");
 
         // Verify we are correctly testing the parallelism case (applied here as sanity for all tests)
         assert!(
@@ -575,13 +557,13 @@ mod tests {
         );
 
         let flags = Default::default();
-        tv.check_scripts(&populated_tx, flags).expect("Signature check failed");
+        tv.check_scripts(&populated_tx, Default::default(), flags).expect("Signature check failed");
 
         // Test a tx with 2 inputs to cover parallelism split points in inner script checking code
         let (tx2, entries2) = duplicate_input(&tx, &populated_tx.entries);
         // Duplicated sigs should fail due to wrong sighash
         assert_eq!(
-            tv.check_scripts(&PopulatedTransaction::new(&tx2, entries2), flags),
+            tv.check_scripts(&PopulatedTransaction::new(&tx2, entries2), Default::default(), flags),
             Err(TxRuleError::SignatureInvalid(TxScriptError::NullFail))
         );
     }
@@ -656,12 +638,15 @@ mod tests {
         );
 
         let flags = Default::default();
-        assert_eq!(tv.check_scripts(&populated_tx, flags), Err(TxRuleError::SignatureInvalid(TxScriptError::NullFail)));
+        assert_eq!(
+            tv.check_scripts(&populated_tx, Default::default(), flags),
+            Err(TxRuleError::SignatureInvalid(TxScriptError::NullFail))
+        );
 
         // Test a tx with 2 inputs to cover parallelism split points in inner script checking code
         let (tx2, entries2) = duplicate_input(&tx, &populated_tx.entries);
         assert_eq!(
-            tv.check_scripts(&PopulatedTransaction::new(&tx2, entries2), flags),
+            tv.check_scripts(&PopulatedTransaction::new(&tx2, entries2), Default::default(), flags),
             Err(TxRuleError::SignatureInvalid(TxScriptError::NullFail))
         );
     }
@@ -736,12 +721,15 @@ mod tests {
         );
 
         let flags = Default::default();
-        assert_eq!(tv.check_scripts(&populated_tx, flags), Err(TxRuleError::SignatureInvalid(TxScriptError::NullFail)));
+        assert_eq!(
+            tv.check_scripts(&populated_tx, Default::default(), flags),
+            Err(TxRuleError::SignatureInvalid(TxScriptError::NullFail))
+        );
 
         // Test a tx with 2 inputs to cover parallelism split points in inner script checking code
         let (tx2, entries2) = duplicate_input(&tx, &populated_tx.entries);
         assert_eq!(
-            tv.check_scripts(&PopulatedTransaction::new(&tx2, entries2), flags),
+            tv.check_scripts(&PopulatedTransaction::new(&tx2, entries2), Default::default(), flags),
             Err(TxRuleError::SignatureInvalid(TxScriptError::NullFail))
         );
     }
@@ -816,12 +804,15 @@ mod tests {
         );
 
         let flags = Default::default();
-        assert_eq!(tv.check_scripts(&populated_tx, flags), Err(TxRuleError::SignatureInvalid(TxScriptError::EvalFalse)));
+        assert_eq!(
+            tv.check_scripts(&populated_tx, Default::default(), flags),
+            Err(TxRuleError::SignatureInvalid(TxScriptError::EvalFalse))
+        );
 
         // Test a tx with 2 inputs to cover parallelism split points in inner script checking code
         let (tx2, entries2) = duplicate_input(&tx, &populated_tx.entries);
         assert_eq!(
-            tv.check_scripts(&PopulatedTransaction::new(&tx2, entries2), flags),
+            tv.check_scripts(&PopulatedTransaction::new(&tx2, entries2), Default::default(), flags),
             Err(TxRuleError::SignatureInvalid(TxScriptError::EvalFalse))
         );
     }
@@ -884,14 +875,14 @@ mod tests {
 
         let flags = Default::default();
         assert_eq!(
-            tv.check_scripts(&populated_tx, flags),
+            tv.check_scripts(&populated_tx, Default::default(), flags),
             Err(TxRuleError::SignatureInvalid(TxScriptError::SignatureScriptNotPushOnly))
         );
 
         // Test a tx with 2 inputs to cover parallelism split points in inner script checking code
         let (tx2, entries2) = duplicate_input(&tx, &populated_tx.entries);
         assert_eq!(
-            tv.check_scripts(&PopulatedTransaction::new(&tx2, entries2), flags),
+            tv.check_scripts(&PopulatedTransaction::new(&tx2, entries2), Default::default(), flags),
             Err(TxRuleError::SignatureInvalid(TxScriptError::SignatureScriptNotPushOnly))
         );
     }
@@ -983,7 +974,7 @@ mod tests {
         let schnorr_key = secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, &secret_key.secret_bytes()).unwrap();
         let signed_tx = sign(MutableTransaction::with_entries(unsigned_tx, entries), schnorr_key);
         let populated_tx = signed_tx.as_verifiable();
-        assert_eq!(tv.check_scripts(&populated_tx, Default::default()), Ok(()));
+        assert_eq!(tv.check_scripts(&populated_tx, Default::default(), Default::default()), Ok(()));
         assert_eq!(TransactionValidator::check_sig_op_counts(&populated_tx), Ok(()));
     }
 }
