@@ -44,7 +44,7 @@ pub mod seq_commit_accessor;
 
 pub mod engine_context;
 
-pub use engine_context::EngineContext;
+pub use engine_context::{EngineContext, MissingReusedValues};
 
 pub const MAX_SCRIPT_PUBLIC_KEY_VERSION: u16 = 0;
 pub const MAX_STACK_SIZE: usize = 244;
