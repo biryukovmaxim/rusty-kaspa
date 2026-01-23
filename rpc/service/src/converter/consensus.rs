@@ -363,7 +363,11 @@ impl ConsensusConverter {
             } else {
                 Default::default()
             },
-            covenant: if verbosity.include_covenant.is_some_and(|v| v) { output.covenant.map(Into::into) } else { Default::default() },
+            covenant: if verbosity.include_covenant.is_some_and(|v| v) {
+                output.covenant.map(|v| Some(v.into()))
+            } else {
+                Default::default()
+            },
         })
     }
 

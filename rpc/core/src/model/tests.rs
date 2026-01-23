@@ -271,12 +271,6 @@ mod mockery {
         }
     }
 
-    impl Mock for RpcOptionalCovenantBinding {
-        fn mock() -> Self {
-            Self(mock())
-        }
-    }
-
     impl Mock for RpcTransactionVerboseData {
         fn mock() -> Self {
             RpcTransactionVerboseData {

@@ -1,8 +1,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use kaspa_addresses::Address;
 use kaspa_consensus_core::tx::{
-    CovenantBinding, ScriptPublicKey, TransactionId, TransactionIndexType, TransactionInput, TransactionOutpoint, TransactionOutput,
-    UtxoEntry,
+    ScriptPublicKey, TransactionId, TransactionIndexType, TransactionInput, TransactionOutpoint, TransactionOutput, UtxoEntry,
 };
 use kaspa_utils::{hex::ToHex, serde_bytes_fixed_ref};
 use serde::{Deserialize, Serialize};
@@ -334,7 +333,7 @@ pub struct RpcOptionalTransactionOutput {
     /// Level - Low
     pub script_public_key: Option<RpcScriptPublicKey>,
     pub verbose_data: Option<RpcOptionalTransactionOutputVerboseData>,
-    pub covenant: Option<RpcOptionalCovenantBinding>,
+    pub covenant: Option<Option<RpcCovenantBinding>>,
 }
 
 impl RpcOptionalTransactionOutput {
@@ -355,7 +354,7 @@ impl From<TransactionOutput> for RpcOptionalTransactionOutput {
             value: Some(output.value),
             script_public_key: Some(output.script_public_key),
             verbose_data: None,
-            covenant: output.covenant.map(Into::into),
+            covenant: output.covenant.map(|v| Some(v.into())),
         }
     }
 }
@@ -366,7 +365,7 @@ impl Serializer for RpcOptionalTransactionOutput {
         store!(Option<u64>, &self.value, writer)?;
         store!(Option<RpcScriptPublicKey>, &self.script_public_key, writer)?;
         serialize!(Option<RpcOptionalTransactionOutputVerboseData>, &self.verbose_data, writer)?;
-        serialize!(Option<RpcOptionalCovenantBinding>, &self.covenant, writer)?;
+        serialize!(Option<Option<RpcCovenantBinding>>, &self.covenant, writer)?;
 
         Ok(())
     }
@@ -378,7 +377,7 @@ impl Deserializer for RpcOptionalTransactionOutput {
         let value = load!(Option<u64>, reader)?;
         let script_public_key = load!(Option<RpcScriptPublicKey>, reader)?;
         let verbose_data = deserialize!(Option<RpcOptionalTransactionOutputVerboseData>, reader)?;
-        let covenant = if version > 1 { deserialize!(Option<RpcOptionalCovenantBinding>, reader)? } else { None };
+        let covenant = if version > 1 { deserialize!(Option<Option<RpcCovenantBinding>>, reader)? } else { None };
 
         Ok(Self { value, script_public_key, verbose_data, covenant })
     }
@@ -416,54 +415,6 @@ impl Deserializer for RpcOptionalTransactionOutputVerboseData {
         let script_public_key_type = load!(Option<RpcScriptClass>, reader)?;
         let script_public_key_address = load!(Option<Address>, reader)?;
         Ok(Self { script_public_key_type, script_public_key_address })
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RpcOptionalCovenantBinding(pub Option<RpcCovenantBinding>);
-
-impl Serializer for RpcOptionalCovenantBinding {
-    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        store!(u8, &1, writer)?;
-        serialize!(Option<RpcCovenantBinding>, &self.0, writer)?;
-
-        Ok(())
-    }
-}
-
-impl Deserializer for RpcOptionalCovenantBinding {
-    fn deserialize<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
-        let _version = load!(u8, reader)?;
-        let covenant = deserialize!(Option<RpcCovenantBinding>, reader)?;
-        Ok(Self(covenant))
-    }
-}
-
-impl From<RpcCovenantBinding> for RpcOptionalCovenantBinding {
-    fn from(value: RpcCovenantBinding) -> Self {
-        Self(Some(value))
-    }
-}
-
-impl From<Option<RpcCovenantBinding>> for RpcOptionalCovenantBinding {
-    fn from(value: Option<RpcCovenantBinding>) -> Self {
-        Self(value)
-    }
-}
-
-impl From<CovenantBinding> for RpcOptionalCovenantBinding {
-    fn from(value: CovenantBinding) -> Self {
-        Self(Some(value.into()))
-    }
-}
-
-impl TryFrom<RpcOptionalCovenantBinding> for RpcCovenantBinding {
-    type Error = RpcError;
-
-    fn try_from(covenant: RpcOptionalCovenantBinding) -> RpcResult<Self> {
-        let covenant = covenant.0.ok_or(RpcError::General("covenant binding is none".to_string()))?;
-        Ok(Self(CovenantBinding { authorizing_input: covenant.0.authorizing_input, covenant_id: covenant.0.covenant_id }))
     }
 }
 

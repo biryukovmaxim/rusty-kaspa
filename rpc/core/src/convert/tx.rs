@@ -116,7 +116,7 @@ impl From<&TransactionOutput> for RpcOptionalTransactionOutput {
             value: Some(item.value),
             script_public_key: Some(item.script_public_key.clone()),
             verbose_data: None,
-            covenant: item.covenant.map(Into::into),
+            covenant: item.covenant.map(|v| Some(v.into())),
         }
     }
 }
