@@ -384,17 +384,17 @@ impl<S, M> TypedScriptBuilder<Data<S>, M> {
 
 impl<S, M> TypedScriptBuilder<Hash<S>, M> {
     /// Reinterpret an on-stack SHA-256 hash as a RISC0 journal digest. No opcode emitted.
-    pub fn as_r0_succinct_journal_digest(self) -> TypedScriptBuilder<R0SuccinctJournalDigest<S>, M> {
+    pub fn into_r0_succinct_journal_digest(self) -> TypedScriptBuilder<R0SuccinctJournalDigest<S>, M> {
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 
     /// Reinterpret an on-stack SHA-256 hash as a RISC0 image ID. No opcode emitted.
-    pub fn as_r0_succinct_image_id(self) -> TypedScriptBuilder<R0SuccinctImageId<S>, M> {
+    pub fn into_r0_succinct_image_id(self) -> TypedScriptBuilder<R0SuccinctImageId<S>, M> {
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 
     /// Reinterpret an on-stack SHA-256 hash as a RISC0 claim digest. No opcode emitted.
-    pub fn as_r0_succinct_claim(self) -> TypedScriptBuilder<R0SuccinctClaim<S>, M> {
+    pub fn into_r0_succinct_claim(self) -> TypedScriptBuilder<R0SuccinctClaim<S>, M> {
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 }
@@ -1192,14 +1192,14 @@ impl<S, M> R0SuccinctVerify
 
 #[diagnostic::on_unimplemented(
     message = "the stack is not ready for `groth16_verify()`",
-    label = "expected stack (top→bottom): Groth16Tag, G16Vk, G16Proof, Num(n_inputs), then Bn254Fr elements",
-    note = "push items bottom-to-top: .add_bn254_fr()...add_i64(n).add_g16_proof().add_g16_vk().add_groth16_tag()"
+    label = "expected stack (top→bottom): Groth16Tag, G16Vk, G16Proof, Num(n_inputs), Bn254Fr, ...",
+    note = "push items bottom-to-top: .add_bn254_fr()...add_i64(n).add_g16_proof().add_g16_vk().add_groth16_tag()\n\nNote: the builder requires at least one Bn254Fr element but cannot verify the count matches n_inputs at compile time."
 )]
 pub trait G16Verify {
     fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, ()>;
 }
 
-impl<S, M> G16Verify for TypedScriptBuilder<Groth16Tag<G16Vk<G16Proof<Num<S>>>>, M> {
+impl<S, M> G16Verify for TypedScriptBuilder<Groth16Tag<G16Vk<G16Proof<Num<Bn254Fr<S>>>>>, M> {
     fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, ()> {
         self.emit_op(OpZkPrecompile)
     }
@@ -1231,6 +1231,29 @@ impl<S, M> TypedScriptBuilder<S, M> {
     ///
     /// The stack (top→bottom) must be:
     /// `Groth16Tag`, `G16Vk`, `G16Proof`, `Num(n_inputs)`, then `Bn254Fr` elements.
+    ///
+    /// ```compile_fail
+    /// use kaspa_txscript_typed_builder::TypedScriptBuilder;
+    /// // Data instead of Bn254Fr — should not compile
+    /// let _ = TypedScriptBuilder::new()
+    ///     .add_data(&[0u8; 32])
+    ///     .add_i64(1)
+    ///     .add_g16_proof(&[])
+    ///     .add_g16_vk(&[])
+    ///     .add_groth16_tag()
+    ///     .groth16_verify();
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use kaspa_txscript_typed_builder::TypedScriptBuilder;
+    /// // Zero fields — should not compile
+    /// let _ = TypedScriptBuilder::new()
+    ///     .add_i64(0)
+    ///     .add_g16_proof(&[])
+    ///     .add_g16_vk(&[])
+    ///     .add_groth16_tag()
+    ///     .groth16_verify();
+    /// ```
     pub fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, ()>
     where
         Self: G16Verify,
@@ -2176,11 +2199,11 @@ mod tests {
         let input4 = hex::decode("c07a65145c3cb48b6101962ea607a4dd93c753bb26975cb47feb00d3666e4404").unwrap();
 
         let typed = TypedScriptBuilder::new()
-            .add_data(&input4)
-            .add_data(&input3)
-            .add_data(&input2)
-            .add_data(&input1)
-            .add_data(&input0)
+            .add_bn254_fr(&Fr::try_from(input4.as_slice()).unwrap())
+            .add_bn254_fr(&Fr::try_from(input3.as_slice()).unwrap())
+            .add_bn254_fr(&Fr::try_from(input2.as_slice()).unwrap())
+            .add_bn254_fr(&Fr::try_from(input1.as_slice()).unwrap())
+            .add_bn254_fr(&Fr::try_from(input0.as_slice()).unwrap())
             .add_i64(5)
             .add_g16_proof(&groth16_proof_bytes)
             .add_g16_vk(&unprepared_compressed_vk)
@@ -2409,7 +2432,7 @@ mod tests {
         let typed = TypedScriptBuilder::new()
             .add_data(&[1, 2, 3])
             .op_sha256()
-            .as_r0_succinct_journal_digest()
+            .into_r0_succinct_journal_digest()
             .downcast()
             .add_data(&[0xAA; 32])
             .op_equal();
