@@ -55,6 +55,7 @@ members = [
     "database",
     "crypto/txscript",
     "crypto/txscript/errors",
+    "crypto/txscript/typed-builder",
     "testing/integration",
     "utils",
     "utils/tower",
@@ -121,6 +122,7 @@ kaspa-rpc-macros = { version = "1.1.0-rc.2", path = "rpc/macros" }
 kaspa-rpc-service = { version = "1.1.0-rc.2", path = "rpc/service" }
 kaspa-txscript = { version = "1.1.0-rc.2", path = "crypto/txscript" }
 kaspa-txscript-errors = { version = "1.1.0-rc.2", path = "crypto/txscript/errors" }
+kaspa-txscript-typed-builder = { version = "1.1.0-rc.2", path = "crypto/txscript/typed-builder" }
 kaspa-utils = { version = "1.1.0-rc.2", path = "utils" }
 kaspa-utils-tower = { version = "1.1.0-rc.2", path = "utils/tower" }
 kaspa-utxoindex = { version = "1.1.0-rc.2", path = "indexes/utxoindex" }

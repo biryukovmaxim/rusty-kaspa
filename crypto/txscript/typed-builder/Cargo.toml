@@ -1,0 +1,16 @@
+[package]
+name = "kaspa-txscript-typed-builder"
+description = "Type-safe script builder for Kaspa txscript"
+rust-version.workspace = true
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+include.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kaspa-txscript.workspace = true
+
+[dev-dependencies]
+kaspa-consensus-core.workspace = true

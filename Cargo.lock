@@ -3732,6 +3732,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaspa-txscript-typed-builder"
+version = "1.1.0-rc.2"
+dependencies = [
+ "kaspa-consensus-core",
+ "kaspa-txscript",
+]
+
+[[package]]
 name = "kaspa-utils"
 version = "1.1.0-rc.2"
 dependencies = [
