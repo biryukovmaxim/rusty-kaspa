@@ -59,12 +59,17 @@ pub struct G16Vk<S>(PhantomData<S>);
 /// Groth16 proof (variable-length bytes).
 pub struct G16Proof<S>(PhantomData<S>);
 
+/// Marker for a fixed-count group of N elements of type T.
+/// `S` is the rest of the stack beneath the consumed elements.
+pub struct FixedNum<const N: usize, T, S>(PhantomData<(T, S)>);
+
 // ---------------------------------------------------------------------------
 // StackEntry trait (sealed, with GAT)
 // ---------------------------------------------------------------------------
 
 mod sealed {
     pub trait Sealed {}
+    pub trait NotBn254Fr {}
 }
 
 /// Trait implemented by all type-level stack markers.
@@ -100,6 +105,37 @@ impl_stack_entry!(
     G16Vk,
     G16Proof
 );
+
+impl<const N: usize, T, S> sealed::Sealed for FixedNum<N, T, S> {}
+impl<const N: usize, T, S> StackEntry for FixedNum<N, T, S> {
+    type Rest = S;
+    type Wrap<U> = FixedNum<N, T, U>;
+}
+impl<const N: usize, T, S> sealed::NotBn254Fr for FixedNum<N, T, S> {}
+
+macro_rules! impl_not_bn254fr {
+    ($($Marker:ident),*) => {$(
+        impl<S> sealed::NotBn254Fr for $Marker<S> {}
+    )*};
+}
+impl_not_bn254fr!(
+    Num,
+    Bool,
+    Data,
+    Hash,
+    Groth16Tag,
+    R0SuccinctTag,
+    R0SuccinctSeal,
+    R0SuccinctClaim,
+    R0SuccinctHashFn,
+    R0SuccinctControlIndex,
+    R0SuccinctControlDigests,
+    R0SuccinctJournalDigest,
+    R0SuccinctImageId,
+    G16Vk,
+    G16Proof
+);
+impl sealed::NotBn254Fr for () {}
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -1187,20 +1223,110 @@ impl<S, M> R0SuccinctVerify
 }
 
 // ---------------------------------------------------------------------------
+// ZK Precompile: FixedNum input counting (trait + macro)
+// ---------------------------------------------------------------------------
+
+#[diagnostic::on_unimplemented(
+    message = "cannot call `add_g16_fixed_num::<{N}>()` on this stack",
+    label = "expected 0..N Bn254Fr elements on the stack",
+    note = "push Bn254Fr elements with .add_bn254_fr(), then call .add_g16_fixed_num::<N>()\nAny shortfall is added to missing inputs for the signature builder."
+)]
+pub trait G16FixedNumInputs<const N: usize> {
+    type Rest;
+    type NewMissing;
+}
+
+macro_rules! impl_g16_fixed_num {
+    // Entry point: N as literal, N underscore tokens for counting
+    ($N:literal; $($tokens:tt)*) => {
+        impl_g16_fixed_num!(@step $N; stack=[]; missing=[$($tokens)*]);
+    };
+
+    // All tokens shifted from missing to stack → emit final (K=N) impl
+    (@step $N:literal; stack=[$($s:tt)*]; missing=[]) => {
+        impl_g16_fixed_num!(@emit $N; [$($s)*]; []);
+    };
+
+    // Emit impl for current K, then shift one token from missing to stack
+    (@step $N:literal; stack=[$($s:tt)*]; missing=[_ $($m:tt)*]) => {
+        impl_g16_fixed_num!(@emit $N; [$($s)*]; [_ $($m)*]);
+        impl_g16_fixed_num!(@step $N; stack=[$($s)* _]; missing=[$($m)*]);
+    };
+
+    // Emit a single impl
+    (@emit $N:literal; [$($s:tt)*]; [$($m:tt)*]) => {
+        impl<S: sealed::NotBn254Fr, M> G16FixedNumInputs<$N>
+            for TypedScriptBuilder<impl_g16_fixed_num!(@wrap [$($s)*] S), M>
+        {
+            type Rest = S;
+            type NewMissing = impl_g16_fixed_num!(@wrap [$($m)*] M);
+        }
+    };
+
+    // Helper: wrap $inner in K layers of Bn254Fr<...>
+    (@wrap [] $inner:ty) => { $inner };
+    (@wrap [_ $($rest:tt)*] $inner:ty) => {
+        Bn254Fr<impl_g16_fixed_num!(@wrap [$($rest)*] $inner)>
+    };
+}
+
+impl_g16_fixed_num!(1; _);
+impl_g16_fixed_num!(2; _ _);
+impl_g16_fixed_num!(3; _ _ _);
+impl_g16_fixed_num!(4; _ _ _ _);
+impl_g16_fixed_num!(5; _ _ _ _ _);
+impl_g16_fixed_num!(6; _ _ _ _ _ _);
+impl_g16_fixed_num!(7; _ _ _ _ _ _ _);
+impl_g16_fixed_num!(8; _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(9; _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(10; _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(11; _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(12; _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(13; _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(14; _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(15; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(16; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(17; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(18; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(19; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(20; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(21; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(22; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(23; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(24; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(25; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(26; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(27; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(28; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(29; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(30; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(31; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_g16_fixed_num!(32; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+
+// ---------------------------------------------------------------------------
 // ZK Precompile: Groth16 verify (trait-based)
 // ---------------------------------------------------------------------------
 
 #[diagnostic::on_unimplemented(
     message = "the stack is not ready for `groth16_verify()`",
-    label = "expected stack (top→bottom): Groth16Tag, G16Vk, G16Proof, Num(n_inputs), Bn254Fr, ...",
-    note = "push items bottom-to-top: .add_bn254_fr()...add_i64(n).add_g16_proof().add_g16_vk().add_groth16_tag()\n\nNote: the builder requires at least one Bn254Fr element but cannot verify the count matches n_inputs at compile time."
+    label = "expected stack (top→bottom): Groth16Tag, G16Vk, G16Proof, then Num(n)+Bn254Fr... or FixedNum<N>",
+    note = "Two paths:\n  1. .add_bn254_fr()...add_i64(n).add_g16_proof().add_g16_vk().add_groth16_tag()\n  2. .add_bn254_fr()...add_g16_fixed_num::<N>().add_g16_proof().add_g16_vk().add_groth16_tag()"
 )]
 pub trait G16Verify {
-    fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, ()>;
+    type Missing;
+    fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, Self::Missing>;
 }
 
 impl<S, M> G16Verify for TypedScriptBuilder<Groth16Tag<G16Vk<G16Proof<Num<Bn254Fr<S>>>>>, M> {
-    fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, ()> {
+    type Missing = M;
+    fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, M> {
+        self.emit_op(OpZkPrecompile)
+    }
+}
+
+impl<const N: usize, S, M> G16Verify for TypedScriptBuilder<Groth16Tag<G16Vk<G16Proof<FixedNum<N, Bn254Fr<()>, S>>>>, M> {
+    type Missing = M;
+    fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, M> {
         self.emit_op(OpZkPrecompile)
     }
 }
@@ -1225,6 +1351,27 @@ impl<S, M> TypedScriptBuilder<S, M> {
         Self: R0SuccinctVerify,
     {
         R0SuccinctVerify::risc0_succinct_verify(self)
+    }
+
+    /// Pushes the input count N and transitions the stack to `FixedNum<N, Bn254Fr, Rest>`.
+    ///
+    /// If fewer than N `Bn254Fr` elements are on the stack, the shortfall is added
+    /// to the missing-inputs type for the signature builder.
+    ///
+    /// ```compile_fail
+    /// use kaspa_txscript_typed_builder::TypedScriptBuilder;
+    /// // N=0 has no impls (starts at 1) — should not compile
+    /// let _ = TypedScriptBuilder::new()
+    ///     .add_g16_fixed_num::<0>();
+    /// ```
+    pub fn add_g16_fixed_num<const N: usize>(
+        mut self,
+    ) -> TypedScriptBuilder<FixedNum<N, Bn254Fr<()>, <Self as G16FixedNumInputs<N>>::Rest>, <Self as G16FixedNumInputs<N>>::NewMissing>
+    where
+        Self: G16FixedNumInputs<N>,
+    {
+        self.builder.add_i64(N as i64).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 
     /// Verifies a Groth16 ZK proof.
@@ -1254,7 +1401,7 @@ impl<S, M> TypedScriptBuilder<S, M> {
     ///     .add_groth16_tag()
     ///     .groth16_verify();
     /// ```
-    pub fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, ()>
+    pub fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, <Self as G16Verify>::Missing>
     where
         Self: G16Verify,
     {
@@ -2478,5 +2625,101 @@ mod tests {
             .add_op(OpTrue)
             .unwrap();
         assert_eq!(typed_vk.redeem_script(), manual_vk.script());
+    }
+
+    // -----------------------------------------------------------------------
+    // FixedNum tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_zk_groth16_fixed_num() {
+        use kaspa_txscript::hex;
+        use kaspa_txscript::zk_precompiles::tests::helpers::{build_groth_script, execute_zk_script};
+
+        let unprepared_compressed_vk = hex::decode("e2f26dbea299f5223b646cb1fb33eadb059d9407559d7441dfd902e3a79a4d2dabb73dc17fbc13021e2471e0c08bd67d8401f52b73d6d07483794cad4778180e0c06f33bbc4c79a9cadef253a68084d382f17788f885c9afd176f7cb2f036789edf692d95cbdde46ddda5ef7d422436779445c5e66006a42761e1f12efde0018c212f3aeb785e49712e7a9353349aaf1255dfb31b7bf60723a480d9293938e1933033e7fea1f40604eaacf699d4be9aacc577054a0db22d9129a1728ff85a01a1c3af829b62bf4914c0bcf2c81a4bd577190eff5f194ee9bac95faefd53cb0030600000000000000e43bdc655d0f9d730535554d9caa611ddd152c081a06a932a8e1d5dc259aac123f42a188f683d869873ccc4c119442e57b056e03e2fa92f2028c97bc20b9078747c30f85444697fdf436e348711c011115963f855197243e4b39e6cbe236ca8ba7f2042e11f9255afbb6c6e2c3accb88e401f2aac21c097c92b3fbdb99f98a9b0dcd6c075ada6ed0ddfece1d4a2d005f61a7d5df0b75c18a5b2374d64e495fab93d4c4b1200394d5253cce2f25a59b862ee8e4cd43686603faa09d5d0d3c1c8f").unwrap();
+        let groth16_proof_bytes = hex::decode("570253c0c483a1b16460118e63c155f3684e784ae7d97e8fc3f544128b37fe15075eab5ac31150c8a44253d8525971241bbd7227fcefbae2db4ae71675c56a2e0eb9235136b15ab72f16e707832f3d6ae5b0ba7cca53ae17cb52b3201919eb9d908c16297abd90aa7e00267bc21a9a78116e717d4d76edd44e21cca17e3d592d").unwrap();
+        let input0 = hex::decode("a54dc85ac99f851c92d7c96d7318af4100000000000000000000000000000000").unwrap();
+        let input1 = hex::decode("dbe7c0194edfcc37eb4d422a998c1f5600000000000000000000000000000000").unwrap();
+        let input2 = hex::decode("a95ac0b37bfedcd8136e6c1143086bf500000000000000000000000000000000").unwrap();
+        let input3 = hex::decode("d223ffcb21c6ffcb7c8f60392ca49dde00000000000000000000000000000000").unwrap();
+        let input4 = hex::decode("c07a65145c3cb48b6101962ea607a4dd93c753bb26975cb47feb00d3666e4404").unwrap();
+
+        // All 5 inputs on stack, using add_g16_fixed_num::<5>() instead of add_i64(5)
+        let typed = TypedScriptBuilder::new()
+            .add_bn254_fr(&Fr::try_from(input4.as_slice()).unwrap())
+            .add_bn254_fr(&Fr::try_from(input3.as_slice()).unwrap())
+            .add_bn254_fr(&Fr::try_from(input2.as_slice()).unwrap())
+            .add_bn254_fr(&Fr::try_from(input1.as_slice()).unwrap())
+            .add_bn254_fr(&Fr::try_from(input0.as_slice()).unwrap())
+            .add_g16_fixed_num::<5>()
+            .add_g16_proof(&groth16_proof_bytes)
+            .add_g16_vk(&unprepared_compressed_vk)
+            .add_groth16_tag()
+            .groth16_verify();
+
+        // The emitted script bytes are identical (both push i64(5))
+        let manual = build_groth_script();
+        assert_eq!(typed.redeem_script(), manual.as_slice());
+
+        // Execute
+        let sig_cache = Cache::new(0);
+        let reused_values = SigHashReusedValuesUnsync::new();
+        execute_zk_script(typed.redeem_script(), &sig_cache, &reused_values).unwrap();
+    }
+
+    #[test]
+    fn test_zk_groth16_fixed_num_partial() {
+        use kaspa_txscript::hex;
+
+        let unprepared_compressed_vk = hex::decode("e2f26dbea299f5223b646cb1fb33eadb059d9407559d7441dfd902e3a79a4d2dabb73dc17fbc13021e2471e0c08bd67d8401f52b73d6d07483794cad4778180e0c06f33bbc4c79a9cadef253a68084d382f17788f885c9afd176f7cb2f036789edf692d95cbdde46ddda5ef7d422436779445c5e66006a42761e1f12efde0018c212f3aeb785e49712e7a9353349aaf1255dfb31b7bf60723a480d9293938e1933033e7fea1f40604eaacf699d4be9aacc577054a0db22d9129a1728ff85a01a1c3af829b62bf4914c0bcf2c81a4bd577190eff5f194ee9bac95faefd53cb0030600000000000000e43bdc655d0f9d730535554d9caa611ddd152c081a06a932a8e1d5dc259aac123f42a188f683d869873ccc4c119442e57b056e03e2fa92f2028c97bc20b9078747c30f85444697fdf436e348711c011115963f855197243e4b39e6cbe236ca8ba7f2042e11f9255afbb6c6e2c3accb88e401f2aac21c097c92b3fbdb99f98a9b0dcd6c075ada6ed0ddfece1d4a2d005f61a7d5df0b75c18a5b2374d64e495fab93d4c4b1200394d5253cce2f25a59b862ee8e4cd43686603faa09d5d0d3c1c8f").unwrap();
+        let groth16_proof_bytes = hex::decode("570253c0c483a1b16460118e63c155f3684e784ae7d97e8fc3f544128b37fe15075eab5ac31150c8a44253d8525971241bbd7227fcefbae2db4ae71675c56a2e0eb9235136b15ab72f16e707832f3d6ae5b0ba7cca53ae17cb52b3201919eb9d908c16297abd90aa7e00267bc21a9a78116e717d4d76edd44e21cca17e3d592d").unwrap();
+        let input0 = hex::decode("a54dc85ac99f851c92d7c96d7318af4100000000000000000000000000000000").unwrap();
+        let input1 = hex::decode("dbe7c0194edfcc37eb4d422a998c1f5600000000000000000000000000000000").unwrap();
+        let input2 = hex::decode("a95ac0b37bfedcd8136e6c1143086bf500000000000000000000000000000000").unwrap();
+        let input3 = hex::decode("d223ffcb21c6ffcb7c8f60392ca49dde00000000000000000000000000000000").unwrap();
+        let input4 = hex::decode("c07a65145c3cb48b6101962ea607a4dd93c753bb26975cb47feb00d3666e4404").unwrap();
+
+        // Push 3 of 5 Bn254Fr on stack, the remaining 2 go to Missing
+        let typed = TypedScriptBuilder::new()
+            .add_bn254_fr(&Fr::try_from(input4.as_slice()).unwrap())
+            .add_bn254_fr(&Fr::try_from(input3.as_slice()).unwrap())
+            .add_bn254_fr(&Fr::try_from(input2.as_slice()).unwrap())
+            .add_g16_fixed_num::<5>()
+            .add_g16_proof(&groth16_proof_bytes)
+            .add_g16_vk(&unprepared_compressed_vk)
+            .add_groth16_tag()
+            .groth16_verify();
+
+        let redeem = typed.redeem_script().to_vec();
+
+        // Use the sig builder to provide the missing 2 Bn254Fr elements
+        let sig = typed
+            .into_sig_builder()
+            .add_bn254_fr(Fr::try_from(input1.as_slice()).unwrap())
+            .add_bn254_fr(Fr::try_from(input0.as_slice()).unwrap())
+            .build();
+
+        // Verify that the sig is non-empty and contains the redeem script at the end
+        assert!(!sig.is_empty());
+        assert!(sig.len() > redeem.len());
+
+        // Build the same script using the old Num path with all 5 on the redeem stack for comparison
+        let full_redeem = TypedScriptBuilder::new()
+            .add_bn254_fr(&Fr::try_from(input4.as_slice()).unwrap())
+            .add_bn254_fr(&Fr::try_from(input3.as_slice()).unwrap())
+            .add_bn254_fr(&Fr::try_from(input2.as_slice()).unwrap())
+            .add_bn254_fr(&Fr::try_from(input1.as_slice()).unwrap())
+            .add_bn254_fr(&Fr::try_from(input0.as_slice()).unwrap())
+            .add_i64(5)
+            .add_g16_proof(&groth16_proof_bytes)
+            .add_g16_vk(&unprepared_compressed_vk)
+            .add_groth16_tag()
+            .groth16_verify();
+
+        // The partial redeem is shorter (missing 2 Bn254Fr inputs which are in the sig)
+        assert!(redeem.len() < full_redeem.redeem_script().len());
+
+        // The partial redeem should be exactly 66 bytes shorter (2 * (1 push-len-byte + 32 data bytes))
+        assert_eq!(full_redeem.redeem_script().len() - redeem.len(), 2 * 33);
     }
 }
