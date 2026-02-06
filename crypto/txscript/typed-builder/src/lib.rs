@@ -4,6 +4,7 @@ use ark_serialize::CanonicalSerialize;
 use kaspa_txscript::opcodes::codes::*;
 use kaspa_txscript::script_builder::ScriptBuilder;
 use kaspa_txscript::zk_precompiles::fields::Fr;
+pub use kaspa_txscript::zk_precompiles::risc0::rcpt::HashFnId as R0SuccinctHashFnId;
 use kaspa_txscript::zk_precompiles::tags::ZkTag;
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,33 @@ pub struct Groth16Tag<S>(PhantomData<S>);
 /// Marker for a RISC0 succinct ZK proof tag byte on the stack. `S` is the rest of the stack beneath it.
 pub struct R0SuccinctTag<S>(PhantomData<S>);
 
+/// RISC0 succinct seal (a sequence of `u32` words serialized as little-endian bytes).
+pub struct R0SuccinctSeal<S>(PhantomData<S>);
+
+/// RISC0 succinct claim digest (exactly 32 bytes).
+pub struct R0SuccinctClaim<S>(PhantomData<S>);
+
+/// RISC0 hash-function identifier (1 byte: 0=Blake2b, 1=Poseidon2, 2=Sha256).
+pub struct R0SuccinctHashFn<S>(PhantomData<S>);
+
+/// RISC0 Merkle-tree control index (4 bytes, little-endian `u32`).
+pub struct R0SuccinctControlIndex<S>(PhantomData<S>);
+
+/// RISC0 control digests (concatenated 32-byte digests; length must be a multiple of 32).
+pub struct R0SuccinctControlDigests<S>(PhantomData<S>);
+
+/// RISC0 journal digest (exactly 32 bytes, typically the SHA-256 of the journal).
+pub struct R0SuccinctJournalDigest<S>(PhantomData<S>);
+
+/// RISC0 image ID (exactly 32 bytes).
+pub struct R0SuccinctImageId<S>(PhantomData<S>);
+
+/// Groth16 verification key (variable-length bytes, unprepared compressed format).
+pub struct G16Vk<S>(PhantomData<S>);
+
+/// Groth16 proof (variable-length bytes).
+pub struct G16Proof<S>(PhantomData<S>);
+
 // ---------------------------------------------------------------------------
 // StackEntry trait (sealed, with GAT)
 // ---------------------------------------------------------------------------
@@ -54,7 +82,24 @@ macro_rules! impl_stack_entry {
         }
     )*};
 }
-impl_stack_entry!(Num, Bool, Data, Hash, Bn254Fr, Groth16Tag, R0SuccinctTag);
+impl_stack_entry!(
+    Num,
+    Bool,
+    Data,
+    Hash,
+    Bn254Fr,
+    Groth16Tag,
+    R0SuccinctTag,
+    R0SuccinctSeal,
+    R0SuccinctClaim,
+    R0SuccinctHashFn,
+    R0SuccinctControlIndex,
+    R0SuccinctControlDigests,
+    R0SuccinctJournalDigest,
+    R0SuccinctImageId,
+    G16Vk,
+    G16Proof
+);
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -150,6 +195,97 @@ impl<S, M> TypedScriptBuilder<S, M> {
         self.builder.add_data(&[ZkTag::R0Succinct as u8]).expect("script size limit exceeded");
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
+
+    // -- RISC0 Succinct semantic pushers --
+
+    /// Push a RISC0 succinct seal from `u32` words (each serialized as 4 LE bytes).
+    pub fn add_r0_succinct_seal(mut self, seal_words: &[u32]) -> TypedScriptBuilder<R0SuccinctSeal<S>, M> {
+        let bytes: Vec<u8> = seal_words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        self.builder.add_data(&bytes).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Push a RISC0 succinct seal from raw bytes (length must be a multiple of 4).
+    pub fn add_r0_succinct_seal_bytes(mut self, bytes: &[u8]) -> TypedScriptBuilder<R0SuccinctSeal<S>, M> {
+        assert!(bytes.len() % 4 == 0, "seal bytes length must be a multiple of 4, got {}", bytes.len());
+        self.builder.add_data(bytes).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Push a RISC0 succinct claim digest (exactly 32 bytes).
+    pub fn add_r0_succinct_claim(mut self, claim: &[u8]) -> TypedScriptBuilder<R0SuccinctClaim<S>, M> {
+        assert!(claim.len() == 32, "claim must be exactly 32 bytes, got {}", claim.len());
+        self.builder.add_data(claim).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Push a RISC0 hash-function identifier from the `R0SuccinctHashFnId` enum.
+    pub fn add_r0_succinct_hashfn(mut self, id: R0SuccinctHashFnId) -> TypedScriptBuilder<R0SuccinctHashFn<S>, M> {
+        self.builder.add_data(&[u8::from(id)]).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Push a RISC0 hash-function identifier from a raw `u8` (must be 0, 1, or 2).
+    pub fn add_r0_succinct_hashfn_raw(mut self, id: u8) -> TypedScriptBuilder<R0SuccinctHashFn<S>, M> {
+        assert!(id <= 2, "hash function id must be 0, 1, or 2, got {id}");
+        self.builder.add_data(&[id]).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Push a RISC0 hash-function identifier from raw bytes (exactly 1 byte).
+    pub fn add_r0_succinct_hashfn_bytes(mut self, bytes: &[u8]) -> TypedScriptBuilder<R0SuccinctHashFn<S>, M> {
+        assert!(bytes.len() == 1, "hashfn bytes must be exactly 1 byte, got {}", bytes.len());
+        self.builder.add_data(bytes).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Push a RISC0 Merkle-tree control index from a `u32` (serialized as 4 LE bytes).
+    pub fn add_r0_succinct_control_index(mut self, index: u32) -> TypedScriptBuilder<R0SuccinctControlIndex<S>, M> {
+        self.builder.add_data(&index.to_le_bytes()).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Push a RISC0 Merkle-tree control index from raw bytes (exactly 4 bytes).
+    pub fn add_r0_succinct_control_index_bytes(mut self, bytes: &[u8]) -> TypedScriptBuilder<R0SuccinctControlIndex<S>, M> {
+        assert!(bytes.len() == 4, "control index must be exactly 4 bytes, got {}", bytes.len());
+        self.builder.add_data(bytes).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Push RISC0 control digests (concatenated 32-byte digests; length must be a multiple of 32).
+    pub fn add_r0_succinct_control_digests(mut self, digests: &[u8]) -> TypedScriptBuilder<R0SuccinctControlDigests<S>, M> {
+        assert!(digests.len() % 32 == 0, "control digests length must be a multiple of 32, got {}", digests.len());
+        self.builder.add_data(digests).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Push a RISC0 journal digest (exactly 32 bytes).
+    pub fn add_r0_succinct_journal_digest(mut self, digest: &[u8]) -> TypedScriptBuilder<R0SuccinctJournalDigest<S>, M> {
+        assert!(digest.len() == 32, "journal digest must be exactly 32 bytes, got {}", digest.len());
+        self.builder.add_data(digest).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Push a RISC0 image ID (exactly 32 bytes).
+    pub fn add_r0_succinct_image_id(mut self, image_id: &[u8]) -> TypedScriptBuilder<R0SuccinctImageId<S>, M> {
+        assert!(image_id.len() == 32, "image ID must be exactly 32 bytes, got {}", image_id.len());
+        self.builder.add_data(image_id).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    // -- Groth16 semantic pushers --
+
+    /// Push a Groth16 verification key (variable-length bytes).
+    pub fn add_g16_vk(mut self, vk: &[u8]) -> TypedScriptBuilder<G16Vk<S>, M> {
+        self.builder.add_data(vk).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Push a Groth16 proof (variable-length bytes).
+    pub fn add_g16_proof(mut self, proof: &[u8]) -> TypedScriptBuilder<G16Proof<S>, M> {
+        self.builder.add_data(proof).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +327,74 @@ impl<S, M> TypedScriptBuilder<Data<S>, M> {
 
     /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
     pub fn unsafe_interpret_as_bn254_fr(self) -> TypedScriptBuilder<Bn254Fr<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
+    pub fn unsafe_interpret_as_r0_succinct_seal(self) -> TypedScriptBuilder<R0SuccinctSeal<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
+    pub fn unsafe_interpret_as_r0_succinct_claim(self) -> TypedScriptBuilder<R0SuccinctClaim<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
+    pub fn unsafe_interpret_as_r0_succinct_hashfn(self) -> TypedScriptBuilder<R0SuccinctHashFn<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
+    pub fn unsafe_interpret_as_r0_succinct_control_index(self) -> TypedScriptBuilder<R0SuccinctControlIndex<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
+    pub fn unsafe_interpret_as_r0_succinct_control_digests(self) -> TypedScriptBuilder<R0SuccinctControlDigests<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
+    pub fn unsafe_interpret_as_r0_succinct_journal_digest(self) -> TypedScriptBuilder<R0SuccinctJournalDigest<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
+    pub fn unsafe_interpret_as_r0_succinct_image_id(self) -> TypedScriptBuilder<R0SuccinctImageId<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
+    pub fn unsafe_interpret_as_g16_vk(self) -> TypedScriptBuilder<G16Vk<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
+    pub fn unsafe_interpret_as_g16_proof(self) -> TypedScriptBuilder<G16Proof<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Semantic casts: Hash → R0Succinct types (zero-cost, no opcode)
+// A 32-byte hash on the stack can be reinterpreted as a journal digest,
+// image ID, or claim without emitting any opcodes.
+// ---------------------------------------------------------------------------
+
+impl<S, M> TypedScriptBuilder<Hash<S>, M> {
+    /// Reinterpret an on-stack SHA-256 hash as a RISC0 journal digest. No opcode emitted.
+    pub fn as_r0_succinct_journal_digest(self) -> TypedScriptBuilder<R0SuccinctJournalDigest<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Reinterpret an on-stack SHA-256 hash as a RISC0 image ID. No opcode emitted.
+    pub fn as_r0_succinct_image_id(self) -> TypedScriptBuilder<R0SuccinctImageId<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Reinterpret an on-stack SHA-256 hash as a RISC0 claim digest. No opcode emitted.
+    pub fn as_r0_succinct_claim(self) -> TypedScriptBuilder<R0SuccinctClaim<S>, M> {
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 }
@@ -949,28 +1153,54 @@ impl<S, M> TypedScriptBuilder<Hash<S>, M> {
 }
 
 // ---------------------------------------------------------------------------
-// ZK Precompile: Groth16 verify
+// ZK Precompile: RISC0 succinct verify (trait-based)
 // ---------------------------------------------------------------------------
 
-impl<S, M> TypedScriptBuilder<Groth16Tag<Data<Data<Num<S>>>>, M> {
-    /// Verifies a Groth16 ZK proof. The stack (top→bottom) must be:
-    /// Groth16Tag, VK(Data), Proof(Data), n_inputs(Num), then field inputs.
-    /// Since the verifier dynamically consumes n_inputs field elements, the
-    /// output erases the stack below.
-    pub fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, ()> {
+#[diagnostic::on_unimplemented(
+    message = "the stack is not ready for `risc0_succinct_verify()`",
+    label = "expected stack (top→bottom): R0SuccinctTag, R0SuccinctImageId, R0SuccinctJournalDigest, R0SuccinctControlDigests, R0SuccinctControlIndex, R0SuccinctHashFn, R0SuccinctClaim, R0SuccinctSeal",
+    note = "push items bottom-to-top: .add_r0_succinct_seal().add_r0_succinct_claim().add_r0_succinct_hashfn().add_r0_succinct_control_index().add_r0_succinct_control_digests().add_r0_succinct_journal_digest().add_r0_succinct_image_id().add_r0_succinct_tag()"
+)]
+pub trait R0SuccinctVerify {
+    type Rest;
+    type Missing;
+    fn risc0_succinct_verify(self) -> TypedScriptBuilder<Bool<Self::Rest>, Self::Missing>;
+}
+
+impl<S, M> R0SuccinctVerify
+    for TypedScriptBuilder<
+        R0SuccinctTag<
+            R0SuccinctImageId<
+                R0SuccinctJournalDigest<
+                    R0SuccinctControlDigests<R0SuccinctControlIndex<R0SuccinctHashFn<R0SuccinctClaim<R0SuccinctSeal<S>>>>>,
+                >,
+            >,
+        >,
+        M,
+    >
+{
+    type Rest = S;
+    type Missing = M;
+    fn risc0_succinct_verify(self) -> TypedScriptBuilder<Bool<S>, M> {
         self.emit_op(OpZkPrecompile)
     }
 }
 
 // ---------------------------------------------------------------------------
-// ZK Precompile: RISC0 succinct verify
+// ZK Precompile: Groth16 verify (trait-based)
 // ---------------------------------------------------------------------------
 
-impl<S, M> TypedScriptBuilder<R0SuccinctTag<Data<Data<Data<Data<Data<Data<Data<S>>>>>>>>, M> {
-    /// Verifies a RISC0 succinct ZK proof. The stack (top→bottom) must be:
-    /// R0SuccinctTag, image_id, journal, control_digests, control_index,
-    /// hashfn, claim, seal. All 8 items are fixed, so S is preserved.
-    pub fn risc0_succinct_verify(self) -> TypedScriptBuilder<Bool<S>, M> {
+#[diagnostic::on_unimplemented(
+    message = "the stack is not ready for `groth16_verify()`",
+    label = "expected stack (top→bottom): Groth16Tag, G16Vk, G16Proof, Num(n_inputs), then Bn254Fr elements",
+    note = "push items bottom-to-top: .add_bn254_fr()...add_i64(n).add_g16_proof().add_g16_vk().add_groth16_tag()"
+)]
+pub trait G16Verify {
+    fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, ()>;
+}
+
+impl<S, M> G16Verify for TypedScriptBuilder<Groth16Tag<G16Vk<G16Proof<Num<S>>>>, M> {
+    fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, ()> {
         self.emit_op(OpZkPrecompile)
     }
 }
@@ -1039,6 +1269,98 @@ impl<M> ScriptSignatureBuilder<Bn254Fr<M>> {
         let mut bytes = Vec::new();
         fr.field().serialize_uncompressed(&mut bytes).expect("Fr serialization failed");
         self.builder.add_data(&bytes).expect("script size limit exceeded");
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, builder: self.builder, _phantom: PhantomData }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ScriptSignatureBuilder — provide missing R0Succinct / G16 semantic types
+// ---------------------------------------------------------------------------
+
+impl<M> ScriptSignatureBuilder<R0SuccinctSeal<M>> {
+    pub fn add_r0_succinct_seal(mut self, seal_words: &[u32]) -> ScriptSignatureBuilder<M> {
+        let bytes: Vec<u8> = seal_words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        self.builder.add_data(&bytes).expect("script size limit exceeded");
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, builder: self.builder, _phantom: PhantomData }
+    }
+    pub fn add_r0_succinct_seal_bytes(mut self, bytes: &[u8]) -> ScriptSignatureBuilder<M> {
+        assert!(bytes.len() % 4 == 0, "seal bytes length must be a multiple of 4, got {}", bytes.len());
+        self.builder.add_data(bytes).expect("script size limit exceeded");
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, builder: self.builder, _phantom: PhantomData }
+    }
+}
+
+impl<M> ScriptSignatureBuilder<R0SuccinctClaim<M>> {
+    pub fn add_r0_succinct_claim(mut self, claim: &[u8]) -> ScriptSignatureBuilder<M> {
+        assert!(claim.len() == 32, "claim must be exactly 32 bytes, got {}", claim.len());
+        self.builder.add_data(claim).expect("script size limit exceeded");
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, builder: self.builder, _phantom: PhantomData }
+    }
+}
+
+impl<M> ScriptSignatureBuilder<R0SuccinctHashFn<M>> {
+    pub fn add_r0_succinct_hashfn(mut self, id: R0SuccinctHashFnId) -> ScriptSignatureBuilder<M> {
+        self.builder.add_data(&[u8::from(id)]).expect("script size limit exceeded");
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, builder: self.builder, _phantom: PhantomData }
+    }
+    pub fn add_r0_succinct_hashfn_raw(mut self, id: u8) -> ScriptSignatureBuilder<M> {
+        assert!(id <= 2, "hash function id must be 0, 1, or 2, got {id}");
+        self.builder.add_data(&[id]).expect("script size limit exceeded");
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, builder: self.builder, _phantom: PhantomData }
+    }
+    pub fn add_r0_succinct_hashfn_bytes(mut self, bytes: &[u8]) -> ScriptSignatureBuilder<M> {
+        assert!(bytes.len() == 1, "hashfn bytes must be exactly 1 byte, got {}", bytes.len());
+        self.builder.add_data(bytes).expect("script size limit exceeded");
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, builder: self.builder, _phantom: PhantomData }
+    }
+}
+
+impl<M> ScriptSignatureBuilder<R0SuccinctControlIndex<M>> {
+    pub fn add_r0_succinct_control_index(mut self, index: u32) -> ScriptSignatureBuilder<M> {
+        self.builder.add_data(&index.to_le_bytes()).expect("script size limit exceeded");
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, builder: self.builder, _phantom: PhantomData }
+    }
+    pub fn add_r0_succinct_control_index_bytes(mut self, bytes: &[u8]) -> ScriptSignatureBuilder<M> {
+        assert!(bytes.len() == 4, "control index must be exactly 4 bytes, got {}", bytes.len());
+        self.builder.add_data(bytes).expect("script size limit exceeded");
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, builder: self.builder, _phantom: PhantomData }
+    }
+}
+
+impl<M> ScriptSignatureBuilder<R0SuccinctControlDigests<M>> {
+    pub fn add_r0_succinct_control_digests(mut self, digests: &[u8]) -> ScriptSignatureBuilder<M> {
+        assert!(digests.len() % 32 == 0, "control digests length must be a multiple of 32, got {}", digests.len());
+        self.builder.add_data(digests).expect("script size limit exceeded");
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, builder: self.builder, _phantom: PhantomData }
+    }
+}
+
+impl<M> ScriptSignatureBuilder<R0SuccinctJournalDigest<M>> {
+    pub fn add_r0_succinct_journal_digest(mut self, digest: &[u8]) -> ScriptSignatureBuilder<M> {
+        assert!(digest.len() == 32, "journal digest must be exactly 32 bytes, got {}", digest.len());
+        self.builder.add_data(digest).expect("script size limit exceeded");
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, builder: self.builder, _phantom: PhantomData }
+    }
+}
+
+impl<M> ScriptSignatureBuilder<R0SuccinctImageId<M>> {
+    pub fn add_r0_succinct_image_id(mut self, image_id: &[u8]) -> ScriptSignatureBuilder<M> {
+        assert!(image_id.len() == 32, "image ID must be exactly 32 bytes, got {}", image_id.len());
+        self.builder.add_data(image_id).expect("script size limit exceeded");
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, builder: self.builder, _phantom: PhantomData }
+    }
+}
+
+impl<M> ScriptSignatureBuilder<G16Vk<M>> {
+    pub fn add_g16_vk(mut self, vk: &[u8]) -> ScriptSignatureBuilder<M> {
+        self.builder.add_data(vk).expect("script size limit exceeded");
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, builder: self.builder, _phantom: PhantomData }
+    }
+}
+
+impl<M> ScriptSignatureBuilder<G16Proof<M>> {
+    pub fn add_g16_proof(mut self, proof: &[u8]) -> ScriptSignatureBuilder<M> {
+        self.builder.add_data(proof).expect("script size limit exceeded");
         ScriptSignatureBuilder { redeem_script: self.redeem_script, builder: self.builder, _phantom: PhantomData }
     }
 }
@@ -1826,8 +2148,8 @@ mod tests {
             .add_data(&input1)
             .add_data(&input0)
             .add_i64(5)
-            .add_data(&groth16_proof_bytes)
-            .add_data(&unprepared_compressed_vk)
+            .add_g16_proof(&groth16_proof_bytes)
+            .add_g16_vk(&unprepared_compressed_vk)
             .add_groth16_tag()
             .groth16_verify();
 
@@ -1847,13 +2169,13 @@ mod tests {
         let (seal, claim, hashfn, control_index, control_digests, journal, image_id) = load_stark_fields();
 
         let typed = TypedScriptBuilder::new()
-            .add_data(&seal)
-            .add_data(&claim)
-            .add_data(&hashfn)
-            .add_data(&control_index)
-            .add_data(&control_digests)
-            .add_data(&journal)
-            .add_data(&image_id)
+            .add_r0_succinct_seal_bytes(&seal)
+            .add_r0_succinct_claim(&claim)
+            .add_r0_succinct_hashfn_bytes(&hashfn)
+            .add_r0_succinct_control_index_bytes(&control_index)
+            .add_r0_succinct_control_digests(&control_digests)
+            .add_r0_succinct_journal_digest(&journal)
+            .add_r0_succinct_image_id(&image_id)
             .add_r0_succinct_tag()
             .risc0_succinct_verify();
 
@@ -2045,5 +2367,59 @@ mod tests {
             .add_op(OpTrue)
             .unwrap();
         assert_eq!(typed_rot.redeem_script(), manual_rot.script());
+    }
+
+    #[test]
+    fn test_hash_to_journal_digest_cast() {
+        // op_sha256 followed by as_r0_succinct_journal_digest should emit no extra opcodes
+        let typed = TypedScriptBuilder::new()
+            .add_data(&[1, 2, 3])
+            .op_sha256()
+            .as_r0_succinct_journal_digest()
+            .downcast()
+            .add_data(&[0xAA; 32])
+            .op_equal();
+
+        let mut manual = ScriptBuilder::new();
+        manual.add_data(&[1, 2, 3]).unwrap().add_op(OpSHA256).unwrap().add_data(&[0xAA; 32]).unwrap().add_op(OpEqual).unwrap();
+
+        assert_eq!(typed.redeem_script(), manual.script());
+    }
+
+    #[test]
+    fn test_r0_succinct_generic_stack_ops_on_semantic_types() {
+        // op_dup / op_drop on R0SuccinctSeal
+        let typed_seal = TypedScriptBuilder::new().add_r0_succinct_seal_bytes(&[0u8; 4]).op_dup().op_drop().op_drop().op_true();
+
+        let mut manual_seal = ScriptBuilder::new();
+        manual_seal
+            .add_data(&[0u8; 4])
+            .unwrap()
+            .add_op(OpDup)
+            .unwrap()
+            .add_op(OpDrop)
+            .unwrap()
+            .add_op(OpDrop)
+            .unwrap()
+            .add_op(OpTrue)
+            .unwrap();
+        assert_eq!(typed_seal.redeem_script(), manual_seal.script());
+
+        // op_dup / op_drop on G16Vk
+        let typed_vk = TypedScriptBuilder::new().add_g16_vk(&[0xAA; 16]).op_dup().op_drop().op_drop().op_true();
+
+        let mut manual_vk = ScriptBuilder::new();
+        manual_vk
+            .add_data(&[0xAA; 16])
+            .unwrap()
+            .add_op(OpDup)
+            .unwrap()
+            .add_op(OpDrop)
+            .unwrap()
+            .add_op(OpDrop)
+            .unwrap()
+            .add_op(OpTrue)
+            .unwrap();
+        assert_eq!(typed_vk.redeem_script(), manual_vk.script());
     }
 }
