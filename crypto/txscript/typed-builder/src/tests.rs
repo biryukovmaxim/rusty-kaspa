@@ -1109,3 +1109,137 @@ fn test_zk_groth16_fixed_num_partial() {
     // The partial redeem should be exactly 66 bytes shorter (2 * (1 push-len-byte + 32 data bytes))
     assert_eq!(full_redeem.redeem_script().len() - redeem.len(), 2 * 33);
 }
+
+#[test]
+fn test_fixed_num_stack_and_math_ops() {
+    let fr = Fr::try_from([0u8; 32].as_slice()).unwrap();
+
+    // op_drop on FixedNum
+    let typed_drop = TypedScriptBuilder::new().add_bn254_fr(&fr).add_g16_fixed_num::<1>().op_drop().op_true();
+
+    let mut manual_drop = ScriptBuilder::new();
+    manual_drop.add_data(&[0u8; 32]).unwrap().add_i64(1).unwrap().add_op(OpDrop).unwrap().add_op(OpTrue).unwrap();
+    assert_eq!(typed_drop.redeem_script(), manual_drop.script());
+
+    // op_dup on FixedNum
+    let typed_dup = TypedScriptBuilder::new().add_bn254_fr(&fr).add_g16_fixed_num::<1>().op_dup().op_drop().op_drop().op_true();
+
+    let mut manual_dup = ScriptBuilder::new();
+    manual_dup
+        .add_data(&[0u8; 32])
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpDup)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap();
+    assert_eq!(typed_dup.redeem_script(), manual_dup.script());
+
+    // op_swap: Num on top of FixedNum
+    let typed_swap = TypedScriptBuilder::new()
+        .add_bn254_fr(&fr)
+        .add_g16_fixed_num::<1>()
+        .add_i64(42)
+        .op_swap()
+        .op_drop()
+        .add_i64(42)
+        .op_num_equal();
+
+    let mut manual_swap = ScriptBuilder::new();
+    manual_swap
+        .add_data(&[0u8; 32])
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_i64(42)
+        .unwrap()
+        .add_op(OpSwap)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_i64(42)
+        .unwrap()
+        .add_op(OpNumEqual)
+        .unwrap();
+    assert_eq!(typed_swap.redeem_script(), manual_swap.script());
+
+    // arithmetic on top of FixedNum
+    let typed_add = TypedScriptBuilder::new()
+        .add_bn254_fr(&fr)
+        .add_g16_fixed_num::<1>()
+        .add_i64(3)
+        .add_i64(5)
+        .op_add()
+        .op_swap()
+        .op_drop()
+        .add_i64(8)
+        .op_num_equal();
+
+    let mut manual_add = ScriptBuilder::new();
+    manual_add
+        .add_data(&[0u8; 32])
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_i64(3)
+        .unwrap()
+        .add_i64(5)
+        .unwrap()
+        .add_op(OpAdd)
+        .unwrap()
+        .add_op(OpSwap)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_i64(8)
+        .unwrap()
+        .add_op(OpNumEqual)
+        .unwrap();
+    assert_eq!(typed_add.redeem_script(), manual_add.script());
+
+    // op_depth on FixedNum stack
+    let typed_depth =
+        TypedScriptBuilder::new().add_bn254_fr(&fr).add_g16_fixed_num::<1>().op_depth().op_swap().op_drop().add_i64(1).op_num_equal();
+
+    let mut manual_depth = ScriptBuilder::new();
+    manual_depth
+        .add_data(&[0u8; 32])
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpDepth)
+        .unwrap()
+        .add_op(OpSwap)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpNumEqual)
+        .unwrap();
+    assert_eq!(typed_depth.redeem_script(), manual_depth.script());
+
+    // constants (op_true, op_1_negate) on FixedNum stack
+    let typed_const = TypedScriptBuilder::new().add_bn254_fr(&fr).add_g16_fixed_num::<1>().op_true().op_verify().op_drop().op_true();
+
+    let mut manual_const = ScriptBuilder::new();
+    manual_const
+        .add_data(&[0u8; 32])
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap()
+        .add_op(OpVerify)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap();
+    assert_eq!(typed_const.redeem_script(), manual_const.script());
+}

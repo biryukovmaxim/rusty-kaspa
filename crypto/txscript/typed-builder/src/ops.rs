@@ -461,6 +461,7 @@ impl<Top: StackEntry, M> TypedScriptBuilder<Top, M> {
 // ---------------------------------------------------------------------------
 
 // 2-element ops: top two elements can be any marker types
+#[allow(clippy::type_complexity)]
 impl<Top, M> TypedScriptBuilder<Top, M>
 where
     Top: StackEntry,
@@ -500,6 +501,7 @@ where
 }
 
 // 3-element ops: top three elements can be any marker types
+#[allow(clippy::type_complexity)]
 impl<Top, M> TypedScriptBuilder<Top, M>
 where
     Top: StackEntry,
