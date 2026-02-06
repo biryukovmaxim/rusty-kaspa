@@ -11,6 +11,8 @@ repository.workspace = true
 
 [dependencies]
 kaspa-txscript.workspace = true
+kaspa-hashes.workspace = true
+ark-serialize.workspace = true
 
 [dev-dependencies]
 kaspa-consensus-core.workspace = true

@@ -1,5 +1,5 @@
 mod error;
-mod fields;
+pub mod fields;
 pub mod groth16;
 pub mod risc0;
 pub mod tags;
