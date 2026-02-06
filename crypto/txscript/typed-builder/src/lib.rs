@@ -32,6 +32,31 @@ pub struct Groth16Tag<S>(PhantomData<S>);
 pub struct R0SuccinctTag<S>(PhantomData<S>);
 
 // ---------------------------------------------------------------------------
+// StackEntry trait (sealed, with GAT)
+// ---------------------------------------------------------------------------
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Trait implemented by all type-level stack markers.
+pub trait StackEntry: sealed::Sealed {
+    type Rest;
+    type Wrap<T>;
+}
+
+macro_rules! impl_stack_entry {
+    ($($Marker:ident),*) => {$(
+        impl<S> sealed::Sealed for $Marker<S> {}
+        impl<S> StackEntry for $Marker<S> {
+            type Rest = S;
+            type Wrap<T> = $Marker<T>;
+        }
+    )*};
+}
+impl_stack_entry!(Num, Bool, Data, Hash, Bn254Fr, Groth16Tag, R0SuccinctTag);
+
+// ---------------------------------------------------------------------------
 // Core types
 // ---------------------------------------------------------------------------
 
@@ -101,13 +126,13 @@ impl<S, M> TypedScriptBuilder<S, M> {
     }
 
     /// Push a hash value onto the stack.
-    pub fn add_hash(mut self, hash: kaspa_hashes::Hash) -> TypedScriptBuilder<Hash<S>, M> {
-        self.builder.add_data(&hash.as_bytes()).expect("script size limit exceeded");
+    pub fn add_hash(mut self, hash: &kaspa_hashes::Hash) -> TypedScriptBuilder<Hash<S>, M> {
+        self.builder.add_data(hash.as_ref()).expect("script size limit exceeded");
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 
     /// Push a BN254 field element onto the stack.
-    pub fn add_bn254_fr(mut self, fr: Fr) -> TypedScriptBuilder<Bn254Fr<S>, M> {
+    pub fn add_bn254_fr(mut self, fr: &Fr) -> TypedScriptBuilder<Bn254Fr<S>, M> {
         let mut bytes = Vec::new();
         fr.field().serialize_uncompressed(&mut bytes).expect("Fr serialization failed");
         self.builder.add_data(&bytes).expect("script size limit exceeded");
@@ -132,44 +157,9 @@ impl<S, M> TypedScriptBuilder<S, M> {
 // No opcode is emitted.
 // ---------------------------------------------------------------------------
 
-impl<S, M> TypedScriptBuilder<Num<S>, M> {
+impl<Top: StackEntry, M> TypedScriptBuilder<Top, M> {
     /// Safe type erasure — every stack element is bytes at runtime. No opcode is emitted.
-    pub fn downcast(self) -> TypedScriptBuilder<Data<S>, M> {
-        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
-    }
-}
-
-impl<S, M> TypedScriptBuilder<Bool<S>, M> {
-    /// Safe type erasure — every stack element is bytes at runtime. No opcode is emitted.
-    pub fn downcast(self) -> TypedScriptBuilder<Data<S>, M> {
-        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
-    }
-}
-
-impl<S, M> TypedScriptBuilder<Hash<S>, M> {
-    /// Safe type erasure — every stack element is bytes at runtime. No opcode is emitted.
-    pub fn downcast(self) -> TypedScriptBuilder<Data<S>, M> {
-        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
-    }
-}
-
-impl<S, M> TypedScriptBuilder<Bn254Fr<S>, M> {
-    /// Safe type erasure — every stack element is bytes at runtime. No opcode is emitted.
-    pub fn downcast(self) -> TypedScriptBuilder<Data<S>, M> {
-        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
-    }
-}
-
-impl<S, M> TypedScriptBuilder<Groth16Tag<S>, M> {
-    /// Safe type erasure — every stack element is bytes at runtime. No opcode is emitted.
-    pub fn downcast(self) -> TypedScriptBuilder<Data<S>, M> {
-        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
-    }
-}
-
-impl<S, M> TypedScriptBuilder<R0SuccinctTag<S>, M> {
-    /// Safe type erasure — every stack element is bytes at runtime. No opcode is emitted.
-    pub fn downcast(self) -> TypedScriptBuilder<Data<S>, M> {
+    pub fn downcast(self) -> TypedScriptBuilder<Data<Top::Rest>, M> {
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 }
@@ -214,29 +204,63 @@ impl<S, M> TypedScriptBuilder<Data<S>, M> {
 // ---------------------------------------------------------------------------
 
 impl<S, M> TypedScriptBuilder<Num<Num<S>>, M> {
-    pub fn op_add(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpAdd) }
-    pub fn op_sub(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpSub) }
-    pub fn op_mul(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpMul) }
-    pub fn op_div(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpDiv) }
-    pub fn op_mod(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpMod) }
-    pub fn op_min(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpMin) }
-    pub fn op_max(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpMax) }
+    pub fn op_add(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpAdd)
+    }
+    pub fn op_sub(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpSub)
+    }
+    pub fn op_mul(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpMul)
+    }
+    pub fn op_div(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpDiv)
+    }
+    pub fn op_mod(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpMod)
+    }
+    pub fn op_min(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpMin)
+    }
+    pub fn op_max(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpMax)
+    }
 
     // Binary Num×Num → Bool
-    pub fn op_num_equal(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpNumEqual) }
-    pub fn op_less_than(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpLessThan) }
-    pub fn op_greater_than(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpGreaterThan) }
-    pub fn op_less_than_or_equal(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpLessThanOrEqual) }
-    pub fn op_greater_than_or_equal(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpGreaterThanOrEqual) }
-    pub fn op_num_not_equal(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpNumNotEqual) }
-    pub fn op_bool_and(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpBoolAnd) }
-    pub fn op_bool_or(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpBoolOr) }
+    pub fn op_num_equal(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpNumEqual)
+    }
+    pub fn op_less_than(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpLessThan)
+    }
+    pub fn op_greater_than(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpGreaterThan)
+    }
+    pub fn op_less_than_or_equal(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpLessThanOrEqual)
+    }
+    pub fn op_greater_than_or_equal(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpGreaterThanOrEqual)
+    }
+    pub fn op_num_not_equal(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpNumNotEqual)
+    }
+    pub fn op_bool_and(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpBoolAnd)
+    }
+    pub fn op_bool_or(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpBoolOr)
+    }
 
     // Verify Num×Num → removes both
-    pub fn op_num_equal_verify(self) -> TypedScriptBuilder<S, M> { self.emit_op(OpNumEqualVerify) }
+    pub fn op_num_equal_verify(self) -> TypedScriptBuilder<S, M> {
+        self.emit_op(OpNumEqualVerify)
+    }
 
     // Conversion: Num(size) × Num(value) → Data
-    pub fn op_num2bin(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpNum2Bin) }
+    pub fn op_num2bin(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpNum2Bin)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -244,22 +268,52 @@ impl<S, M> TypedScriptBuilder<Num<Num<S>>, M> {
 // ---------------------------------------------------------------------------
 
 impl<M> TypedScriptBuilder<Num<()>, M> {
-    pub fn op_add(self) -> TypedScriptBuilder<Num<()>, Num<M>> { self.emit_op(OpAdd) }
-    pub fn op_sub(self) -> TypedScriptBuilder<Num<()>, Num<M>> { self.emit_op(OpSub) }
-    pub fn op_mul(self) -> TypedScriptBuilder<Num<()>, Num<M>> { self.emit_op(OpMul) }
-    pub fn op_div(self) -> TypedScriptBuilder<Num<()>, Num<M>> { self.emit_op(OpDiv) }
-    pub fn op_mod(self) -> TypedScriptBuilder<Num<()>, Num<M>> { self.emit_op(OpMod) }
-    pub fn op_min(self) -> TypedScriptBuilder<Num<()>, Num<M>> { self.emit_op(OpMin) }
-    pub fn op_max(self) -> TypedScriptBuilder<Num<()>, Num<M>> { self.emit_op(OpMax) }
+    pub fn op_add(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+        self.emit_op(OpAdd)
+    }
+    pub fn op_sub(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+        self.emit_op(OpSub)
+    }
+    pub fn op_mul(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+        self.emit_op(OpMul)
+    }
+    pub fn op_div(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+        self.emit_op(OpDiv)
+    }
+    pub fn op_mod(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+        self.emit_op(OpMod)
+    }
+    pub fn op_min(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+        self.emit_op(OpMin)
+    }
+    pub fn op_max(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+        self.emit_op(OpMax)
+    }
 
-    pub fn op_num_equal(self) -> TypedScriptBuilder<Bool<()>, Num<M>> { self.emit_op(OpNumEqual) }
-    pub fn op_less_than(self) -> TypedScriptBuilder<Bool<()>, Num<M>> { self.emit_op(OpLessThan) }
-    pub fn op_greater_than(self) -> TypedScriptBuilder<Bool<()>, Num<M>> { self.emit_op(OpGreaterThan) }
-    pub fn op_less_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, Num<M>> { self.emit_op(OpLessThanOrEqual) }
-    pub fn op_greater_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, Num<M>> { self.emit_op(OpGreaterThanOrEqual) }
-    pub fn op_num_not_equal(self) -> TypedScriptBuilder<Bool<()>, Num<M>> { self.emit_op(OpNumNotEqual) }
-    pub fn op_bool_and(self) -> TypedScriptBuilder<Bool<()>, Num<M>> { self.emit_op(OpBoolAnd) }
-    pub fn op_bool_or(self) -> TypedScriptBuilder<Bool<()>, Num<M>> { self.emit_op(OpBoolOr) }
+    pub fn op_num_equal(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+        self.emit_op(OpNumEqual)
+    }
+    pub fn op_less_than(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+        self.emit_op(OpLessThan)
+    }
+    pub fn op_greater_than(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+        self.emit_op(OpGreaterThan)
+    }
+    pub fn op_less_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+        self.emit_op(OpLessThanOrEqual)
+    }
+    pub fn op_greater_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+        self.emit_op(OpGreaterThanOrEqual)
+    }
+    pub fn op_num_not_equal(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+        self.emit_op(OpNumNotEqual)
+    }
+    pub fn op_bool_and(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+        self.emit_op(OpBoolAnd)
+    }
+    pub fn op_bool_or(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+        self.emit_op(OpBoolOr)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -268,54 +322,124 @@ impl<M> TypedScriptBuilder<Num<()>, M> {
 
 impl<M> TypedScriptBuilder<(), M> {
     // Binary (need 2 from sig)
-    pub fn op_add(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> { self.emit_op(OpAdd) }
-    pub fn op_sub(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> { self.emit_op(OpSub) }
-    pub fn op_mul(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> { self.emit_op(OpMul) }
-    pub fn op_div(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> { self.emit_op(OpDiv) }
-    pub fn op_mod(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> { self.emit_op(OpMod) }
-    pub fn op_min(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> { self.emit_op(OpMin) }
-    pub fn op_max(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> { self.emit_op(OpMax) }
+    pub fn op_add(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> {
+        self.emit_op(OpAdd)
+    }
+    pub fn op_sub(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> {
+        self.emit_op(OpSub)
+    }
+    pub fn op_mul(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> {
+        self.emit_op(OpMul)
+    }
+    pub fn op_div(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> {
+        self.emit_op(OpDiv)
+    }
+    pub fn op_mod(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> {
+        self.emit_op(OpMod)
+    }
+    pub fn op_min(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> {
+        self.emit_op(OpMin)
+    }
+    pub fn op_max(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> {
+        self.emit_op(OpMax)
+    }
 
-    pub fn op_num_equal(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> { self.emit_op(OpNumEqual) }
-    pub fn op_less_than(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> { self.emit_op(OpLessThan) }
-    pub fn op_greater_than(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> { self.emit_op(OpGreaterThan) }
-    pub fn op_less_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> { self.emit_op(OpLessThanOrEqual) }
-    pub fn op_greater_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> { self.emit_op(OpGreaterThanOrEqual) }
-    pub fn op_num_not_equal(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> { self.emit_op(OpNumNotEqual) }
-    pub fn op_bool_and(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> { self.emit_op(OpBoolAnd) }
-    pub fn op_bool_or(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> { self.emit_op(OpBoolOr) }
+    pub fn op_num_equal(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+        self.emit_op(OpNumEqual)
+    }
+    pub fn op_less_than(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+        self.emit_op(OpLessThan)
+    }
+    pub fn op_greater_than(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+        self.emit_op(OpGreaterThan)
+    }
+    pub fn op_less_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+        self.emit_op(OpLessThanOrEqual)
+    }
+    pub fn op_greater_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+        self.emit_op(OpGreaterThanOrEqual)
+    }
+    pub fn op_num_not_equal(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+        self.emit_op(OpNumNotEqual)
+    }
+    pub fn op_bool_and(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+        self.emit_op(OpBoolAnd)
+    }
+    pub fn op_bool_or(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+        self.emit_op(OpBoolOr)
+    }
 
     // Unary (need 1 from sig)
-    pub fn op_1_add(self) -> TypedScriptBuilder<Num<()>, Num<M>> { self.emit_op(Op1Add) }
-    pub fn op_1_sub(self) -> TypedScriptBuilder<Num<()>, Num<M>> { self.emit_op(Op1Sub) }
-    pub fn op_negate(self) -> TypedScriptBuilder<Num<()>, Num<M>> { self.emit_op(OpNegate) }
-    pub fn op_abs(self) -> TypedScriptBuilder<Num<()>, Num<M>> { self.emit_op(OpAbs) }
-    pub fn op_not(self) -> TypedScriptBuilder<Bool<()>, Num<M>> { self.emit_op(OpNot) }
-    pub fn op_0_not_equal(self) -> TypedScriptBuilder<Bool<()>, Num<M>> { self.emit_op(Op0NotEqual) }
+    pub fn op_1_add(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+        self.emit_op(Op1Add)
+    }
+    pub fn op_1_sub(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+        self.emit_op(Op1Sub)
+    }
+    pub fn op_negate(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+        self.emit_op(OpNegate)
+    }
+    pub fn op_abs(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+        self.emit_op(OpAbs)
+    }
+    pub fn op_not(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+        self.emit_op(OpNot)
+    }
+    pub fn op_0_not_equal(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+        self.emit_op(Op0NotEqual)
+    }
 
     // Data binary (need 2 from sig)
-    pub fn op_cat(self) -> TypedScriptBuilder<Data<()>, Data<Data<M>>> { self.emit_op(OpCat) }
-    pub fn op_and(self) -> TypedScriptBuilder<Data<()>, Data<Data<M>>> { self.emit_op(OpAnd) }
-    pub fn op_or(self) -> TypedScriptBuilder<Data<()>, Data<Data<M>>> { self.emit_op(OpOr) }
-    pub fn op_xor(self) -> TypedScriptBuilder<Data<()>, Data<Data<M>>> { self.emit_op(OpXor) }
-    pub fn op_equal(self) -> TypedScriptBuilder<Bool<()>, Data<Data<M>>> { self.emit_op(OpEqual) }
+    pub fn op_cat(self) -> TypedScriptBuilder<Data<()>, Data<Data<M>>> {
+        self.emit_op(OpCat)
+    }
+    pub fn op_and(self) -> TypedScriptBuilder<Data<()>, Data<Data<M>>> {
+        self.emit_op(OpAnd)
+    }
+    pub fn op_or(self) -> TypedScriptBuilder<Data<()>, Data<Data<M>>> {
+        self.emit_op(OpOr)
+    }
+    pub fn op_xor(self) -> TypedScriptBuilder<Data<()>, Data<Data<M>>> {
+        self.emit_op(OpXor)
+    }
+    pub fn op_equal(self) -> TypedScriptBuilder<Bool<()>, Data<Data<M>>> {
+        self.emit_op(OpEqual)
+    }
 
     // Data unary (need 1 from sig)
-    pub fn op_invert(self) -> TypedScriptBuilder<Data<()>, Data<M>> { self.emit_op(OpInvert) }
-    pub fn op_size(self) -> TypedScriptBuilder<Num<Data<()>>, Data<M>> { self.emit_op(OpSize) }
-    pub fn op_sha256(self) -> TypedScriptBuilder<Hash<()>, Data<M>> { self.emit_op(OpSHA256) }
-    pub fn op_blake2b(self) -> TypedScriptBuilder<Hash<()>, Data<M>> { self.emit_op(OpBlake2b) }
-    pub fn op_bin2num(self) -> TypedScriptBuilder<Num<()>, Data<M>> { self.emit_op(OpBin2Num) }
+    pub fn op_invert(self) -> TypedScriptBuilder<Data<()>, Data<M>> {
+        self.emit_op(OpInvert)
+    }
+    pub fn op_size(self) -> TypedScriptBuilder<Num<Data<()>>, Data<M>> {
+        self.emit_op(OpSize)
+    }
+    pub fn op_sha256(self) -> TypedScriptBuilder<Hash<()>, Data<M>> {
+        self.emit_op(OpSHA256)
+    }
+    pub fn op_blake2b(self) -> TypedScriptBuilder<Hash<()>, Data<M>> {
+        self.emit_op(OpBlake2b)
+    }
+    pub fn op_bin2num(self) -> TypedScriptBuilder<Num<()>, Data<M>> {
+        self.emit_op(OpBin2Num)
+    }
 
     // Signature ops (need 2 from sig)
-    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<()>, Data<Data<M>>> { self.emit_op(OpCheckSig) }
-    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<()>, Data<Data<M>>> { self.emit_op(OpCheckSigECDSA) }
+    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<()>, Data<Data<M>>> {
+        self.emit_op(OpCheckSig)
+    }
+    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<()>, Data<Data<M>>> {
+        self.emit_op(OpCheckSigECDSA)
+    }
 
     // Blake2b with key (need 2 from sig)
-    pub fn op_blake2b_with_key(self) -> TypedScriptBuilder<Hash<()>, Data<Data<M>>> { self.emit_op(OpBlake2bWithKey) }
+    pub fn op_blake2b_with_key(self) -> TypedScriptBuilder<Hash<()>, Data<Data<M>>> {
+        self.emit_op(OpBlake2bWithKey)
+    }
 
     // SeqCommit (need 1 Hash from sig)
-    pub fn op_chainblock_seq_commit(self) -> TypedScriptBuilder<Hash<()>, Hash<M>> { self.emit_op(OpChainblockSeqCommit) }
+    pub fn op_chainblock_seq_commit(self) -> TypedScriptBuilder<Hash<()>, Hash<M>> {
+        self.emit_op(OpChainblockSeqCommit)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -323,12 +447,24 @@ impl<M> TypedScriptBuilder<(), M> {
 // ---------------------------------------------------------------------------
 
 impl<S, M> TypedScriptBuilder<Num<S>, M> {
-    pub fn op_1_add(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(Op1Add) }
-    pub fn op_1_sub(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(Op1Sub) }
-    pub fn op_negate(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpNegate) }
-    pub fn op_abs(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpAbs) }
-    pub fn op_not(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpNot) }
-    pub fn op_0_not_equal(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(Op0NotEqual) }
+    pub fn op_1_add(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(Op1Add)
+    }
+    pub fn op_1_sub(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(Op1Sub)
+    }
+    pub fn op_negate(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpNegate)
+    }
+    pub fn op_abs(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpAbs)
+    }
+    pub fn op_not(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpNot)
+    }
+    pub fn op_0_not_equal(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(Op0NotEqual)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -337,17 +473,23 @@ impl<S, M> TypedScriptBuilder<Num<S>, M> {
 
 // Full stack: 3+ nums
 impl<S, M> TypedScriptBuilder<Num<Num<Num<S>>>, M> {
-    pub fn op_within(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpWithin) }
+    pub fn op_within(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpWithin)
+    }
 }
 
 // Partial: 2 on stack
 impl<M> TypedScriptBuilder<Num<Num<()>>, M> {
-    pub fn op_within(self) -> TypedScriptBuilder<Bool<()>, Num<M>> { self.emit_op(OpWithin) }
+    pub fn op_within(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+        self.emit_op(OpWithin)
+    }
 }
 
 // Partial: 1 on stack
 impl<M> TypedScriptBuilder<Num<()>, M> {
-    pub fn op_within(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> { self.emit_op(OpWithin) }
+    pub fn op_within(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+        self.emit_op(OpWithin)
+    }
 }
 
 // Empty stack (already defined on `impl<M> TypedScriptBuilder<(), M>` would conflict,
@@ -363,7 +505,9 @@ impl<M> TypedScriptBuilder<Num<()>, M> {
 // Actually, we CAN add more methods to the same type in separate impl blocks.
 
 impl<M> TypedScriptBuilder<(), M> {
-    pub fn op_within(self) -> TypedScriptBuilder<Bool<()>, Num<Num<Num<M>>>> { self.emit_op(OpWithin) }
+    pub fn op_within(self) -> TypedScriptBuilder<Bool<()>, Num<Num<Num<M>>>> {
+        self.emit_op(OpWithin)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -371,34 +515,70 @@ impl<M> TypedScriptBuilder<(), M> {
 // ---------------------------------------------------------------------------
 
 impl<S, M> TypedScriptBuilder<Data<Data<S>>, M> {
-    pub fn op_cat(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpCat) }
-    pub fn op_and(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpAnd) }
-    pub fn op_or(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpOr) }
-    pub fn op_xor(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpXor) }
-    pub fn op_equal(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpEqual) }
+    pub fn op_cat(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpCat)
+    }
+    pub fn op_and(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpAnd)
+    }
+    pub fn op_or(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpOr)
+    }
+    pub fn op_xor(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpXor)
+    }
+    pub fn op_equal(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpEqual)
+    }
 
     // Verify Data×Data → removes both
-    pub fn op_equal_verify(self) -> TypedScriptBuilder<S, M> { self.emit_op(OpEqualVerify) }
+    pub fn op_equal_verify(self) -> TypedScriptBuilder<S, M> {
+        self.emit_op(OpEqualVerify)
+    }
 
     // Signature ops
-    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpCheckSig) }
-    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpCheckSigECDSA) }
-    pub fn op_check_sig_verify(self) -> TypedScriptBuilder<S, M> { self.emit_op(OpCheckSigVerify) }
+    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpCheckSig)
+    }
+    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpCheckSigECDSA)
+    }
+    pub fn op_check_sig_verify(self) -> TypedScriptBuilder<S, M> {
+        self.emit_op(OpCheckSigVerify)
+    }
 
     // Blake2b with key (pops key, then data)
-    pub fn op_blake2b_with_key(self) -> TypedScriptBuilder<Hash<S>, M> { self.emit_op(OpBlake2bWithKey) }
+    pub fn op_blake2b_with_key(self) -> TypedScriptBuilder<Hash<S>, M> {
+        self.emit_op(OpBlake2bWithKey)
+    }
 }
 
 // Partial: 1 Data on stack (need 1 more from sig)
 impl<M> TypedScriptBuilder<Data<()>, M> {
-    pub fn op_cat(self) -> TypedScriptBuilder<Data<()>, Data<M>> { self.emit_op(OpCat) }
-    pub fn op_and(self) -> TypedScriptBuilder<Data<()>, Data<M>> { self.emit_op(OpAnd) }
-    pub fn op_or(self) -> TypedScriptBuilder<Data<()>, Data<M>> { self.emit_op(OpOr) }
-    pub fn op_xor(self) -> TypedScriptBuilder<Data<()>, Data<M>> { self.emit_op(OpXor) }
-    pub fn op_equal(self) -> TypedScriptBuilder<Bool<()>, Data<M>> { self.emit_op(OpEqual) }
-    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<()>, Data<M>> { self.emit_op(OpCheckSig) }
-    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<()>, Data<M>> { self.emit_op(OpCheckSigECDSA) }
-    pub fn op_blake2b_with_key(self) -> TypedScriptBuilder<Hash<()>, Data<M>> { self.emit_op(OpBlake2bWithKey) }
+    pub fn op_cat(self) -> TypedScriptBuilder<Data<()>, Data<M>> {
+        self.emit_op(OpCat)
+    }
+    pub fn op_and(self) -> TypedScriptBuilder<Data<()>, Data<M>> {
+        self.emit_op(OpAnd)
+    }
+    pub fn op_or(self) -> TypedScriptBuilder<Data<()>, Data<M>> {
+        self.emit_op(OpOr)
+    }
+    pub fn op_xor(self) -> TypedScriptBuilder<Data<()>, Data<M>> {
+        self.emit_op(OpXor)
+    }
+    pub fn op_equal(self) -> TypedScriptBuilder<Bool<()>, Data<M>> {
+        self.emit_op(OpEqual)
+    }
+    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<()>, Data<M>> {
+        self.emit_op(OpCheckSig)
+    }
+    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<()>, Data<M>> {
+        self.emit_op(OpCheckSigECDSA)
+    }
+    pub fn op_blake2b_with_key(self) -> TypedScriptBuilder<Hash<()>, Data<M>> {
+        self.emit_op(OpBlake2bWithKey)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -406,18 +586,32 @@ impl<M> TypedScriptBuilder<Data<()>, M> {
 // ---------------------------------------------------------------------------
 
 impl<S, M> TypedScriptBuilder<Data<S>, M> {
-    pub fn op_invert(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpInvert) }
+    pub fn op_invert(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpInvert)
+    }
 
     /// Pushes the size of the top data element without popping it.
-    pub fn op_size(self) -> TypedScriptBuilder<Num<Data<S>>, M> { self.emit_op(OpSize) }
+    pub fn op_size(self) -> TypedScriptBuilder<Num<Data<S>>, M> {
+        self.emit_op(OpSize)
+    }
 
-    pub fn op_sha256(self) -> TypedScriptBuilder<Hash<S>, M> { self.emit_op(OpSHA256) }
-    pub fn op_blake2b(self) -> TypedScriptBuilder<Hash<S>, M> { self.emit_op(OpBlake2b) }
-    pub fn op_bin2num(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpBin2Num) }
+    pub fn op_sha256(self) -> TypedScriptBuilder<Hash<S>, M> {
+        self.emit_op(OpSHA256)
+    }
+    pub fn op_blake2b(self) -> TypedScriptBuilder<Hash<S>, M> {
+        self.emit_op(OpBlake2b)
+    }
+    pub fn op_bin2num(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpBin2Num)
+    }
 
     // Lock time operations
-    pub fn op_check_lock_time_verify(self) -> TypedScriptBuilder<S, M> { self.emit_op(OpCheckLockTimeVerify) }
-    pub fn op_check_sequence_verify(self) -> TypedScriptBuilder<S, M> { self.emit_op(OpCheckSequenceVerify) }
+    pub fn op_check_lock_time_verify(self) -> TypedScriptBuilder<S, M> {
+        self.emit_op(OpCheckLockTimeVerify)
+    }
+    pub fn op_check_sequence_verify(self) -> TypedScriptBuilder<S, M> {
+        self.emit_op(OpCheckSequenceVerify)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -426,23 +620,31 @@ impl<S, M> TypedScriptBuilder<Data<S>, M> {
 
 // Full: Num<Num<Data<S>>>
 impl<S, M> TypedScriptBuilder<Num<Num<Data<S>>>, M> {
-    pub fn op_substr(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpSubstr) }
+    pub fn op_substr(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpSubstr)
+    }
 }
 
 // Partial: 2 on stack (Num<Num<()>>) — need Data from sig
 impl<M> TypedScriptBuilder<Num<Num<()>>, M> {
-    pub fn op_substr(self) -> TypedScriptBuilder<Data<()>, Data<M>> { self.emit_op(OpSubstr) }
+    pub fn op_substr(self) -> TypedScriptBuilder<Data<()>, Data<M>> {
+        self.emit_op(OpSubstr)
+    }
 }
 
 // Partial: 1 on stack (Num<()>) — need Num+Data from sig
 // Note: this conflicts with the existing Num<()> impl, so we add it there
 impl<M> TypedScriptBuilder<Num<()>, M> {
-    pub fn op_substr(self) -> TypedScriptBuilder<Data<()>, Data<Num<M>>> { self.emit_op(OpSubstr) }
+    pub fn op_substr(self) -> TypedScriptBuilder<Data<()>, Data<Num<M>>> {
+        self.emit_op(OpSubstr)
+    }
 }
 
 // Empty stack — need all 3: Data<Num<Num<M>>> (Data deepest, Nums on top)
 impl<M> TypedScriptBuilder<(), M> {
-    pub fn op_substr(self) -> TypedScriptBuilder<Data<()>, Data<Num<Num<M>>>> { self.emit_op(OpSubstr) }
+    pub fn op_substr(self) -> TypedScriptBuilder<Data<()>, Data<Num<Num<M>>>> {
+        self.emit_op(OpSubstr)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -454,83 +656,87 @@ impl<M> TypedScriptBuilder<(), M> {
 // op_bin2num on Data<S> already defined above in the Data<S> block
 
 // ---------------------------------------------------------------------------
-// Stack manipulation: Dup (per type)
+// Stack manipulation: Dup & Drop (generic via StackEntry)
 // ---------------------------------------------------------------------------
 
-impl<S, M> TypedScriptBuilder<Num<S>, M> {
-    pub fn op_dup(self) -> TypedScriptBuilder<Num<Num<S>>, M> { self.emit_op(OpDup) }
-}
-
-impl<S, M> TypedScriptBuilder<Bool<S>, M> {
-    pub fn op_dup(self) -> TypedScriptBuilder<Bool<Bool<S>>, M> { self.emit_op(OpDup) }
-}
-
-impl<S, M> TypedScriptBuilder<Data<S>, M> {
-    pub fn op_dup(self) -> TypedScriptBuilder<Data<Data<S>>, M> { self.emit_op(OpDup) }
-}
-
-impl<S, M> TypedScriptBuilder<Hash<S>, M> {
-    pub fn op_dup(self) -> TypedScriptBuilder<Hash<Hash<S>>, M> { self.emit_op(OpDup) }
-}
-
-impl<S, M> TypedScriptBuilder<Bn254Fr<S>, M> {
-    pub fn op_dup(self) -> TypedScriptBuilder<Bn254Fr<Bn254Fr<S>>, M> { self.emit_op(OpDup) }
+impl<Top: StackEntry, M> TypedScriptBuilder<Top, M> {
+    pub fn op_dup(self) -> TypedScriptBuilder<Top::Wrap<Top>, M> {
+        self.emit_op(OpDup)
+    }
+    pub fn op_drop(self) -> TypedScriptBuilder<Top::Rest, M> {
+        self.emit_op(OpDrop)
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Stack manipulation: Drop (per type)
+// Stack manipulation: multi-element ops (generic via StackEntry)
 // ---------------------------------------------------------------------------
 
-impl<S, M> TypedScriptBuilder<Num<S>, M> {
-    pub fn op_drop(self) -> TypedScriptBuilder<S, M> { self.emit_op(OpDrop) }
+// 2-element ops: top two elements can be any marker types
+impl<Top, M> TypedScriptBuilder<Top, M>
+where
+    Top: StackEntry,
+    Top::Rest: StackEntry,
+{
+    /// Swap the top two elements. `[A, B, rest]` → `[B, A, rest]`
+    pub fn op_swap(self) -> TypedScriptBuilder<<Top::Rest as StackEntry>::Wrap<Top::Wrap<<Top::Rest as StackEntry>::Rest>>, M> {
+        self.emit_op(OpSwap)
+    }
+
+    /// Remove the second-to-top element. `[A, B, rest]` → `[A, rest]`
+    pub fn op_nip(self) -> TypedScriptBuilder<Top::Wrap<<Top::Rest as StackEntry>::Rest>, M> {
+        self.emit_op(OpNip)
+    }
+
+    /// Copy the second-to-top element to the top. `[A, B, rest]` → `[B, A, B, rest]`
+    pub fn op_over(self) -> TypedScriptBuilder<<Top::Rest as StackEntry>::Wrap<Top>, M> {
+        self.emit_op(OpOver)
+    }
+
+    /// Copy the top element below the second-to-top. `[A, B, rest]` → `[A, B, A, rest]`
+    pub fn op_tuck(
+        self,
+    ) -> TypedScriptBuilder<Top::Wrap<<Top::Rest as StackEntry>::Wrap<Top::Wrap<<Top::Rest as StackEntry>::Rest>>>, M> {
+        self.emit_op(OpTuck)
+    }
+
+    /// Drop the top two elements. `[A, B, rest]` → `[rest]`
+    pub fn op_2_drop(self) -> TypedScriptBuilder<<Top::Rest as StackEntry>::Rest, M> {
+        self.emit_op(Op2Drop)
+    }
+
+    /// Duplicate the top two elements. `[A, B, rest]` → `[A, B, A, B, rest]`
+    pub fn op_2_dup(self) -> TypedScriptBuilder<Top::Wrap<<Top::Rest as StackEntry>::Wrap<Top>>, M> {
+        self.emit_op(Op2Dup)
+    }
 }
 
-impl<S, M> TypedScriptBuilder<Bool<S>, M> {
-    pub fn op_drop(self) -> TypedScriptBuilder<S, M> { self.emit_op(OpDrop) }
-}
+// 3-element ops: top three elements can be any marker types
+impl<Top, M> TypedScriptBuilder<Top, M>
+where
+    Top: StackEntry,
+    Top::Rest: StackEntry,
+    <Top::Rest as StackEntry>::Rest: StackEntry,
+{
+    /// Rotate the top three elements. `[A, B, C, rest]` → `[C, A, B, rest]`
+    pub fn op_rot(
+        self,
+    ) -> TypedScriptBuilder<
+        <<Top::Rest as StackEntry>::Rest as StackEntry>::Wrap<
+            Top::Wrap<<Top::Rest as StackEntry>::Wrap<<<Top::Rest as StackEntry>::Rest as StackEntry>::Rest>>,
+        >,
+        M,
+    > {
+        self.emit_op(OpRot)
+    }
 
-impl<S, M> TypedScriptBuilder<Data<S>, M> {
-    pub fn op_drop(self) -> TypedScriptBuilder<S, M> { self.emit_op(OpDrop) }
-}
-
-impl<S, M> TypedScriptBuilder<Hash<S>, M> {
-    pub fn op_drop(self) -> TypedScriptBuilder<S, M> { self.emit_op(OpDrop) }
-}
-
-impl<S, M> TypedScriptBuilder<Bn254Fr<S>, M> {
-    pub fn op_drop(self) -> TypedScriptBuilder<S, M> { self.emit_op(OpDrop) }
-}
-
-// ---------------------------------------------------------------------------
-// Stack manipulation: multi-element ops (Data only)
-// ---------------------------------------------------------------------------
-
-impl<S, M> TypedScriptBuilder<Data<Data<S>>, M> {
-    /// Swap the top two data elements.
-    pub fn op_swap(self) -> TypedScriptBuilder<Data<Data<S>>, M> { self.emit_op(OpSwap) }
-
-    /// Remove the second-to-top element.
-    pub fn op_nip(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpNip) }
-
-    /// Copy the second-to-top element to the top.
-    pub fn op_over(self) -> TypedScriptBuilder<Data<Data<Data<S>>>, M> { self.emit_op(OpOver) }
-
-    /// Copy the top element below the second-to-top.
-    pub fn op_tuck(self) -> TypedScriptBuilder<Data<Data<Data<S>>>, M> { self.emit_op(OpTuck) }
-
-    /// Drop the top two elements.
-    pub fn op_2_drop(self) -> TypedScriptBuilder<S, M> { self.emit_op(Op2Drop) }
-
-    /// Duplicate the top two elements.
-    pub fn op_2_dup(self) -> TypedScriptBuilder<Data<Data<Data<Data<S>>>>, M> { self.emit_op(Op2Dup) }
-}
-
-impl<S, M> TypedScriptBuilder<Data<Data<Data<S>>>, M> {
-    /// Rotate the top three data elements.
-    pub fn op_rot(self) -> TypedScriptBuilder<Data<Data<Data<S>>>, M> { self.emit_op(OpRot) }
-
-    /// Duplicate the top three elements.
-    pub fn op_3_dup(self) -> TypedScriptBuilder<Data<Data<Data<Data<Data<Data<S>>>>>>, M> { self.emit_op(Op3Dup) }
+    /// Duplicate the top three elements. `[A, B, C, rest]` → `[A, B, C, A, B, C, rest]`
+    pub fn op_3_dup(
+        self,
+    ) -> TypedScriptBuilder<Top::Wrap<<Top::Rest as StackEntry>::Wrap<<<Top::Rest as StackEntry>::Rest as StackEntry>::Wrap<Top>>>, M>
+    {
+        self.emit_op(Op3Dup)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -539,7 +745,9 @@ impl<S, M> TypedScriptBuilder<Data<Data<Data<S>>>, M> {
 
 impl<S, M> TypedScriptBuilder<S, M> {
     /// Push the current stack depth as a number.
-    pub fn op_depth(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpDepth) }
+    pub fn op_depth(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpDepth)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -548,7 +756,9 @@ impl<S, M> TypedScriptBuilder<S, M> {
 
 impl<S, M> TypedScriptBuilder<Bool<S>, M> {
     /// Pops the top Bool; errors if false at runtime.
-    pub fn op_verify(self) -> TypedScriptBuilder<S, M> { self.emit_op(OpVerify) }
+    pub fn op_verify(self) -> TypedScriptBuilder<S, M> {
+        self.emit_op(OpVerify)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -556,9 +766,15 @@ impl<S, M> TypedScriptBuilder<Bool<S>, M> {
 // ---------------------------------------------------------------------------
 
 impl<S, M> TypedScriptBuilder<S, M> {
-    pub fn op_true(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpTrue) }
-    pub fn op_false(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpFalse) }
-    pub fn op_1_negate(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(Op1Negate) }
+    pub fn op_true(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpTrue)
+    }
+    pub fn op_false(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpFalse)
+    }
+    pub fn op_1_negate(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(Op1Negate)
+    }
 
     /// Push Op2..Op16 onto the stack. Panics if n is not in 2..=16.
     pub fn op_n(self, n: u8) -> TypedScriptBuilder<Num<S>, M> {
@@ -568,8 +784,12 @@ impl<S, M> TypedScriptBuilder<S, M> {
         self.emit_op(opcode)
     }
 
-    pub fn op_nop(self) -> TypedScriptBuilder<S, M> { self.emit_op(OpNop) }
-    pub fn op_return(self) -> TypedScriptBuilder<S, M> { self.emit_op(OpReturn) }
+    pub fn op_nop(self) -> TypedScriptBuilder<S, M> {
+        self.emit_op(OpNop)
+    }
+    pub fn op_return(self) -> TypedScriptBuilder<S, M> {
+        self.emit_op(OpReturn)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -577,14 +797,30 @@ impl<S, M> TypedScriptBuilder<S, M> {
 // ---------------------------------------------------------------------------
 
 impl<S, M> TypedScriptBuilder<S, M> {
-    pub fn op_tx_input_count(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpTxInputCount) }
-    pub fn op_tx_output_count(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpTxOutputCount) }
-    pub fn op_tx_version(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpTxVersion) }
-    pub fn op_tx_lock_time(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpTxLockTime) }
-    pub fn op_tx_gas(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpTxGas) }
-    pub fn op_tx_input_index(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpTxInputIndex) }
-    pub fn op_tx_payload_len(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpTxPayloadLen) }
-    pub fn op_tx_subnet_id(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpTxSubnetId) }
+    pub fn op_tx_input_count(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpTxInputCount)
+    }
+    pub fn op_tx_output_count(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpTxOutputCount)
+    }
+    pub fn op_tx_version(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpTxVersion)
+    }
+    pub fn op_tx_lock_time(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpTxLockTime)
+    }
+    pub fn op_tx_gas(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpTxGas)
+    }
+    pub fn op_tx_input_index(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpTxInputIndex)
+    }
+    pub fn op_tx_payload_len(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpTxPayloadLen)
+    }
+    pub fn op_tx_subnet_id(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpTxSubnetId)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -593,23 +829,45 @@ impl<S, M> TypedScriptBuilder<S, M> {
 
 impl<S, M> TypedScriptBuilder<Num<S>, M> {
     // → Num<S>
-    pub fn op_tx_input_amount(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpTxInputAmount) }
-    pub fn op_tx_output_amount(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpTxOutputAmount) }
-    pub fn op_outpoint_index(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpOutpointIndex) }
-    pub fn op_tx_input_spk_len(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpTxInputSpkLen) }
-    pub fn op_tx_output_spk_len(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpTxOutputSpkLen) }
-    pub fn op_tx_input_script_sig_len(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpTxInputScriptSigLen) }
+    pub fn op_tx_input_amount(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpTxInputAmount)
+    }
+    pub fn op_tx_output_amount(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpTxOutputAmount)
+    }
+    pub fn op_outpoint_index(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpOutpointIndex)
+    }
+    pub fn op_tx_input_spk_len(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpTxInputSpkLen)
+    }
+    pub fn op_tx_output_spk_len(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpTxOutputSpkLen)
+    }
+    pub fn op_tx_input_script_sig_len(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpTxInputScriptSigLen)
+    }
 
     // → Data<S>
-    pub fn op_tx_input_spk(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpTxInputSpk) }
-    pub fn op_tx_output_spk(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpTxOutputSpk) }
-    pub fn op_tx_input_seq(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpTxInputSeq) }
+    pub fn op_tx_input_spk(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpTxInputSpk)
+    }
+    pub fn op_tx_output_spk(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpTxOutputSpk)
+    }
+    pub fn op_tx_input_seq(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpTxInputSeq)
+    }
 
     // → Hash<S>
-    pub fn op_outpoint_tx_id(self) -> TypedScriptBuilder<Hash<S>, M> { self.emit_op(OpOutpointTxId) }
+    pub fn op_outpoint_tx_id(self) -> TypedScriptBuilder<Hash<S>, M> {
+        self.emit_op(OpOutpointTxId)
+    }
 
     // → Bool<S>
-    pub fn op_tx_input_is_coinbase(self) -> TypedScriptBuilder<Bool<S>, M> { self.emit_op(OpTxInputIsCoinbase) }
+    pub fn op_tx_input_is_coinbase(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpTxInputIsCoinbase)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -617,7 +875,9 @@ impl<S, M> TypedScriptBuilder<Num<S>, M> {
 // ---------------------------------------------------------------------------
 
 impl<S, M> TypedScriptBuilder<Num<Num<S>>, M> {
-    pub fn op_tx_payload_substr(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpTxPayloadSubstr) }
+    pub fn op_tx_payload_substr(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpTxPayloadSubstr)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -625,9 +885,15 @@ impl<S, M> TypedScriptBuilder<Num<Num<S>>, M> {
 // ---------------------------------------------------------------------------
 
 impl<S, M> TypedScriptBuilder<Num<Num<Num<S>>>, M> {
-    pub fn op_tx_input_script_sig_substr(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpTxInputScriptSigSubstr) }
-    pub fn op_tx_input_spk_substr(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpTxInputSpkSubstr) }
-    pub fn op_tx_output_spk_substr(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpTxOutputSpkSubstr) }
+    pub fn op_tx_input_script_sig_substr(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpTxInputScriptSigSubstr)
+    }
+    pub fn op_tx_input_spk_substr(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpTxInputSpkSubstr)
+    }
+    pub fn op_tx_output_spk_substr(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpTxOutputSpkSubstr)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -635,26 +901,40 @@ impl<S, M> TypedScriptBuilder<Num<Num<Num<S>>>, M> {
 // ---------------------------------------------------------------------------
 
 impl<S, M> TypedScriptBuilder<Num<S>, M> {
-    pub fn op_auth_output_count(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpAuthOutputCount) }
+    pub fn op_auth_output_count(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpAuthOutputCount)
+    }
 }
 
 impl<S, M> TypedScriptBuilder<Num<Num<S>>, M> {
-    pub fn op_auth_output_idx(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpAuthOutputIdx) }
+    pub fn op_auth_output_idx(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpAuthOutputIdx)
+    }
 }
 
 impl<S, M> TypedScriptBuilder<Num<S>, M> {
     /// Output is polymorphic (Hash or false at runtime), typed as Data.
-    pub fn op_input_covenant_id(self) -> TypedScriptBuilder<Data<S>, M> { self.emit_op(OpInputCovenantId) }
+    pub fn op_input_covenant_id(self) -> TypedScriptBuilder<Data<S>, M> {
+        self.emit_op(OpInputCovenantId)
+    }
 }
 
 impl<S, M> TypedScriptBuilder<Hash<S>, M> {
-    pub fn op_cov_input_count(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpCovInputCount) }
-    pub fn op_cov_out_count(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpCovOutCount) }
+    pub fn op_cov_input_count(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpCovInputCount)
+    }
+    pub fn op_cov_out_count(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpCovOutCount)
+    }
 }
 
 impl<S, M> TypedScriptBuilder<Num<Hash<S>>, M> {
-    pub fn op_cov_input_idx(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpCovInputIdx) }
-    pub fn op_cov_output_idx(self) -> TypedScriptBuilder<Num<S>, M> { self.emit_op(OpCovOutputIdx) }
+    pub fn op_cov_input_idx(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpCovInputIdx)
+    }
+    pub fn op_cov_output_idx(self) -> TypedScriptBuilder<Num<S>, M> {
+        self.emit_op(OpCovOutputIdx)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -663,7 +943,9 @@ impl<S, M> TypedScriptBuilder<Num<Hash<S>>, M> {
 
 impl<S, M> TypedScriptBuilder<Hash<S>, M> {
     /// Pops block hash, pushes commitment hash.
-    pub fn op_chainblock_seq_commit(self) -> TypedScriptBuilder<Hash<S>, M> { self.emit_op(OpChainblockSeqCommit) }
+    pub fn op_chainblock_seq_commit(self) -> TypedScriptBuilder<Hash<S>, M> {
+        self.emit_op(OpChainblockSeqCommit)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -823,12 +1105,7 @@ mod tests {
 
     #[test]
     fn test_unary_ops() {
-        let typed = TypedScriptBuilder::new()
-            .add_i64(5)
-            .op_1_add()
-            .op_negate()
-            .op_abs()
-            .op_not();
+        let typed = TypedScriptBuilder::new().add_i64(5).op_1_add().op_negate().op_abs().op_not();
 
         let mut manual = ScriptBuilder::new();
         manual.add_i64(5).unwrap().add_op(Op1Add).unwrap().add_op(OpNegate).unwrap().add_op(OpAbs).unwrap().add_op(OpNot).unwrap();
@@ -870,82 +1147,75 @@ mod tests {
     #[test]
     fn test_data_ops() {
         // add_data, op_cat, op_equal, op_invert, op_and, op_or, op_xor
-        let typed_cat = TypedScriptBuilder::new()
-            .add_data(&[1, 2, 3])
-            .add_data(&[4, 5, 6])
-            .op_cat()
-            .add_data(&[1, 2, 3, 4, 5, 6])
-            .op_equal();
+        let typed_cat =
+            TypedScriptBuilder::new().add_data(&[1, 2, 3]).add_data(&[4, 5, 6]).op_cat().add_data(&[1, 2, 3, 4, 5, 6]).op_equal();
 
         let mut manual_cat = ScriptBuilder::new();
         manual_cat
-            .add_data(&[1, 2, 3]).unwrap()
-            .add_data(&[4, 5, 6]).unwrap()
-            .add_op(OpCat).unwrap()
-            .add_data(&[1, 2, 3, 4, 5, 6]).unwrap()
-            .add_op(OpEqual).unwrap();
+            .add_data(&[1, 2, 3])
+            .unwrap()
+            .add_data(&[4, 5, 6])
+            .unwrap()
+            .add_op(OpCat)
+            .unwrap()
+            .add_data(&[1, 2, 3, 4, 5, 6])
+            .unwrap()
+            .add_op(OpEqual)
+            .unwrap();
         assert_eq!(typed_cat.redeem_script(), manual_cat.script());
 
-        let typed_invert = TypedScriptBuilder::new()
-            .add_data(&[0xFF])
-            .op_invert()
-            .add_data(&[0x00])
-            .op_equal();
+        let typed_invert = TypedScriptBuilder::new().add_data(&[0xFF]).op_invert().add_data(&[0x00]).op_equal();
 
         let mut manual_invert = ScriptBuilder::new();
-        manual_invert
-            .add_data(&[0xFF]).unwrap()
-            .add_op(OpInvert).unwrap()
-            .add_data(&[0x00]).unwrap()
-            .add_op(OpEqual).unwrap();
+        manual_invert.add_data(&[0xFF]).unwrap().add_op(OpInvert).unwrap().add_data(&[0x00]).unwrap().add_op(OpEqual).unwrap();
         assert_eq!(typed_invert.redeem_script(), manual_invert.script());
 
-        let typed_and = TypedScriptBuilder::new()
-            .add_data(&[0xFF])
-            .add_data(&[0x0F])
-            .op_and()
-            .add_data(&[0x0F])
-            .op_equal();
+        let typed_and = TypedScriptBuilder::new().add_data(&[0xFF]).add_data(&[0x0F]).op_and().add_data(&[0x0F]).op_equal();
 
         let mut manual_and = ScriptBuilder::new();
         manual_and
-            .add_data(&[0xFF]).unwrap()
-            .add_data(&[0x0F]).unwrap()
-            .add_op(OpAnd).unwrap()
-            .add_data(&[0x0F]).unwrap()
-            .add_op(OpEqual).unwrap();
+            .add_data(&[0xFF])
+            .unwrap()
+            .add_data(&[0x0F])
+            .unwrap()
+            .add_op(OpAnd)
+            .unwrap()
+            .add_data(&[0x0F])
+            .unwrap()
+            .add_op(OpEqual)
+            .unwrap();
         assert_eq!(typed_and.redeem_script(), manual_and.script());
 
-        let typed_or = TypedScriptBuilder::new()
-            .add_data(&[0xF0])
-            .add_data(&[0x0F])
-            .op_or()
-            .add_data(&[0xFF])
-            .op_equal();
+        let typed_or = TypedScriptBuilder::new().add_data(&[0xF0]).add_data(&[0x0F]).op_or().add_data(&[0xFF]).op_equal();
 
         let mut manual_or = ScriptBuilder::new();
         manual_or
-            .add_data(&[0xF0]).unwrap()
-            .add_data(&[0x0F]).unwrap()
-            .add_op(OpOr).unwrap()
-            .add_data(&[0xFF]).unwrap()
-            .add_op(OpEqual).unwrap();
+            .add_data(&[0xF0])
+            .unwrap()
+            .add_data(&[0x0F])
+            .unwrap()
+            .add_op(OpOr)
+            .unwrap()
+            .add_data(&[0xFF])
+            .unwrap()
+            .add_op(OpEqual)
+            .unwrap();
         assert_eq!(typed_or.redeem_script(), manual_or.script());
 
-        let typed_xor = TypedScriptBuilder::new()
-            .add_data(&[0xFF])
-            .add_data(&[0x0F])
-            .op_xor()
-            .add_data(&[0xF0])
-            .op_equal();
+        let typed_xor = TypedScriptBuilder::new().add_data(&[0xFF]).add_data(&[0x0F]).op_xor().add_data(&[0xF0]).op_equal();
 
         let mut manual_xor = ScriptBuilder::new();
         manual_xor
-            .add_data(&[0xFF]).unwrap()
-            .add_data(&[0x0F]).unwrap()
-            .add_op(OpXor).unwrap()
-            .add_data(&[0xF0]).unwrap()
-            .add_op(OpEqual).unwrap();
+            .add_data(&[0xFF])
+            .unwrap()
+            .add_data(&[0x0F])
+            .unwrap()
+            .add_op(OpXor)
+            .unwrap()
+            .add_data(&[0xF0])
+            .unwrap()
+            .add_op(OpEqual)
+            .unwrap();
         assert_eq!(typed_xor.redeem_script(), manual_xor.script());
     }
 
@@ -966,31 +1236,30 @@ mod tests {
 
         let mut manual_sha = ScriptBuilder::new();
         manual_sha
-            .add_data(&[1, 2, 3]).unwrap()
-            .add_op(OpSHA256).unwrap()
-            .add_data(&[4, 5, 6]).unwrap()
-            .add_op(OpBlake2b).unwrap()
-            .add_op(OpSwap).unwrap()
-            .add_op(OpDrop).unwrap()
-            .add_data(&[0xAA; 32]).unwrap()
-            .add_op(OpEqual).unwrap();
+            .add_data(&[1, 2, 3])
+            .unwrap()
+            .add_op(OpSHA256)
+            .unwrap()
+            .add_data(&[4, 5, 6])
+            .unwrap()
+            .add_op(OpBlake2b)
+            .unwrap()
+            .add_op(OpSwap)
+            .unwrap()
+            .add_op(OpDrop)
+            .unwrap()
+            .add_data(&[0xAA; 32])
+            .unwrap()
+            .add_op(OpEqual)
+            .unwrap();
         assert_eq!(typed_sha.redeem_script(), manual_sha.script());
 
         // add_hash + downcast + op_equal
         let h = kaspa_hashes::Hash::from_bytes([0xAB; 32]);
-        let typed_hash = TypedScriptBuilder::new()
-            .add_data(&[0xAB; 32])
-            .add_hash(h)
-            .downcast()
-            .op_swap()
-            .op_equal();
+        let typed_hash = TypedScriptBuilder::new().add_data(&[0xAB; 32]).add_hash(&h).downcast().op_swap().op_equal();
 
         let mut manual_hash = ScriptBuilder::new();
-        manual_hash
-            .add_data(&[0xAB; 32]).unwrap()
-            .add_data(&h.as_bytes()).unwrap()
-            .add_op(OpSwap).unwrap()
-            .add_op(OpEqual).unwrap();
+        manual_hash.add_data(&[0xAB; 32]).unwrap().add_data(&h.as_bytes()).unwrap().add_op(OpSwap).unwrap().add_op(OpEqual).unwrap();
         assert_eq!(typed_hash.redeem_script(), manual_hash.script());
     }
 
@@ -1005,21 +1274,34 @@ mod tests {
 
         let mut manual = ScriptBuilder::new();
         manual
-            .add_i64(6).unwrap().add_i64(7).unwrap().add_op(OpMul).unwrap()
-            .add_i64(5).unwrap().add_op(OpDiv).unwrap()
-            .add_i64(3).unwrap().add_op(OpMod).unwrap()
-            .add_i64(10).unwrap().add_op(OpMin).unwrap()
-            .add_i64(2).unwrap().add_op(OpNumEqual).unwrap();
+            .add_i64(6)
+            .unwrap()
+            .add_i64(7)
+            .unwrap()
+            .add_op(OpMul)
+            .unwrap()
+            .add_i64(5)
+            .unwrap()
+            .add_op(OpDiv)
+            .unwrap()
+            .add_i64(3)
+            .unwrap()
+            .add_op(OpMod)
+            .unwrap()
+            .add_i64(10)
+            .unwrap()
+            .add_op(OpMin)
+            .unwrap()
+            .add_i64(2)
+            .unwrap()
+            .add_op(OpNumEqual)
+            .unwrap();
         assert_eq!(typed.redeem_script(), manual.script());
 
-        let typed_max = TypedScriptBuilder::new()
-            .add_i64(3).add_i64(7).op_max()
-            .add_i64(7).op_num_equal();
+        let typed_max = TypedScriptBuilder::new().add_i64(3).add_i64(7).op_max().add_i64(7).op_num_equal();
 
         let mut manual_max = ScriptBuilder::new();
-        manual_max
-            .add_i64(3).unwrap().add_i64(7).unwrap().add_op(OpMax).unwrap()
-            .add_i64(7).unwrap().add_op(OpNumEqual).unwrap();
+        manual_max.add_i64(3).unwrap().add_i64(7).unwrap().add_op(OpMax).unwrap().add_i64(7).unwrap().add_op(OpNumEqual).unwrap();
         assert_eq!(typed_max.redeem_script(), manual_max.script());
     }
 
@@ -1032,11 +1314,7 @@ mod tests {
             .op_within();
 
         let mut manual = ScriptBuilder::new();
-        manual
-            .add_i64(5).unwrap()
-            .add_i64(1).unwrap()
-            .add_i64(10).unwrap()
-            .add_op(OpWithin).unwrap();
+        manual.add_i64(5).unwrap().add_i64(1).unwrap().add_i64(10).unwrap().add_op(OpWithin).unwrap();
         assert_eq!(typed.redeem_script(), manual.script());
     }
 
@@ -1081,93 +1359,111 @@ mod tests {
         // op_dup
         let typed_dup = TypedScriptBuilder::new().add_i64(5).op_dup().op_add().add_i64(10).op_num_equal();
         let mut manual_dup = ScriptBuilder::new();
-        manual_dup
-            .add_i64(5).unwrap().add_op(OpDup).unwrap().add_op(OpAdd).unwrap()
-            .add_i64(10).unwrap().add_op(OpNumEqual).unwrap();
+        manual_dup.add_i64(5).unwrap().add_op(OpDup).unwrap().add_op(OpAdd).unwrap().add_i64(10).unwrap().add_op(OpNumEqual).unwrap();
         assert_eq!(typed_dup.redeem_script(), manual_dup.script());
 
         // op_drop
         let typed_drop = TypedScriptBuilder::new().add_i64(99).add_i64(1).op_drop().add_i64(99).op_num_equal();
         let mut manual_drop = ScriptBuilder::new();
-        manual_drop
-            .add_i64(99).unwrap().add_i64(1).unwrap().add_op(OpDrop).unwrap()
-            .add_i64(99).unwrap().add_op(OpNumEqual).unwrap();
+        manual_drop.add_i64(99).unwrap().add_i64(1).unwrap().add_op(OpDrop).unwrap().add_i64(99).unwrap().add_op(OpNumEqual).unwrap();
         assert_eq!(typed_drop.redeem_script(), manual_drop.script());
 
         // op_swap (Data) — swap [1],[2] → [2],[1], nip → [2], compare with [2]
-        let typed_swap = TypedScriptBuilder::new()
-            .add_data(&[1]).add_data(&[2])
-            .op_swap()
-            .op_nip()
-            .add_data(&[1]).op_equal();
+        let typed_swap = TypedScriptBuilder::new().add_data(&[1]).add_data(&[2]).op_swap().op_nip().add_data(&[1]).op_equal();
 
         let mut manual_swap = ScriptBuilder::new();
         manual_swap
-            .add_data(&[1]).unwrap().add_data(&[2]).unwrap()
-            .add_op(OpSwap).unwrap()
-            .add_op(OpNip).unwrap()
-            .add_data(&[1]).unwrap()
-            .add_op(OpEqual).unwrap();
+            .add_data(&[1])
+            .unwrap()
+            .add_data(&[2])
+            .unwrap()
+            .add_op(OpSwap)
+            .unwrap()
+            .add_op(OpNip)
+            .unwrap()
+            .add_data(&[1])
+            .unwrap()
+            .add_op(OpEqual)
+            .unwrap();
         assert_eq!(typed_swap.redeem_script(), manual_swap.script());
 
         // op_rot (Data) — rot [1],[2],[3] → [2],[3],[1], 2_drop → [1], compare
-        let typed_rot = TypedScriptBuilder::new()
-            .add_data(&[1]).add_data(&[2]).add_data(&[3])
-            .op_rot()
-            .op_2_drop()
-            .add_data(&[1]).op_equal();
+        let typed_rot =
+            TypedScriptBuilder::new().add_data(&[1]).add_data(&[2]).add_data(&[3]).op_rot().op_2_drop().add_data(&[1]).op_equal();
 
         let mut manual_rot = ScriptBuilder::new();
         manual_rot
-            .add_data(&[1]).unwrap().add_data(&[2]).unwrap().add_data(&[3]).unwrap()
-            .add_op(OpRot).unwrap()
-            .add_op(Op2Drop).unwrap()
-            .add_data(&[1]).unwrap().add_op(OpEqual).unwrap();
+            .add_data(&[1])
+            .unwrap()
+            .add_data(&[2])
+            .unwrap()
+            .add_data(&[3])
+            .unwrap()
+            .add_op(OpRot)
+            .unwrap()
+            .add_op(Op2Drop)
+            .unwrap()
+            .add_data(&[1])
+            .unwrap()
+            .add_op(OpEqual)
+            .unwrap();
         assert_eq!(typed_rot.redeem_script(), manual_rot.script());
 
         // op_nip — [1],[2] → [2], compare with [2]
-        let typed_nip = TypedScriptBuilder::new()
-            .add_data(&[1]).add_data(&[2])
-            .op_nip()
-            .add_data(&[2]).op_equal();
+        let typed_nip = TypedScriptBuilder::new().add_data(&[1]).add_data(&[2]).op_nip().add_data(&[2]).op_equal();
 
         let mut manual_nip = ScriptBuilder::new();
         manual_nip
-            .add_data(&[1]).unwrap().add_data(&[2]).unwrap()
-            .add_op(OpNip).unwrap()
-            .add_data(&[2]).unwrap().add_op(OpEqual).unwrap();
+            .add_data(&[1])
+            .unwrap()
+            .add_data(&[2])
+            .unwrap()
+            .add_op(OpNip)
+            .unwrap()
+            .add_data(&[2])
+            .unwrap()
+            .add_op(OpEqual)
+            .unwrap();
         assert_eq!(typed_nip.redeem_script(), manual_nip.script());
 
         // op_over — [1],[2] → [1],[2],[1], equal_verify top two, then compare remaining
-        let typed_over = TypedScriptBuilder::new()
-            .add_data(&[1]).add_data(&[2])
-            .op_over()
-            .op_nip()
-            .op_nip()
-            .add_data(&[1]).op_equal();
+        let typed_over = TypedScriptBuilder::new().add_data(&[1]).add_data(&[2]).op_over().op_nip().op_nip().add_data(&[1]).op_equal();
 
         let mut manual_over = ScriptBuilder::new();
         manual_over
-            .add_data(&[1]).unwrap().add_data(&[2]).unwrap()
-            .add_op(OpOver).unwrap()
-            .add_op(OpNip).unwrap()
-            .add_op(OpNip).unwrap()
-            .add_data(&[1]).unwrap().add_op(OpEqual).unwrap();
+            .add_data(&[1])
+            .unwrap()
+            .add_data(&[2])
+            .unwrap()
+            .add_op(OpOver)
+            .unwrap()
+            .add_op(OpNip)
+            .unwrap()
+            .add_op(OpNip)
+            .unwrap()
+            .add_data(&[1])
+            .unwrap()
+            .add_op(OpEqual)
+            .unwrap();
         assert_eq!(typed_over.redeem_script(), manual_over.script());
 
         // op_tuck — [1],[2] → [2],[1],[2], 2_drop → [2], compare
-        let typed_tuck = TypedScriptBuilder::new()
-            .add_data(&[1]).add_data(&[2])
-            .op_tuck()
-            .op_2_drop()
-            .add_data(&[2]).op_equal();
+        let typed_tuck = TypedScriptBuilder::new().add_data(&[1]).add_data(&[2]).op_tuck().op_2_drop().add_data(&[2]).op_equal();
 
         let mut manual_tuck = ScriptBuilder::new();
         manual_tuck
-            .add_data(&[1]).unwrap().add_data(&[2]).unwrap()
-            .add_op(OpTuck).unwrap()
-            .add_op(Op2Drop).unwrap()
-            .add_data(&[2]).unwrap().add_op(OpEqual).unwrap();
+            .add_data(&[1])
+            .unwrap()
+            .add_data(&[2])
+            .unwrap()
+            .add_op(OpTuck)
+            .unwrap()
+            .add_op(Op2Drop)
+            .unwrap()
+            .add_data(&[2])
+            .unwrap()
+            .add_op(OpEqual)
+            .unwrap();
         assert_eq!(typed_tuck.redeem_script(), manual_tuck.script());
     }
 
@@ -1203,65 +1499,59 @@ mod tests {
 
         let mut manual_verify = ScriptBuilder::new();
         manual_verify
-            .add_i64(1).unwrap().add_i64(1).unwrap().add_op(OpNumEqual).unwrap()
-            .add_op(OpDup).unwrap()
-            .add_op(OpVerify).unwrap();
+            .add_i64(1)
+            .unwrap()
+            .add_i64(1)
+            .unwrap()
+            .add_op(OpNumEqual)
+            .unwrap()
+            .add_op(OpDup)
+            .unwrap()
+            .add_op(OpVerify)
+            .unwrap();
         assert_eq!(typed_verify.redeem_script(), manual_verify.script());
 
         // op_equal_verify
-        let typed_eq_verify = TypedScriptBuilder::new()
-            .add_data(&[1, 2]).add_data(&[1, 2]).op_equal_verify()
-            .op_true();
+        let typed_eq_verify = TypedScriptBuilder::new().add_data(&[1, 2]).add_data(&[1, 2]).op_equal_verify().op_true();
 
         let mut manual_eq_verify = ScriptBuilder::new();
-        manual_eq_verify
-            .add_data(&[1, 2]).unwrap().add_data(&[1, 2]).unwrap().add_op(OpEqualVerify).unwrap()
-            .add_op(OpTrue).unwrap();
+        manual_eq_verify.add_data(&[1, 2]).unwrap().add_data(&[1, 2]).unwrap().add_op(OpEqualVerify).unwrap().add_op(OpTrue).unwrap();
         assert_eq!(typed_eq_verify.redeem_script(), manual_eq_verify.script());
 
         // op_num_equal_verify
-        let typed_neq_verify = TypedScriptBuilder::new()
-            .add_i64(42).add_i64(42).op_num_equal_verify()
-            .op_true();
+        let typed_neq_verify = TypedScriptBuilder::new().add_i64(42).add_i64(42).op_num_equal_verify().op_true();
 
         let mut manual_neq_verify = ScriptBuilder::new();
-        manual_neq_verify
-            .add_i64(42).unwrap().add_i64(42).unwrap().add_op(OpNumEqualVerify).unwrap()
-            .add_op(OpTrue).unwrap();
+        manual_neq_verify.add_i64(42).unwrap().add_i64(42).unwrap().add_op(OpNumEqualVerify).unwrap().add_op(OpTrue).unwrap();
         assert_eq!(typed_neq_verify.redeem_script(), manual_neq_verify.script());
     }
 
     #[test]
     fn test_conversion() {
         // op_num2bin and op_bin2num
-        let typed = TypedScriptBuilder::new()
-            .add_i64(255)
-            .add_i64(4)
-            .op_num2bin()
-            .op_bin2num()
-            .add_i64(255)
-            .op_num_equal();
+        let typed = TypedScriptBuilder::new().add_i64(255).add_i64(4).op_num2bin().op_bin2num().add_i64(255).op_num_equal();
 
         let mut manual = ScriptBuilder::new();
         manual
-            .add_i64(255).unwrap()
-            .add_i64(4).unwrap()
-            .add_op(OpNum2Bin).unwrap()
-            .add_op(OpBin2Num).unwrap()
-            .add_i64(255).unwrap()
-            .add_op(OpNumEqual).unwrap();
+            .add_i64(255)
+            .unwrap()
+            .add_i64(4)
+            .unwrap()
+            .add_op(OpNum2Bin)
+            .unwrap()
+            .add_op(OpBin2Num)
+            .unwrap()
+            .add_i64(255)
+            .unwrap()
+            .add_op(OpNumEqual)
+            .unwrap();
         assert_eq!(typed.redeem_script(), manual.script());
     }
 
     #[test]
     fn test_downcast_upcast_zero_cost() {
         // downcast Num → Data → back via upcast → Num, then compare
-        let roundtrip = TypedScriptBuilder::new()
-            .add_i64(42)
-            .downcast()
-            .unsafe_interpret_as_num()
-            .add_i64(42)
-            .op_num_equal();
+        let roundtrip = TypedScriptBuilder::new().add_i64(42).downcast().unsafe_interpret_as_num().add_i64(42).op_num_equal();
 
         // The roundtrip script should be exactly: push(42), push(42), OpNumEqual
         // No extra opcodes emitted by downcast or upcast
@@ -1274,83 +1564,56 @@ mod tests {
     fn test_sig_builder_data_hash() {
         // Redeem: op_equal (needs 2 Data from sig)
         let typed = TypedScriptBuilder::new().op_equal();
-        let sig = typed.into_sig_builder()
-            .add_data(&[1, 2, 3])
-            .add_data(&[1, 2, 3])
-            .build();
+        let sig = typed.into_sig_builder().add_data(&[1, 2, 3]).add_data(&[1, 2, 3]).build();
         assert!(!sig.is_empty());
 
         // With Hash in signature
         let h = kaspa_hashes::Hash::from_bytes([0xCC; 32]);
         // Redeem: add_data(some_data) op_sha256 downcast op_equal
         // Needs 1 Hash from sig
-        let typed2 = TypedScriptBuilder::new()
-            .add_data(&[0xCC; 32])
-            .add_hash(h)
-            .downcast()
-            .op_equal();
+        let typed2 = TypedScriptBuilder::new().add_data(&[0xCC; 32]).add_hash(&h).downcast().op_equal();
         // no sig needed — both on stack
         assert!(!typed2.redeem_script().is_empty());
     }
 
     #[test]
     fn test_introspection_ops() {
-        let typed = TypedScriptBuilder::new()
-            .op_tx_input_count()
-            .op_tx_output_count()
-            .op_add()
-            .add_i64(0)
-            .op_greater_than();
+        let typed = TypedScriptBuilder::new().op_tx_input_count().op_tx_output_count().op_add().add_i64(0).op_greater_than();
 
         let mut manual = ScriptBuilder::new();
         manual
-            .add_op(OpTxInputCount).unwrap()
-            .add_op(OpTxOutputCount).unwrap()
-            .add_op(OpAdd).unwrap()
-            .add_i64(0).unwrap()
-            .add_op(OpGreaterThan).unwrap();
+            .add_op(OpTxInputCount)
+            .unwrap()
+            .add_op(OpTxOutputCount)
+            .unwrap()
+            .add_op(OpAdd)
+            .unwrap()
+            .add_i64(0)
+            .unwrap()
+            .add_op(OpGreaterThan)
+            .unwrap();
         assert_eq!(typed.redeem_script(), manual.script());
 
         // Index-consuming ops
-        let typed2 = TypedScriptBuilder::new()
-            .add_i64(0)
-            .op_tx_input_amount()
-            .add_i64(0)
-            .op_greater_than_or_equal();
+        let typed2 = TypedScriptBuilder::new().add_i64(0).op_tx_input_amount().add_i64(0).op_greater_than_or_equal();
 
         let mut manual2 = ScriptBuilder::new();
-        manual2
-            .add_i64(0).unwrap()
-            .add_op(OpTxInputAmount).unwrap()
-            .add_i64(0).unwrap()
-            .add_op(OpGreaterThanOrEqual).unwrap();
+        manual2.add_i64(0).unwrap().add_op(OpTxInputAmount).unwrap().add_i64(0).unwrap().add_op(OpGreaterThanOrEqual).unwrap();
         assert_eq!(typed2.redeem_script(), manual2.script());
     }
 
     #[test]
     fn test_check_sig_bytes() {
-        let typed = TypedScriptBuilder::new()
-            .add_data(&[0xAA; 33])
-            .add_data(&[0xBB; 64])
-            .op_check_sig();
+        let typed = TypedScriptBuilder::new().add_data(&[0xAA; 33]).add_data(&[0xBB; 64]).op_check_sig();
 
         let mut manual = ScriptBuilder::new();
-        manual
-            .add_data(&[0xAA; 33]).unwrap()
-            .add_data(&[0xBB; 64]).unwrap()
-            .add_op(OpCheckSig).unwrap();
+        manual.add_data(&[0xAA; 33]).unwrap().add_data(&[0xBB; 64]).unwrap().add_op(OpCheckSig).unwrap();
         assert_eq!(typed.redeem_script(), manual.script());
 
-        let typed_ecdsa = TypedScriptBuilder::new()
-            .add_data(&[0xAA; 33])
-            .add_data(&[0xBB; 64])
-            .op_check_sig_ecdsa();
+        let typed_ecdsa = TypedScriptBuilder::new().add_data(&[0xAA; 33]).add_data(&[0xBB; 64]).op_check_sig_ecdsa();
 
         let mut manual_ecdsa = ScriptBuilder::new();
-        manual_ecdsa
-            .add_data(&[0xAA; 33]).unwrap()
-            .add_data(&[0xBB; 64]).unwrap()
-            .add_op(OpCheckSigECDSA).unwrap();
+        manual_ecdsa.add_data(&[0xAA; 33]).unwrap().add_data(&[0xBB; 64]).unwrap().add_op(OpCheckSigECDSA).unwrap();
         assert_eq!(typed_ecdsa.redeem_script(), manual_ecdsa.script());
     }
 
@@ -1386,28 +1649,33 @@ mod tests {
         let reused_values = SigHashReusedValuesUnsync::new();
 
         // Correct case: a=8, b=5, c=3 → 5+3=8, 8==8 → true
-        let correct_sig = TypedScriptBuilder::new().op_add().op_num_equal()
-            .into_sig_builder().add_i64(8).add_i64(5).add_i64(3).build();
+        let correct_sig =
+            TypedScriptBuilder::new().op_add().op_num_equal().into_sig_builder().add_i64(8).add_i64(5).add_i64(3).build();
 
         let (tx, utxo) = make_p2sh_tx(&redeem, correct_sig);
         let populated_tx = PopulatedTransaction::new(&tx, vec![utxo.clone()]);
 
         let mut vm = TxScriptEngine::from_transaction_input(
-            &populated_tx, &populated_tx.tx.inputs[0], 0, &utxo,
+            &populated_tx,
+            &populated_tx.tx.inputs[0],
+            0,
+            &utxo,
             EngineCtx::new(&sig_cache).with_reused(&reused_values),
             Default::default(),
         );
         vm.execute().expect("correct inputs should succeed");
 
         // Failing case: a=9
-        let wrong_sig = TypedScriptBuilder::new().op_add().op_num_equal()
-            .into_sig_builder().add_i64(9).add_i64(5).add_i64(3).build();
+        let wrong_sig = TypedScriptBuilder::new().op_add().op_num_equal().into_sig_builder().add_i64(9).add_i64(5).add_i64(3).build();
 
         let (tx_bad, _) = make_p2sh_tx(&redeem, wrong_sig);
         let populated_tx_bad = PopulatedTransaction::new(&tx_bad, vec![utxo.clone()]);
 
         let mut vm_bad = TxScriptEngine::from_transaction_input(
-            &populated_tx_bad, &populated_tx_bad.tx.inputs[0], 0, &utxo,
+            &populated_tx_bad,
+            &populated_tx_bad.tx.inputs[0],
+            0,
+            &utxo,
             EngineCtx::new(&sig_cache).with_reused(&reused_values),
             Default::default(),
         );
@@ -1417,9 +1685,7 @@ mod tests {
     #[test]
     fn test_p2sh_data_equal() {
         // Redeem: add_data([0xDE,0xAD]) op_equal (needs 1 Data from sig)
-        let typed = TypedScriptBuilder::new()
-            .add_data(&[0xDE, 0xAD])
-            .op_equal();
+        let typed = TypedScriptBuilder::new().add_data(&[0xDE, 0xAD]).op_equal();
 
         let redeem = typed.redeem_script().to_vec();
 
@@ -1432,7 +1698,10 @@ mod tests {
         let populated_tx = PopulatedTransaction::new(&tx, vec![utxo.clone()]);
 
         let mut vm = TxScriptEngine::from_transaction_input(
-            &populated_tx, &populated_tx.tx.inputs[0], 0, &utxo,
+            &populated_tx,
+            &populated_tx.tx.inputs[0],
+            0,
+            &utxo,
             EngineCtx::new(&sig_cache).with_reused(&reused_values),
             Default::default(),
         );
@@ -1445,7 +1714,10 @@ mod tests {
         let populated_tx_bad = PopulatedTransaction::new(&tx_bad, vec![utxo.clone()]);
 
         let mut vm_bad = TxScriptEngine::from_transaction_input(
-            &populated_tx_bad, &populated_tx_bad.tx.inputs[0], 0, &utxo,
+            &populated_tx_bad,
+            &populated_tx_bad.tx.inputs[0],
+            0,
+            &utxo,
             EngineCtx::new(&sig_cache).with_reused(&reused_values),
             Default::default(),
         );
@@ -1463,12 +1735,7 @@ mod tests {
 
         // Redeem: op_sha256 downcast add_hash(known_hash) downcast op_equal
         // Needs 1 Data from sig: the preimage
-        let typed = TypedScriptBuilder::new()
-            .op_sha256()
-            .downcast()
-            .add_hash(known_hash)
-            .downcast()
-            .op_equal();
+        let typed = TypedScriptBuilder::new().op_sha256().downcast().add_hash(&known_hash).downcast().op_equal();
 
         let redeem = typed.redeem_script().to_vec();
 
@@ -1481,20 +1748,26 @@ mod tests {
         let populated_tx = PopulatedTransaction::new(&tx, vec![utxo.clone()]);
 
         let mut vm = TxScriptEngine::from_transaction_input(
-            &populated_tx, &populated_tx.tx.inputs[0], 0, &utxo,
+            &populated_tx,
+            &populated_tx.tx.inputs[0],
+            0,
+            &utxo,
             EngineCtx::new(&sig_cache).with_reused(&reused_values),
             Default::default(),
         );
         vm.execute().expect("correct preimage should succeed");
 
         // Wrong preimage
-        let typed2 = TypedScriptBuilder::new().op_sha256().downcast().add_hash(known_hash).downcast().op_equal();
+        let typed2 = TypedScriptBuilder::new().op_sha256().downcast().add_hash(&known_hash).downcast().op_equal();
         let wrong_sig = typed2.into_sig_builder().add_data(b"wrong").build();
         let (tx_bad, _) = make_p2sh_tx(&redeem, wrong_sig);
         let populated_tx_bad = PopulatedTransaction::new(&tx_bad, vec![utxo.clone()]);
 
         let mut vm_bad = TxScriptEngine::from_transaction_input(
-            &populated_tx_bad, &populated_tx_bad.tx.inputs[0], 0, &utxo,
+            &populated_tx_bad,
+            &populated_tx_bad.tx.inputs[0],
+            0,
+            &utxo,
             EngineCtx::new(&sig_cache).with_reused(&reused_values),
             Default::default(),
         );
@@ -1505,10 +1778,7 @@ mod tests {
     fn test_p2sh_cat_equal() {
         // Redeem: op_cat add_data([1,2,3,4,5,6]) op_equal (needs 2 Data from sig)
         // OpCat requires covenants_enabled
-        let typed = TypedScriptBuilder::new()
-            .op_cat()
-            .add_data(&[1, 2, 3, 4, 5, 6])
-            .op_equal();
+        let typed = TypedScriptBuilder::new().op_cat().add_data(&[1, 2, 3, 4, 5, 6]).op_equal();
 
         let redeem = typed.redeem_script().to_vec();
 
@@ -1516,16 +1786,16 @@ mod tests {
         let reused_values = SigHashReusedValuesUnsync::new();
 
         // Correct: [1,2,3] + [4,5,6] = [1,2,3,4,5,6]
-        let correct_sig = typed.into_sig_builder()
-            .add_data(&[1, 2, 3])
-            .add_data(&[4, 5, 6])
-            .build();
+        let correct_sig = typed.into_sig_builder().add_data(&[1, 2, 3]).add_data(&[4, 5, 6]).build();
 
         let (tx, utxo) = make_p2sh_tx(&redeem, correct_sig);
         let populated_tx = PopulatedTransaction::new(&tx, vec![utxo.clone()]);
 
         let mut vm = TxScriptEngine::from_transaction_input(
-            &populated_tx, &populated_tx.tx.inputs[0], 0, &utxo,
+            &populated_tx,
+            &populated_tx.tx.inputs[0],
+            0,
+            &utxo,
             EngineCtx::new(&sig_cache).with_reused(&reused_values),
             EngineFlags { covenants_enabled: true },
         );
@@ -1644,12 +1914,7 @@ mod tests {
 
         // Redeem: op_chainblock_seq_commit downcast add_hash(expected_output) downcast op_equal
         // Needs 1 Hash from sig: the block hash
-        let typed = TypedScriptBuilder::new()
-            .op_chainblock_seq_commit()
-            .downcast()
-            .add_hash(output_hash)
-            .downcast()
-            .op_equal();
+        let typed = TypedScriptBuilder::new().op_chainblock_seq_commit().downcast().add_hash(&output_hash).downcast().op_equal();
 
         let redeem = typed.redeem_script().to_vec();
         let script_pub_key = pay_to_script_hash_script(&redeem);
@@ -1682,11 +1947,103 @@ mod tests {
             &populated_tx.tx.inputs[0],
             0,
             &utxo,
-            EngineCtx::new(&sig_cache)
-                .with_reused(&reused_values)
-                .with_seq_commit_accessor(&MockSeqCommitAccessor),
+            EngineCtx::new(&sig_cache).with_reused(&reused_values).with_seq_commit_accessor(&MockSeqCommitAccessor),
             EngineFlags { covenants_enabled: true },
         );
         vm.execute().expect("seq commit with correct hash should succeed");
+    }
+
+    #[test]
+    fn test_generic_stack_ops() {
+        // op_dup / op_drop on Groth16Tag (previously missing)
+        let typed_groth16 = TypedScriptBuilder::new().add_groth16_tag().op_dup().op_drop().op_drop().op_true();
+
+        let mut manual_groth16 = ScriptBuilder::new();
+        manual_groth16
+            .add_data(&[ZkTag::Groth16 as u8])
+            .unwrap()
+            .add_op(OpDup)
+            .unwrap()
+            .add_op(OpDrop)
+            .unwrap()
+            .add_op(OpDrop)
+            .unwrap()
+            .add_op(OpTrue)
+            .unwrap();
+        assert_eq!(typed_groth16.redeem_script(), manual_groth16.script());
+
+        // op_dup / op_drop on R0SuccinctTag (previously missing)
+        let typed_r0 = TypedScriptBuilder::new().add_r0_succinct_tag().op_dup().op_drop().op_drop().op_true();
+
+        let mut manual_r0 = ScriptBuilder::new();
+        manual_r0
+            .add_data(&[ZkTag::R0Succinct as u8])
+            .unwrap()
+            .add_op(OpDup)
+            .unwrap()
+            .add_op(OpDrop)
+            .unwrap()
+            .add_op(OpDrop)
+            .unwrap()
+            .add_op(OpTrue)
+            .unwrap();
+        assert_eq!(typed_r0.redeem_script(), manual_r0.script());
+
+        // op_swap on mixed types (Num<Hash<S>>) without downcast
+        let hash = kaspa_hashes::Hash::from([0xAB; 32]);
+        let typed_swap = TypedScriptBuilder::new()
+            .add_hash(&hash)
+            .add_i64(42)
+            .op_swap() // Num<Hash<()>> → Hash<Num<()>>
+            .op_drop() // Hash<Num<()>> → Num<()>
+            .op_drop()
+            .op_true();
+
+        let mut manual_swap = ScriptBuilder::new();
+        manual_swap
+            .add_data(&hash.as_bytes())
+            .unwrap()
+            .add_i64(42)
+            .unwrap()
+            .add_op(OpSwap)
+            .unwrap()
+            .add_op(OpDrop)
+            .unwrap()
+            .add_op(OpDrop)
+            .unwrap()
+            .add_op(OpTrue)
+            .unwrap();
+        assert_eq!(typed_swap.redeem_script(), manual_swap.script());
+
+        // op_rot on mixed types (Num<Hash<Data<S>>>) without downcast
+        let typed_rot = TypedScriptBuilder::new()
+            .add_data(&[1, 2, 3])
+            .add_hash(&hash)
+            .add_i64(7)
+            .op_rot() // Num<Hash<Data<()>>> → Data<Num<Hash<()>>>
+            .op_drop() // Data<Num<Hash<()>>> → Num<Hash<()>>
+            .op_drop() // Num<Hash<()>> → Hash<()>
+            .op_drop()
+            .op_true();
+
+        let mut manual_rot = ScriptBuilder::new();
+        manual_rot
+            .add_data(&[1, 2, 3])
+            .unwrap()
+            .add_data(&hash.as_bytes())
+            .unwrap()
+            .add_i64(7)
+            .unwrap()
+            .add_op(OpRot)
+            .unwrap()
+            .add_op(OpDrop)
+            .unwrap()
+            .add_op(OpDrop)
+            .unwrap()
+            .add_op(OpDrop)
+            .unwrap()
+            .add_op(OpTrue)
+            .unwrap();
+        assert_eq!(typed_rot.redeem_script(), manual_rot.script());
     }
 }
