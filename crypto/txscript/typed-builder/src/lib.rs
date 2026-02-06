@@ -1206,6 +1206,40 @@ impl<S, M> G16Verify for TypedScriptBuilder<Groth16Tag<G16Vk<G16Proof<Num<S>>>>,
 }
 
 // ---------------------------------------------------------------------------
+// ZK Precompile: inherent bridge methods
+// These convert E0599 (method not found) into E0277 (trait bound not satisfied)
+// so that #[diagnostic::on_unimplemented] messages actually appear.
+// ---------------------------------------------------------------------------
+
+impl<S, M> TypedScriptBuilder<S, M> {
+    /// Verifies a RISC0 succinct ZK proof.
+    ///
+    /// The stack (top→bottom) must be:
+    /// `R0SuccinctTag`, `R0SuccinctImageId`, `R0SuccinctJournalDigest`,
+    /// `R0SuccinctControlDigests`, `R0SuccinctControlIndex`, `R0SuccinctHashFn`,
+    /// `R0SuccinctClaim`, `R0SuccinctSeal`.
+    pub fn risc0_succinct_verify(
+        self,
+    ) -> TypedScriptBuilder<Bool<<Self as R0SuccinctVerify>::Rest>, <Self as R0SuccinctVerify>::Missing>
+    where
+        Self: R0SuccinctVerify,
+    {
+        R0SuccinctVerify::risc0_succinct_verify(self)
+    }
+
+    /// Verifies a Groth16 ZK proof.
+    ///
+    /// The stack (top→bottom) must be:
+    /// `Groth16Tag`, `G16Vk`, `G16Proof`, `Num(n_inputs)`, then `Bn254Fr` elements.
+    pub fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, ()>
+    where
+        Self: G16Verify,
+    {
+        G16Verify::groth16_verify(self)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Finalize (requires single Bool on stack)
 // ---------------------------------------------------------------------------
 
