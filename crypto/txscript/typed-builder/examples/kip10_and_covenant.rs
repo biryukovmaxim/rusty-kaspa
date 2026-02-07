@@ -19,7 +19,7 @@ use kaspa_txscript::{
 use kaspa_txscript_errors::TxScriptError::EvalFalse;
 use kaspa_txscript_typed_builder::TypedScriptBuilder;
 use rand::thread_rng;
-use secp256k1::Keypair;
+use secp256k1::{self, Keypair};
 
 fn main() {
     kip10_threshold();
@@ -44,9 +44,9 @@ fn main() {
 //   Borrower:             [OpFalse] [redeem_script]
 //
 // With TypedScriptBuilder the condition is modeled as a missing Bool,
-// producing `Or<Data<()>, ()>` in the Missing type:
-//   - Owner path:    Missing = Data<()>  (the Schnorr signature)
-//   - Borrower path: Missing = ()        (nothing needed)
+// producing `Or<SchnorrSig<()>, ()>` in the Missing type:
+//   - Owner path:    Missing = SchnorrSig<()>  (the Schnorr signature)
+//   - Borrower path: Missing = ()              (nothing needed)
 
 fn kip10_threshold() {
     println!("\n=== KIP-10 Threshold (typed builder) ===");
@@ -59,8 +59,8 @@ fn kip10_threshold() {
     let build_typed = || {
         TypedScriptBuilder::new().op_if(
             // Owner branch: push pubkey, check signature
-            // Adds Data<()> to Missing (the signature)
-            |b| b.add_data(&owner_pubkey).op_check_sig(),
+            // Adds SchnorrSig<()> to Missing (the signature)
+            |b| b.add_xonly_pubkey(&owner_pubkey).op_check_sig(),
             // Borrower branch: pure introspection, no sig items needed
             // Missing stays ()
             |b| {
@@ -78,7 +78,7 @@ fn kip10_threshold() {
                     .op_greater_than_or_equal() // (output - threshold) >= input
             },
         )
-        // Result type: TypedScriptBuilder<Bool<()>, Or<Data<()>, ()>>
+        // Result type: TypedScriptBuilder<Bool<()>, Or<SchnorrSig<()>, ()>>
     };
 
     // ── Extract and verify redeem script ─────────────────────────────
@@ -140,17 +140,17 @@ fn kip10_threshold() {
         let msg = secp256k1::Message::from_digest_slice(sig_hash.as_bytes().as_slice()).unwrap();
 
         let sig = owner.sign_schnorr(msg);
-        let mut signature = Vec::new();
-        signature.extend_from_slice(sig.as_ref().as_slice());
-        signature.push(SIG_HASH_ALL.to_u8());
 
-        // Typed sig builder: choose_true → provide the signature
-        let sig_script = build_typed().into_sig_builder().choose_true().add_data(&signature).build();
+        // Typed sig builder: choose_true → provide the signature + sighash type
+        let sig_script = build_typed().into_sig_builder().choose_true().add_schnorr_sig(&sig, SIG_HASH_ALL).build();
 
         // Verify against manually built sig script
+        let mut signature_bytes = Vec::new();
+        signature_bytes.extend_from_slice(sig.as_ref().as_slice());
+        signature_bytes.push(SIG_HASH_ALL.to_u8());
         let raw_sig = {
             let mut b = ScriptBuilder::new();
-            b.add_data(&signature).unwrap().add_op(OpTrue).unwrap().add_data(&redeem_script).unwrap();
+            b.add_data(&signature_bytes).unwrap().add_op(OpTrue).unwrap().add_data(&redeem_script).unwrap();
             b.drain()
         };
         assert_eq!(sig_script, raw_sig, "owner sig scripts must match");

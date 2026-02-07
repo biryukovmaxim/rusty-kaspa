@@ -521,16 +521,31 @@ fn test_introspection_ops() {
 
 #[test]
 fn test_check_sig_bytes() {
-    let typed = TypedScriptBuilder::new().add_data(&[0xAA; 33]).add_data(&[0xBB; 64]).op_check_sig();
+    use kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL;
+
+    // Schnorr: XOnlyPubkey (32 bytes) + SchnorrSig (64-byte sig + 1-byte sighash)
+    let schnorr_sig = secp256k1::schnorr::Signature::from_slice(&[0xBB; 64]).unwrap();
+    let typed = TypedScriptBuilder::new().add_schnorr_sig(&schnorr_sig, SIG_HASH_ALL).add_xonly_pubkey(&[0xAA; 32]).op_check_sig();
+
+    let mut expected_sig_bytes = Vec::with_capacity(65);
+    expected_sig_bytes.extend_from_slice(&[0xBB; 64]);
+    expected_sig_bytes.push(SIG_HASH_ALL.to_u8());
 
     let mut manual = ScriptBuilder::new();
-    manual.add_data(&[0xAA; 33]).unwrap().add_data(&[0xBB; 64]).unwrap().add_op(OpCheckSig).unwrap();
+    manual.add_data(&expected_sig_bytes).unwrap().add_data(&[0xAA; 32]).unwrap().add_op(OpCheckSig).unwrap();
     assert_eq!(typed.redeem_script(), manual.script());
 
-    let typed_ecdsa = TypedScriptBuilder::new().add_data(&[0xAA; 33]).add_data(&[0xBB; 64]).op_check_sig_ecdsa();
+    // ECDSA: EcdsaPubkey (33 bytes) + EcdsaSig (64-byte sig + 1-byte sighash)
+    let ecdsa_sig = secp256k1::ecdsa::Signature::from_compact(&[0xBB; 64]).unwrap();
+    let typed_ecdsa =
+        TypedScriptBuilder::new().add_ecdsa_sig(&ecdsa_sig, SIG_HASH_ALL).add_ecdsa_pubkey(&[0xAA; 33]).op_check_sig_ecdsa();
+
+    let mut expected_ecdsa_bytes = Vec::with_capacity(65);
+    expected_ecdsa_bytes.extend_from_slice(&ecdsa_sig.serialize_compact());
+    expected_ecdsa_bytes.push(SIG_HASH_ALL.to_u8());
 
     let mut manual_ecdsa = ScriptBuilder::new();
-    manual_ecdsa.add_data(&[0xAA; 33]).unwrap().add_data(&[0xBB; 64]).unwrap().add_op(OpCheckSigECDSA).unwrap();
+    manual_ecdsa.add_data(&expected_ecdsa_bytes).unwrap().add_data(&[0xAA; 33]).unwrap().add_op(OpCheckSigECDSA).unwrap();
     assert_eq!(typed_ecdsa.redeem_script(), manual_ecdsa.script());
 }
 
@@ -727,11 +742,14 @@ fn test_p2sh_cat_equal() {
 
 #[test]
 fn test_zk_groth16_typed() {
+    use ark_serialize::CanonicalDeserialize;
     use kaspa_txscript::hex;
     use kaspa_txscript::zk_precompiles::tests::helpers::{build_groth_script, execute_zk_script};
 
-    let unprepared_compressed_vk = hex::decode("e2f26dbea299f5223b646cb1fb33eadb059d9407559d7441dfd902e3a79a4d2dabb73dc17fbc13021e2471e0c08bd67d8401f52b73d6d07483794cad4778180e0c06f33bbc4c79a9cadef253a68084d382f17788f885c9afd176f7cb2f036789edf692d95cbdde46ddda5ef7d422436779445c5e66006a42761e1f12efde0018c212f3aeb785e49712e7a9353349aaf1255dfb31b7bf60723a480d9293938e1933033e7fea1f40604eaacf699d4be9aacc577054a0db22d9129a1728ff85a01a1c3af829b62bf4914c0bcf2c81a4bd577190eff5f194ee9bac95faefd53cb0030600000000000000e43bdc655d0f9d730535554d9caa611ddd152c081a06a932a8e1d5dc259aac123f42a188f683d869873ccc4c119442e57b056e03e2fa92f2028c97bc20b9078747c30f85444697fdf436e348711c011115963f855197243e4b39e6cbe236ca8ba7f2042e11f9255afbb6c6e2c3accb88e401f2aac21c097c92b3fbdb99f98a9b0dcd6c075ada6ed0ddfece1d4a2d005f61a7d5df0b75c18a5b2374d64e495fab93d4c4b1200394d5253cce2f25a59b862ee8e4cd43686603faa09d5d0d3c1c8f").unwrap();
-    let groth16_proof_bytes = hex::decode("570253c0c483a1b16460118e63c155f3684e784ae7d97e8fc3f544128b37fe15075eab5ac31150c8a44253d8525971241bbd7227fcefbae2db4ae71675c56a2e0eb9235136b15ab72f16e707832f3d6ae5b0ba7cca53ae17cb52b3201919eb9d908c16297abd90aa7e00267bc21a9a78116e717d4d76edd44e21cca17e3d592d").unwrap();
+    let vk_bytes = hex::decode("e2f26dbea299f5223b646cb1fb33eadb059d9407559d7441dfd902e3a79a4d2dabb73dc17fbc13021e2471e0c08bd67d8401f52b73d6d07483794cad4778180e0c06f33bbc4c79a9cadef253a68084d382f17788f885c9afd176f7cb2f036789edf692d95cbdde46ddda5ef7d422436779445c5e66006a42761e1f12efde0018c212f3aeb785e49712e7a9353349aaf1255dfb31b7bf60723a480d9293938e1933033e7fea1f40604eaacf699d4be9aacc577054a0db22d9129a1728ff85a01a1c3af829b62bf4914c0bcf2c81a4bd577190eff5f194ee9bac95faefd53cb0030600000000000000e43bdc655d0f9d730535554d9caa611ddd152c081a06a932a8e1d5dc259aac123f42a188f683d869873ccc4c119442e57b056e03e2fa92f2028c97bc20b9078747c30f85444697fdf436e348711c011115963f855197243e4b39e6cbe236ca8ba7f2042e11f9255afbb6c6e2c3accb88e401f2aac21c097c92b3fbdb99f98a9b0dcd6c075ada6ed0ddfece1d4a2d005f61a7d5df0b75c18a5b2374d64e495fab93d4c4b1200394d5253cce2f25a59b862ee8e4cd43686603faa09d5d0d3c1c8f").unwrap();
+    let proof_bytes = hex::decode("570253c0c483a1b16460118e63c155f3684e784ae7d97e8fc3f544128b37fe15075eab5ac31150c8a44253d8525971241bbd7227fcefbae2db4ae71675c56a2e0eb9235136b15ab72f16e707832f3d6ae5b0ba7cca53ae17cb52b3201919eb9d908c16297abd90aa7e00267bc21a9a78116e717d4d76edd44e21cca17e3d592d").unwrap();
+    let vk = ark_groth16::VerifyingKey::<ark_bn254::Bn254>::deserialize_compressed(vk_bytes.as_slice()).unwrap();
+    let proof = ark_groth16::Proof::<ark_bn254::Bn254>::deserialize_compressed(proof_bytes.as_slice()).unwrap();
     let input0 = hex::decode("a54dc85ac99f851c92d7c96d7318af4100000000000000000000000000000000").unwrap();
     let input1 = hex::decode("dbe7c0194edfcc37eb4d422a998c1f5600000000000000000000000000000000").unwrap();
     let input2 = hex::decode("a95ac0b37bfedcd8136e6c1143086bf500000000000000000000000000000000").unwrap();
@@ -745,8 +763,8 @@ fn test_zk_groth16_typed() {
         .add_bn254_fr(&Fr::try_from(input1.as_slice()).unwrap())
         .add_bn254_fr(&Fr::try_from(input0.as_slice()).unwrap())
         .add_i64(5)
-        .add_g16_proof(&groth16_proof_bytes)
-        .add_g16_vk(&unprepared_compressed_vk)
+        .add_g16_proof(&proof)
+        .add_g16_vk(&vk)
         .add_groth16_tag()
         .groth16_verify();
 
@@ -765,14 +783,19 @@ fn test_zk_r0_succinct_typed() {
 
     let (seal, claim, hashfn, control_index, control_digests, journal, image_id) = load_stark_fields();
 
+    // Convert seal bytes to u32 words (LE)
+    let seal_words: Vec<u32> = seal.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    let hashfn_id = R0SuccinctHashFnId::try_from(hashfn[0]).unwrap();
+    let control_idx = u32::from_le_bytes(control_index.as_slice().try_into().unwrap());
+
     let typed = TypedScriptBuilder::new()
-        .add_r0_succinct_seal_bytes(&seal)
-        .add_r0_succinct_claim(&claim)
-        .add_r0_succinct_hashfn_bytes(&hashfn)
-        .add_r0_succinct_control_index_bytes(&control_index)
+        .add_r0_succinct_seal(&seal_words)
+        .add_r0_succinct_claim(claim.as_slice().try_into().unwrap())
+        .add_r0_succinct_hashfn(hashfn_id)
+        .add_r0_succinct_control_index(control_idx)
         .add_r0_succinct_control_digests(&control_digests)
-        .add_r0_succinct_journal_digest(&journal)
-        .add_r0_succinct_image_id(&image_id)
+        .add_r0_succinct_journal_digest(journal.as_slice().try_into().unwrap())
+        .add_r0_succinct_image_id(image_id.as_slice().try_into().unwrap())
         .add_r0_succinct_tag()
         .risc0_succinct_verify();
 
@@ -985,8 +1008,8 @@ fn test_hash_to_journal_digest_cast() {
 
 #[test]
 fn test_r0_succinct_generic_stack_ops_on_semantic_types() {
-    // op_dup / op_drop on R0SuccinctSeal
-    let typed_seal = TypedScriptBuilder::new().add_r0_succinct_seal_bytes(&[0u8; 4]).op_dup().op_drop().op_drop().op_true();
+    // op_dup / op_drop on R0SuccinctSeal (1 u32 word = 4 bytes)
+    let typed_seal = TypedScriptBuilder::new().add_r0_succinct_seal(&[0u32]).op_dup().op_drop().op_drop().op_true();
 
     let mut manual_seal = ScriptBuilder::new();
     manual_seal
@@ -1002,8 +1025,8 @@ fn test_r0_succinct_generic_stack_ops_on_semantic_types() {
         .unwrap();
     assert_eq!(typed_seal.redeem_script(), manual_seal.script());
 
-    // op_dup / op_drop on G16Vk
-    let typed_vk = TypedScriptBuilder::new().add_g16_vk(&[0xAA; 16]).op_dup().op_drop().op_drop().op_true();
+    // op_dup / op_drop on G16Vk — use downcast path since add_g16_vk now requires ark type
+    let typed_vk = TypedScriptBuilder::new().add_data(&[0xAA; 16]).unsafe_interpret_as_g16_vk().op_dup().op_drop().op_drop().op_true();
 
     let mut manual_vk = ScriptBuilder::new();
     manual_vk
@@ -1026,11 +1049,14 @@ fn test_r0_succinct_generic_stack_ops_on_semantic_types() {
 
 #[test]
 fn test_zk_groth16_fixed_num() {
+    use ark_serialize::CanonicalDeserialize;
     use kaspa_txscript::hex;
     use kaspa_txscript::zk_precompiles::tests::helpers::{build_groth_script, execute_zk_script};
 
-    let unprepared_compressed_vk = hex::decode("e2f26dbea299f5223b646cb1fb33eadb059d9407559d7441dfd902e3a79a4d2dabb73dc17fbc13021e2471e0c08bd67d8401f52b73d6d07483794cad4778180e0c06f33bbc4c79a9cadef253a68084d382f17788f885c9afd176f7cb2f036789edf692d95cbdde46ddda5ef7d422436779445c5e66006a42761e1f12efde0018c212f3aeb785e49712e7a9353349aaf1255dfb31b7bf60723a480d9293938e1933033e7fea1f40604eaacf699d4be9aacc577054a0db22d9129a1728ff85a01a1c3af829b62bf4914c0bcf2c81a4bd577190eff5f194ee9bac95faefd53cb0030600000000000000e43bdc655d0f9d730535554d9caa611ddd152c081a06a932a8e1d5dc259aac123f42a188f683d869873ccc4c119442e57b056e03e2fa92f2028c97bc20b9078747c30f85444697fdf436e348711c011115963f855197243e4b39e6cbe236ca8ba7f2042e11f9255afbb6c6e2c3accb88e401f2aac21c097c92b3fbdb99f98a9b0dcd6c075ada6ed0ddfece1d4a2d005f61a7d5df0b75c18a5b2374d64e495fab93d4c4b1200394d5253cce2f25a59b862ee8e4cd43686603faa09d5d0d3c1c8f").unwrap();
-    let groth16_proof_bytes = hex::decode("570253c0c483a1b16460118e63c155f3684e784ae7d97e8fc3f544128b37fe15075eab5ac31150c8a44253d8525971241bbd7227fcefbae2db4ae71675c56a2e0eb9235136b15ab72f16e707832f3d6ae5b0ba7cca53ae17cb52b3201919eb9d908c16297abd90aa7e00267bc21a9a78116e717d4d76edd44e21cca17e3d592d").unwrap();
+    let vk_bytes = hex::decode("e2f26dbea299f5223b646cb1fb33eadb059d9407559d7441dfd902e3a79a4d2dabb73dc17fbc13021e2471e0c08bd67d8401f52b73d6d07483794cad4778180e0c06f33bbc4c79a9cadef253a68084d382f17788f885c9afd176f7cb2f036789edf692d95cbdde46ddda5ef7d422436779445c5e66006a42761e1f12efde0018c212f3aeb785e49712e7a9353349aaf1255dfb31b7bf60723a480d9293938e1933033e7fea1f40604eaacf699d4be9aacc577054a0db22d9129a1728ff85a01a1c3af829b62bf4914c0bcf2c81a4bd577190eff5f194ee9bac95faefd53cb0030600000000000000e43bdc655d0f9d730535554d9caa611ddd152c081a06a932a8e1d5dc259aac123f42a188f683d869873ccc4c119442e57b056e03e2fa92f2028c97bc20b9078747c30f85444697fdf436e348711c011115963f855197243e4b39e6cbe236ca8ba7f2042e11f9255afbb6c6e2c3accb88e401f2aac21c097c92b3fbdb99f98a9b0dcd6c075ada6ed0ddfece1d4a2d005f61a7d5df0b75c18a5b2374d64e495fab93d4c4b1200394d5253cce2f25a59b862ee8e4cd43686603faa09d5d0d3c1c8f").unwrap();
+    let proof_bytes = hex::decode("570253c0c483a1b16460118e63c155f3684e784ae7d97e8fc3f544128b37fe15075eab5ac31150c8a44253d8525971241bbd7227fcefbae2db4ae71675c56a2e0eb9235136b15ab72f16e707832f3d6ae5b0ba7cca53ae17cb52b3201919eb9d908c16297abd90aa7e00267bc21a9a78116e717d4d76edd44e21cca17e3d592d").unwrap();
+    let vk = ark_groth16::VerifyingKey::<ark_bn254::Bn254>::deserialize_compressed(vk_bytes.as_slice()).unwrap();
+    let proof = ark_groth16::Proof::<ark_bn254::Bn254>::deserialize_compressed(proof_bytes.as_slice()).unwrap();
     let input0 = hex::decode("a54dc85ac99f851c92d7c96d7318af4100000000000000000000000000000000").unwrap();
     let input1 = hex::decode("dbe7c0194edfcc37eb4d422a998c1f5600000000000000000000000000000000").unwrap();
     let input2 = hex::decode("a95ac0b37bfedcd8136e6c1143086bf500000000000000000000000000000000").unwrap();
@@ -1045,8 +1071,8 @@ fn test_zk_groth16_fixed_num() {
         .add_bn254_fr(&Fr::try_from(input1.as_slice()).unwrap())
         .add_bn254_fr(&Fr::try_from(input0.as_slice()).unwrap())
         .add_g16_fixed_num::<5>()
-        .add_g16_proof(&groth16_proof_bytes)
-        .add_g16_vk(&unprepared_compressed_vk)
+        .add_g16_proof(&proof)
+        .add_g16_vk(&vk)
         .add_groth16_tag()
         .groth16_verify();
 
@@ -1062,10 +1088,13 @@ fn test_zk_groth16_fixed_num() {
 
 #[test]
 fn test_zk_groth16_fixed_num_partial() {
+    use ark_serialize::CanonicalDeserialize;
     use kaspa_txscript::hex;
 
-    let unprepared_compressed_vk = hex::decode("e2f26dbea299f5223b646cb1fb33eadb059d9407559d7441dfd902e3a79a4d2dabb73dc17fbc13021e2471e0c08bd67d8401f52b73d6d07483794cad4778180e0c06f33bbc4c79a9cadef253a68084d382f17788f885c9afd176f7cb2f036789edf692d95cbdde46ddda5ef7d422436779445c5e66006a42761e1f12efde0018c212f3aeb785e49712e7a9353349aaf1255dfb31b7bf60723a480d9293938e1933033e7fea1f40604eaacf699d4be9aacc577054a0db22d9129a1728ff85a01a1c3af829b62bf4914c0bcf2c81a4bd577190eff5f194ee9bac95faefd53cb0030600000000000000e43bdc655d0f9d730535554d9caa611ddd152c081a06a932a8e1d5dc259aac123f42a188f683d869873ccc4c119442e57b056e03e2fa92f2028c97bc20b9078747c30f85444697fdf436e348711c011115963f855197243e4b39e6cbe236ca8ba7f2042e11f9255afbb6c6e2c3accb88e401f2aac21c097c92b3fbdb99f98a9b0dcd6c075ada6ed0ddfece1d4a2d005f61a7d5df0b75c18a5b2374d64e495fab93d4c4b1200394d5253cce2f25a59b862ee8e4cd43686603faa09d5d0d3c1c8f").unwrap();
-    let groth16_proof_bytes = hex::decode("570253c0c483a1b16460118e63c155f3684e784ae7d97e8fc3f544128b37fe15075eab5ac31150c8a44253d8525971241bbd7227fcefbae2db4ae71675c56a2e0eb9235136b15ab72f16e707832f3d6ae5b0ba7cca53ae17cb52b3201919eb9d908c16297abd90aa7e00267bc21a9a78116e717d4d76edd44e21cca17e3d592d").unwrap();
+    let vk_bytes = hex::decode("e2f26dbea299f5223b646cb1fb33eadb059d9407559d7441dfd902e3a79a4d2dabb73dc17fbc13021e2471e0c08bd67d8401f52b73d6d07483794cad4778180e0c06f33bbc4c79a9cadef253a68084d382f17788f885c9afd176f7cb2f036789edf692d95cbdde46ddda5ef7d422436779445c5e66006a42761e1f12efde0018c212f3aeb785e49712e7a9353349aaf1255dfb31b7bf60723a480d9293938e1933033e7fea1f40604eaacf699d4be9aacc577054a0db22d9129a1728ff85a01a1c3af829b62bf4914c0bcf2c81a4bd577190eff5f194ee9bac95faefd53cb0030600000000000000e43bdc655d0f9d730535554d9caa611ddd152c081a06a932a8e1d5dc259aac123f42a188f683d869873ccc4c119442e57b056e03e2fa92f2028c97bc20b9078747c30f85444697fdf436e348711c011115963f855197243e4b39e6cbe236ca8ba7f2042e11f9255afbb6c6e2c3accb88e401f2aac21c097c92b3fbdb99f98a9b0dcd6c075ada6ed0ddfece1d4a2d005f61a7d5df0b75c18a5b2374d64e495fab93d4c4b1200394d5253cce2f25a59b862ee8e4cd43686603faa09d5d0d3c1c8f").unwrap();
+    let proof_bytes = hex::decode("570253c0c483a1b16460118e63c155f3684e784ae7d97e8fc3f544128b37fe15075eab5ac31150c8a44253d8525971241bbd7227fcefbae2db4ae71675c56a2e0eb9235136b15ab72f16e707832f3d6ae5b0ba7cca53ae17cb52b3201919eb9d908c16297abd90aa7e00267bc21a9a78116e717d4d76edd44e21cca17e3d592d").unwrap();
+    let vk = ark_groth16::VerifyingKey::<ark_bn254::Bn254>::deserialize_compressed(vk_bytes.as_slice()).unwrap();
+    let proof = ark_groth16::Proof::<ark_bn254::Bn254>::deserialize_compressed(proof_bytes.as_slice()).unwrap();
     let input0 = hex::decode("a54dc85ac99f851c92d7c96d7318af4100000000000000000000000000000000").unwrap();
     let input1 = hex::decode("dbe7c0194edfcc37eb4d422a998c1f5600000000000000000000000000000000").unwrap();
     let input2 = hex::decode("a95ac0b37bfedcd8136e6c1143086bf500000000000000000000000000000000").unwrap();
@@ -1078,8 +1107,8 @@ fn test_zk_groth16_fixed_num_partial() {
         .add_bn254_fr(&Fr::try_from(input3.as_slice()).unwrap())
         .add_bn254_fr(&Fr::try_from(input2.as_slice()).unwrap())
         .add_g16_fixed_num::<5>()
-        .add_g16_proof(&groth16_proof_bytes)
-        .add_g16_vk(&unprepared_compressed_vk)
+        .add_g16_proof(&proof)
+        .add_g16_vk(&vk)
         .add_groth16_tag()
         .groth16_verify();
 
@@ -1104,8 +1133,8 @@ fn test_zk_groth16_fixed_num_partial() {
         .add_bn254_fr(&Fr::try_from(input1.as_slice()).unwrap())
         .add_bn254_fr(&Fr::try_from(input0.as_slice()).unwrap())
         .add_i64(5)
-        .add_g16_proof(&groth16_proof_bytes)
-        .add_g16_vk(&unprepared_compressed_vk)
+        .add_g16_proof(&proof)
+        .add_g16_vk(&vk)
         .add_groth16_tag()
         .groth16_verify();
 

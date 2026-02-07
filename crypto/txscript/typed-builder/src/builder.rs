@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
 use ark_serialize::CanonicalSerialize;
+use kaspa_consensus_core::hashing::sighash_type::SigHashType;
 use kaspa_txscript::script_builder::ScriptBuilder;
 use kaspa_txscript::zk_precompiles::fields::Fr;
 pub use kaspa_txscript::zk_precompiles::risc0::rcpt::HashFnId as R0SuccinctHashFnId;
@@ -112,17 +113,9 @@ impl<S, M> TypedScriptBuilder<S, M> {
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 
-    /// Push a RISC0 succinct seal from raw bytes (length must be a multiple of 4).
-    pub fn add_r0_succinct_seal_bytes(mut self, bytes: &[u8]) -> TypedScriptBuilder<R0SuccinctSeal<S>, M> {
-        assert!(bytes.len() % 4 == 0, "seal bytes length must be a multiple of 4, got {}", bytes.len());
-        self.builder.add_data(bytes).expect("script size limit exceeded");
-        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
-    }
-
     /// Push a RISC0 succinct claim digest (exactly 32 bytes).
-    pub fn add_r0_succinct_claim(mut self, claim: &[u8]) -> TypedScriptBuilder<R0SuccinctClaim<S>, M> {
-        assert!(claim.len() == 32, "claim must be exactly 32 bytes, got {}", claim.len());
-        self.builder.add_data(claim).expect("script size limit exceeded");
+    pub fn add_r0_succinct_claim(mut self, claim: &[u8; 32]) -> TypedScriptBuilder<R0SuccinctClaim<S>, M> {
+        self.builder.add_data(claim.as_slice()).expect("script size limit exceeded");
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 
@@ -132,30 +125,9 @@ impl<S, M> TypedScriptBuilder<S, M> {
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 
-    /// Push a RISC0 hash-function identifier from a raw `u8` (must be 0, 1, or 2).
-    pub fn add_r0_succinct_hashfn_raw(mut self, id: u8) -> TypedScriptBuilder<R0SuccinctHashFn<S>, M> {
-        assert!(id <= 2, "hash function id must be 0, 1, or 2, got {id}");
-        self.builder.add_data(&[id]).expect("script size limit exceeded");
-        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
-    }
-
-    /// Push a RISC0 hash-function identifier from raw bytes (exactly 1 byte).
-    pub fn add_r0_succinct_hashfn_bytes(mut self, bytes: &[u8]) -> TypedScriptBuilder<R0SuccinctHashFn<S>, M> {
-        assert!(bytes.len() == 1, "hashfn bytes must be exactly 1 byte, got {}", bytes.len());
-        self.builder.add_data(bytes).expect("script size limit exceeded");
-        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
-    }
-
     /// Push a RISC0 Merkle-tree control index from a `u32` (serialized as 4 LE bytes).
     pub fn add_r0_succinct_control_index(mut self, index: u32) -> TypedScriptBuilder<R0SuccinctControlIndex<S>, M> {
         self.builder.add_data(&index.to_le_bytes()).expect("script size limit exceeded");
-        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
-    }
-
-    /// Push a RISC0 Merkle-tree control index from raw bytes (exactly 4 bytes).
-    pub fn add_r0_succinct_control_index_bytes(mut self, bytes: &[u8]) -> TypedScriptBuilder<R0SuccinctControlIndex<S>, M> {
-        assert!(bytes.len() == 4, "control index must be exactly 4 bytes, got {}", bytes.len());
-        self.builder.add_data(bytes).expect("script size limit exceeded");
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 
@@ -167,30 +139,70 @@ impl<S, M> TypedScriptBuilder<S, M> {
     }
 
     /// Push a RISC0 journal digest (exactly 32 bytes).
-    pub fn add_r0_succinct_journal_digest(mut self, digest: &[u8]) -> TypedScriptBuilder<R0SuccinctJournalDigest<S>, M> {
-        assert!(digest.len() == 32, "journal digest must be exactly 32 bytes, got {}", digest.len());
-        self.builder.add_data(digest).expect("script size limit exceeded");
+    pub fn add_r0_succinct_journal_digest(mut self, digest: &[u8; 32]) -> TypedScriptBuilder<R0SuccinctJournalDigest<S>, M> {
+        self.builder.add_data(digest.as_slice()).expect("script size limit exceeded");
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 
     /// Push a RISC0 image ID (exactly 32 bytes).
-    pub fn add_r0_succinct_image_id(mut self, image_id: &[u8]) -> TypedScriptBuilder<R0SuccinctImageId<S>, M> {
-        assert!(image_id.len() == 32, "image ID must be exactly 32 bytes, got {}", image_id.len());
-        self.builder.add_data(image_id).expect("script size limit exceeded");
+    pub fn add_r0_succinct_image_id(mut self, image_id: &[u8; 32]) -> TypedScriptBuilder<R0SuccinctImageId<S>, M> {
+        self.builder.add_data(image_id.as_slice()).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    // -- Signature semantic pushers --
+
+    /// Push a Schnorr signature onto the stack (64-byte signature + 1-byte sighash type).
+    pub fn add_schnorr_sig(
+        mut self,
+        sig: &secp256k1::schnorr::Signature,
+        sighash: SigHashType,
+    ) -> TypedScriptBuilder<SchnorrSig<S>, M> {
+        let mut bytes = [0u8; 65];
+        let (sig_slice, h) = bytes.split_at_mut(64);
+        sig_slice.copy_from_slice(sig.as_ref());
+        h[0] = sighash.to_u8();
+        self.builder.add_data(&bytes).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Push an x-only public key onto the stack (32 bytes, used with Schnorr).
+    pub fn add_xonly_pubkey(mut self, pubkey: &[u8; 32]) -> TypedScriptBuilder<XOnlyPubkey<S>, M> {
+        self.builder.add_data(pubkey.as_slice()).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Push an ECDSA signature onto the stack (64-byte signature + 1-byte sighash type).
+    pub fn add_ecdsa_sig(mut self, sig: &secp256k1::ecdsa::Signature, sighash: SigHashType) -> TypedScriptBuilder<EcdsaSig<S>, M> {
+        let mut bytes = [0u8; 65];
+        let (sig_slice, h) = bytes.split_at_mut(64);
+        sig_slice.copy_from_slice(&sig.serialize_compact());
+        h[0] = sighash.to_u8();
+        self.builder.add_data(&bytes).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Push a compressed ECDSA public key onto the stack (33 bytes).
+    pub fn add_ecdsa_pubkey(mut self, pubkey: &[u8; 33]) -> TypedScriptBuilder<EcdsaPubkey<S>, M> {
+        self.builder.add_data(pubkey.as_slice()).expect("script size limit exceeded");
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 
     // -- Groth16 semantic pushers --
 
-    /// Push a Groth16 verification key (variable-length bytes).
-    pub fn add_g16_vk(mut self, vk: &[u8]) -> TypedScriptBuilder<G16Vk<S>, M> {
-        self.builder.add_data(vk).expect("script size limit exceeded");
+    /// Push a Groth16 verification key onto the stack (serialized compressed).
+    pub fn add_g16_vk(mut self, vk: &ark_groth16::VerifyingKey<ark_bn254::Bn254>) -> TypedScriptBuilder<G16Vk<S>, M> {
+        let mut bytes = Vec::new();
+        vk.serialize_compressed(&mut bytes).expect("VK serialization failed");
+        self.builder.add_data(&bytes).expect("script size limit exceeded");
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 
-    /// Push a Groth16 proof (variable-length bytes).
-    pub fn add_g16_proof(mut self, proof: &[u8]) -> TypedScriptBuilder<G16Proof<S>, M> {
-        self.builder.add_data(proof).expect("script size limit exceeded");
+    /// Push a Groth16 proof onto the stack (serialized compressed).
+    pub fn add_g16_proof(mut self, proof: &ark_groth16::Proof<ark_bn254::Bn254>) -> TypedScriptBuilder<G16Proof<S>, M> {
+        let mut bytes = Vec::new();
+        proof.serialize_compressed(&mut bytes).expect("Proof serialization failed");
+        self.builder.add_data(&bytes).expect("script size limit exceeded");
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 }
@@ -279,6 +291,36 @@ impl<S, M> TypedScriptBuilder<Data<S>, M> {
 
     /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
     pub fn unsafe_interpret_as_g16_proof(self) -> TypedScriptBuilder<G16Proof<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
+    pub fn unsafe_interpret_as_schnorr_sig(self) -> TypedScriptBuilder<SchnorrSig<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
+    pub fn unsafe_interpret_as_xonly_pubkey(self) -> TypedScriptBuilder<XOnlyPubkey<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
+    pub fn unsafe_interpret_as_ecdsa_sig(self) -> TypedScriptBuilder<EcdsaSig<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
+    pub fn unsafe_interpret_as_ecdsa_pubkey(self) -> TypedScriptBuilder<EcdsaPubkey<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
+    pub fn unsafe_interpret_as_groth16_tag(self) -> TypedScriptBuilder<Groth16Tag<S>, M> {
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// WARNING: No runtime validation. See `unsafe_interpret_as_num`.
+    pub fn unsafe_interpret_as_r0_succinct_tag(self) -> TypedScriptBuilder<R0SuccinctTag<S>, M> {
         TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
     }
 }

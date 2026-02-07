@@ -235,14 +235,6 @@ where
         self.emit_op(OpBin2Num)
     }
 
-    // Signature ops (need 2 from sig)
-    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<()>, <M::WithData as AddToMissing>::WithData> {
-        self.emit_op(OpCheckSig)
-    }
-    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<()>, <M::WithData as AddToMissing>::WithData> {
-        self.emit_op(OpCheckSigECDSA)
-    }
-
     // Blake2b with key (need 2 from sig)
     pub fn op_blake2b_with_key(self) -> TypedScriptBuilder<Hash<()>, <M::WithData as AddToMissing>::WithData> {
         self.emit_op(OpBlake2bWithKey)
@@ -344,17 +336,6 @@ impl<S, M> TypedScriptBuilder<Data<Data<S>>, M> {
         self.emit_op(OpEqualVerify)
     }
 
-    // Signature ops
-    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<S>, M> {
-        self.emit_op(OpCheckSig)
-    }
-    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<S>, M> {
-        self.emit_op(OpCheckSigECDSA)
-    }
-    pub fn op_check_sig_verify(self) -> TypedScriptBuilder<S, M> {
-        self.emit_op(OpCheckSigVerify)
-    }
-
     // Blake2b with key (pops key, then data)
     pub fn op_blake2b_with_key(self) -> TypedScriptBuilder<Hash<S>, M> {
         self.emit_op(OpBlake2bWithKey)
@@ -378,14 +359,73 @@ impl<M: AddToMissing> TypedScriptBuilder<Data<()>, M> {
     pub fn op_equal(self) -> TypedScriptBuilder<Bool<()>, M::WithData> {
         self.emit_op(OpEqual)
     }
-    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<()>, M::WithData> {
-        self.emit_op(OpCheckSig)
-    }
-    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<()>, M::WithData> {
-        self.emit_op(OpCheckSigECDSA)
-    }
     pub fn op_blake2b_with_key(self) -> TypedScriptBuilder<Hash<()>, M::WithData> {
         self.emit_op(OpBlake2bWithKey)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Signature verification: Schnorr (OpCheckSig, OpCheckSigVerify)
+// ---------------------------------------------------------------------------
+
+// Full stack: pubkey + sig both on stack
+impl<S, M> TypedScriptBuilder<XOnlyPubkey<SchnorrSig<S>>, M> {
+    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpCheckSig)
+    }
+    pub fn op_check_sig_verify(self) -> TypedScriptBuilder<S, M> {
+        self.emit_op(OpCheckSigVerify)
+    }
+}
+
+// Partial: pubkey on stack, sig from Missing
+impl<M: AddToMissing> TypedScriptBuilder<XOnlyPubkey<()>, M> {
+    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<()>, M::WithSchnorrSig> {
+        self.emit_op(OpCheckSig)
+    }
+    pub fn op_check_sig_verify(self) -> TypedScriptBuilder<(), M::WithSchnorrSig> {
+        self.emit_op(OpCheckSigVerify)
+    }
+}
+
+// Empty: both pubkey and sig from Missing
+impl<M: AddToMissing> TypedScriptBuilder<(), M>
+where
+    M::WithSchnorrSig: AddToMissing,
+{
+    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<()>, <M::WithSchnorrSig as AddToMissing>::WithXOnlyPubkey> {
+        self.emit_op(OpCheckSig)
+    }
+    pub fn op_check_sig_verify(self) -> TypedScriptBuilder<(), <M::WithSchnorrSig as AddToMissing>::WithXOnlyPubkey> {
+        self.emit_op(OpCheckSigVerify)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Signature verification: ECDSA (OpCheckSigECDSA)
+// ---------------------------------------------------------------------------
+
+// Full stack: pubkey + sig both on stack
+impl<S, M> TypedScriptBuilder<EcdsaPubkey<EcdsaSig<S>>, M> {
+    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<S>, M> {
+        self.emit_op(OpCheckSigECDSA)
+    }
+}
+
+// Partial: pubkey on stack, sig from Missing
+impl<M: AddToMissing> TypedScriptBuilder<EcdsaPubkey<()>, M> {
+    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<()>, M::WithEcdsaSig> {
+        self.emit_op(OpCheckSigECDSA)
+    }
+}
+
+// Empty: both pubkey and sig from Missing
+impl<M: AddToMissing> TypedScriptBuilder<(), M>
+where
+    M::WithEcdsaSig: AddToMissing,
+{
+    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<()>, <M::WithEcdsaSig as AddToMissing>::WithEcdsaPubkey> {
+        self.emit_op(OpCheckSigECDSA)
     }
 }
 

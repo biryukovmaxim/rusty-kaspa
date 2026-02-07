@@ -52,6 +52,18 @@ pub struct G16Vk<S>(PhantomData<S>);
 /// Groth16 proof (variable-length bytes).
 pub struct G16Proof<S>(PhantomData<S>);
 
+/// Marker for a Schnorr signature (64-byte signature + 1-byte sighash type).
+pub struct SchnorrSig<S>(PhantomData<S>);
+
+/// Marker for an x-only public key (32 bytes, used with Schnorr).
+pub struct XOnlyPubkey<S>(PhantomData<S>);
+
+/// Marker for an ECDSA signature (64-byte signature + 1-byte sighash type).
+pub struct EcdsaSig<S>(PhantomData<S>);
+
+/// Marker for a compressed ECDSA public key (33 bytes).
+pub struct EcdsaPubkey<S>(PhantomData<S>);
+
 /// Marker for a fixed-count group of N elements of type T.
 /// `S` is the rest of the stack beneath the consumed elements.
 pub struct FixedNum<const N: usize, T, S>(PhantomData<(T, S)>);
@@ -101,7 +113,11 @@ impl_stack_entry!(
     R0SuccinctJournalDigest,
     R0SuccinctImageId,
     G16Vk,
-    G16Proof
+    G16Proof,
+    SchnorrSig,
+    XOnlyPubkey,
+    EcdsaSig,
+    EcdsaPubkey
 );
 
 impl<const N: usize, T, S> sealed::Sealed for FixedNum<N, T, S> {}
@@ -131,7 +147,11 @@ impl_not_bn254fr!(
     R0SuccinctJournalDigest,
     R0SuccinctImageId,
     G16Vk,
-    G16Proof
+    G16Proof,
+    SchnorrSig,
+    XOnlyPubkey,
+    EcdsaSig,
+    EcdsaPubkey
 );
 impl sealed::NotBn254Fr for () {}
 
@@ -162,6 +182,10 @@ pub trait AddToMissing {
     type WithR0SuccinctImageId;
     type WithG16Vk;
     type WithG16Proof;
+    type WithSchnorrSig;
+    type WithXOnlyPubkey;
+    type WithEcdsaSig;
+    type WithEcdsaPubkey;
 }
 
 impl AddToMissing for () {
@@ -181,6 +205,10 @@ impl AddToMissing for () {
     type WithR0SuccinctImageId = R0SuccinctImageId<()>;
     type WithG16Vk = G16Vk<()>;
     type WithG16Proof = G16Proof<()>;
+    type WithSchnorrSig = SchnorrSig<()>;
+    type WithXOnlyPubkey = XOnlyPubkey<()>;
+    type WithEcdsaSig = EcdsaSig<()>;
+    type WithEcdsaPubkey = EcdsaPubkey<()>;
 }
 
 macro_rules! impl_add_to_missing {
@@ -202,6 +230,10 @@ macro_rules! impl_add_to_missing {
             type WithR0SuccinctImageId = R0SuccinctImageId<$Marker<M>>;
             type WithG16Vk = G16Vk<$Marker<M>>;
             type WithG16Proof = G16Proof<$Marker<M>>;
+            type WithSchnorrSig = SchnorrSig<$Marker<M>>;
+            type WithXOnlyPubkey = XOnlyPubkey<$Marker<M>>;
+            type WithEcdsaSig = EcdsaSig<$Marker<M>>;
+            type WithEcdsaPubkey = EcdsaPubkey<$Marker<M>>;
         }
     )*};
 }
@@ -222,7 +254,11 @@ impl_add_to_missing!(
     R0SuccinctJournalDigest,
     R0SuccinctImageId,
     G16Vk,
-    G16Proof
+    G16Proof,
+    SchnorrSig,
+    XOnlyPubkey,
+    EcdsaSig,
+    EcdsaPubkey
 );
 
 impl<const N: usize, T, S> AddToMissing for FixedNum<N, T, S> {
@@ -242,6 +278,10 @@ impl<const N: usize, T, S> AddToMissing for FixedNum<N, T, S> {
     type WithR0SuccinctImageId = R0SuccinctImageId<FixedNum<N, T, S>>;
     type WithG16Vk = G16Vk<FixedNum<N, T, S>>;
     type WithG16Proof = G16Proof<FixedNum<N, T, S>>;
+    type WithSchnorrSig = SchnorrSig<FixedNum<N, T, S>>;
+    type WithXOnlyPubkey = XOnlyPubkey<FixedNum<N, T, S>>;
+    type WithEcdsaSig = EcdsaSig<FixedNum<N, T, S>>;
+    type WithEcdsaPubkey = EcdsaPubkey<FixedNum<N, T, S>>;
 }
 
 impl<T: AddToMissing, F: AddToMissing> AddToMissing for Or<T, F> {
@@ -261,4 +301,8 @@ impl<T: AddToMissing, F: AddToMissing> AddToMissing for Or<T, F> {
     type WithR0SuccinctImageId = Or<T::WithR0SuccinctImageId, F::WithR0SuccinctImageId>;
     type WithG16Vk = Or<T::WithG16Vk, F::WithG16Vk>;
     type WithG16Proof = Or<T::WithG16Proof, F::WithG16Proof>;
+    type WithSchnorrSig = Or<T::WithSchnorrSig, F::WithSchnorrSig>;
+    type WithXOnlyPubkey = Or<T::WithXOnlyPubkey, F::WithXOnlyPubkey>;
+    type WithEcdsaSig = Or<T::WithEcdsaSig, F::WithEcdsaSig>;
+    type WithEcdsaPubkey = Or<T::WithEcdsaPubkey, F::WithEcdsaPubkey>;
 }

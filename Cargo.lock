@@ -3735,6 +3735,8 @@ dependencies = [
 name = "kaspa-txscript-typed-builder"
 version = "1.1.0-rc.2"
 dependencies = [
+ "ark-bn254",
+ "ark-groth16",
  "ark-serialize",
  "kaspa-consensus-core",
  "kaspa-hashes",

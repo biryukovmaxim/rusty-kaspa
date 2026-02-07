@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
 use ark_serialize::CanonicalSerialize;
+use kaspa_consensus_core::hashing::sighash_type::SigHashType;
 use kaspa_txscript::opcodes::codes::*;
 use kaspa_txscript::script_builder::ScriptBuilder;
 use kaspa_txscript::zk_precompiles::fields::Fr;
@@ -94,6 +95,56 @@ impl<M> ScriptSignatureBuilder<Bn254Fr<M>> {
 }
 
 // ---------------------------------------------------------------------------
+// ScriptSignatureBuilder — provide missing signature / pubkey types
+// ---------------------------------------------------------------------------
+
+impl<M> ScriptSignatureBuilder<SchnorrSig<M>> {
+    /// Provide the next missing Schnorr signature.
+    pub fn add_schnorr_sig(mut self, sig: &secp256k1::schnorr::Signature, sighash: SigHashType) -> ScriptSignatureBuilder<M> {
+        let mut bytes = Vec::with_capacity(65);
+        bytes.extend_from_slice(sig.as_ref());
+        bytes.push(sighash.to_u8());
+        let mut tmp = ScriptBuilder::new();
+        tmp.add_data(&bytes).expect("script size limit exceeded");
+        push_reversed(&mut self.buf, &mut tmp);
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
+    }
+}
+
+impl<M> ScriptSignatureBuilder<XOnlyPubkey<M>> {
+    /// Provide the next missing x-only public key.
+    pub fn add_xonly_pubkey(mut self, pubkey: &[u8; 32]) -> ScriptSignatureBuilder<M> {
+        let mut tmp = ScriptBuilder::new();
+        tmp.add_data(pubkey.as_slice()).expect("script size limit exceeded");
+        push_reversed(&mut self.buf, &mut tmp);
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
+    }
+}
+
+impl<M> ScriptSignatureBuilder<EcdsaSig<M>> {
+    /// Provide the next missing ECDSA signature.
+    pub fn add_ecdsa_sig(mut self, sig: &secp256k1::ecdsa::Signature, sighash: SigHashType) -> ScriptSignatureBuilder<M> {
+        let mut bytes = Vec::with_capacity(65);
+        bytes.extend_from_slice(&sig.serialize_compact());
+        bytes.push(sighash.to_u8());
+        let mut tmp = ScriptBuilder::new();
+        tmp.add_data(&bytes).expect("script size limit exceeded");
+        push_reversed(&mut self.buf, &mut tmp);
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
+    }
+}
+
+impl<M> ScriptSignatureBuilder<EcdsaPubkey<M>> {
+    /// Provide the next missing compressed ECDSA public key.
+    pub fn add_ecdsa_pubkey(mut self, pubkey: &[u8; 33]) -> ScriptSignatureBuilder<M> {
+        let mut tmp = ScriptBuilder::new();
+        tmp.add_data(pubkey.as_slice()).expect("script size limit exceeded");
+        push_reversed(&mut self.buf, &mut tmp);
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ScriptSignatureBuilder — provide missing R0Succinct / G16 semantic types
 // ---------------------------------------------------------------------------
 
@@ -105,20 +156,12 @@ impl<M> ScriptSignatureBuilder<R0SuccinctSeal<M>> {
         push_reversed(&mut self.buf, &mut tmp);
         ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
     }
-    pub fn add_r0_succinct_seal_bytes(mut self, bytes: &[u8]) -> ScriptSignatureBuilder<M> {
-        assert!(bytes.len() % 4 == 0, "seal bytes length must be a multiple of 4, got {}", bytes.len());
-        let mut tmp = ScriptBuilder::new();
-        tmp.add_data(bytes).expect("script size limit exceeded");
-        push_reversed(&mut self.buf, &mut tmp);
-        ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
-    }
 }
 
 impl<M> ScriptSignatureBuilder<R0SuccinctClaim<M>> {
-    pub fn add_r0_succinct_claim(mut self, claim: &[u8]) -> ScriptSignatureBuilder<M> {
-        assert!(claim.len() == 32, "claim must be exactly 32 bytes, got {}", claim.len());
+    pub fn add_r0_succinct_claim(mut self, claim: &[u8; 32]) -> ScriptSignatureBuilder<M> {
         let mut tmp = ScriptBuilder::new();
-        tmp.add_data(claim).expect("script size limit exceeded");
+        tmp.add_data(claim.as_slice()).expect("script size limit exceeded");
         push_reversed(&mut self.buf, &mut tmp);
         ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
     }
@@ -131,33 +174,12 @@ impl<M> ScriptSignatureBuilder<R0SuccinctHashFn<M>> {
         push_reversed(&mut self.buf, &mut tmp);
         ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
     }
-    pub fn add_r0_succinct_hashfn_raw(mut self, id: u8) -> ScriptSignatureBuilder<M> {
-        assert!(id <= 2, "hash function id must be 0, 1, or 2, got {id}");
-        let mut tmp = ScriptBuilder::new();
-        tmp.add_data(&[id]).expect("script size limit exceeded");
-        push_reversed(&mut self.buf, &mut tmp);
-        ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
-    }
-    pub fn add_r0_succinct_hashfn_bytes(mut self, bytes: &[u8]) -> ScriptSignatureBuilder<M> {
-        assert!(bytes.len() == 1, "hashfn bytes must be exactly 1 byte, got {}", bytes.len());
-        let mut tmp = ScriptBuilder::new();
-        tmp.add_data(bytes).expect("script size limit exceeded");
-        push_reversed(&mut self.buf, &mut tmp);
-        ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
-    }
 }
 
 impl<M> ScriptSignatureBuilder<R0SuccinctControlIndex<M>> {
     pub fn add_r0_succinct_control_index(mut self, index: u32) -> ScriptSignatureBuilder<M> {
         let mut tmp = ScriptBuilder::new();
         tmp.add_data(&index.to_le_bytes()).expect("script size limit exceeded");
-        push_reversed(&mut self.buf, &mut tmp);
-        ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
-    }
-    pub fn add_r0_succinct_control_index_bytes(mut self, bytes: &[u8]) -> ScriptSignatureBuilder<M> {
-        assert!(bytes.len() == 4, "control index must be exactly 4 bytes, got {}", bytes.len());
-        let mut tmp = ScriptBuilder::new();
-        tmp.add_data(bytes).expect("script size limit exceeded");
         push_reversed(&mut self.buf, &mut tmp);
         ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
     }
@@ -174,38 +196,40 @@ impl<M> ScriptSignatureBuilder<R0SuccinctControlDigests<M>> {
 }
 
 impl<M> ScriptSignatureBuilder<R0SuccinctJournalDigest<M>> {
-    pub fn add_r0_succinct_journal_digest(mut self, digest: &[u8]) -> ScriptSignatureBuilder<M> {
-        assert!(digest.len() == 32, "journal digest must be exactly 32 bytes, got {}", digest.len());
+    pub fn add_r0_succinct_journal_digest(mut self, digest: &[u8; 32]) -> ScriptSignatureBuilder<M> {
         let mut tmp = ScriptBuilder::new();
-        tmp.add_data(digest).expect("script size limit exceeded");
+        tmp.add_data(digest.as_slice()).expect("script size limit exceeded");
         push_reversed(&mut self.buf, &mut tmp);
         ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
     }
 }
 
 impl<M> ScriptSignatureBuilder<R0SuccinctImageId<M>> {
-    pub fn add_r0_succinct_image_id(mut self, image_id: &[u8]) -> ScriptSignatureBuilder<M> {
-        assert!(image_id.len() == 32, "image ID must be exactly 32 bytes, got {}", image_id.len());
+    pub fn add_r0_succinct_image_id(mut self, image_id: &[u8; 32]) -> ScriptSignatureBuilder<M> {
         let mut tmp = ScriptBuilder::new();
-        tmp.add_data(image_id).expect("script size limit exceeded");
+        tmp.add_data(image_id.as_slice()).expect("script size limit exceeded");
         push_reversed(&mut self.buf, &mut tmp);
         ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
     }
 }
 
 impl<M> ScriptSignatureBuilder<G16Vk<M>> {
-    pub fn add_g16_vk(mut self, vk: &[u8]) -> ScriptSignatureBuilder<M> {
+    pub fn add_g16_vk(mut self, vk: &ark_groth16::VerifyingKey<ark_bn254::Bn254>) -> ScriptSignatureBuilder<M> {
+        let mut bytes = Vec::new();
+        vk.serialize_compressed(&mut bytes).expect("VK serialization failed");
         let mut tmp = ScriptBuilder::new();
-        tmp.add_data(vk).expect("script size limit exceeded");
+        tmp.add_data(&bytes).expect("script size limit exceeded");
         push_reversed(&mut self.buf, &mut tmp);
         ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
     }
 }
 
 impl<M> ScriptSignatureBuilder<G16Proof<M>> {
-    pub fn add_g16_proof(mut self, proof: &[u8]) -> ScriptSignatureBuilder<M> {
+    pub fn add_g16_proof(mut self, proof: &ark_groth16::Proof<ark_bn254::Bn254>) -> ScriptSignatureBuilder<M> {
+        let mut bytes = Vec::new();
+        proof.serialize_compressed(&mut bytes).expect("Proof serialization failed");
         let mut tmp = ScriptBuilder::new();
-        tmp.add_data(proof).expect("script size limit exceeded");
+        tmp.add_data(&bytes).expect("script size limit exceeded");
         push_reversed(&mut self.buf, &mut tmp);
         ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
     }

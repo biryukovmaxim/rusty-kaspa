@@ -12,13 +12,15 @@ repository.workspace = true
 [dependencies]
 kaspa-txscript.workspace = true
 kaspa-hashes.workspace = true
+kaspa-consensus-core.workspace = true
+secp256k1.workspace = true
 ark-serialize.workspace = true
+ark-groth16.workspace = true
+ark-bn254.workspace = true
 
 [[example]]
 name = "kip10_and_covenant"
 
 [dev-dependencies]
-kaspa-consensus-core.workspace = true
 kaspa-txscript-errors.workspace = true
-secp256k1.workspace = true
 rand.workspace = true

@@ -13,6 +13,10 @@ pub use builder::*;
 pub use markers::*;
 pub use zk::{G16FixedNumInputs, G16Verify, R0SuccinctVerify};
 
+// Re-export dependency types used in the public API.
+pub use kaspa_consensus_core::hashing::sighash_type::SigHashType;
+pub use secp256k1;
+
 // Re-export opcode constants and ZK types used by tests and downstream consumers.
 #[doc(hidden)]
 pub use kaspa_txscript::opcodes::codes::*;
