@@ -3739,6 +3739,9 @@ dependencies = [
  "kaspa-consensus-core",
  "kaspa-hashes",
  "kaspa-txscript",
+ "kaspa-txscript-errors",
+ "rand 0.8.5",
+ "secp256k1",
 ]
 
 [[package]]
