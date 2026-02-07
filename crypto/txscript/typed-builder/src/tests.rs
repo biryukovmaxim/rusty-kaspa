@@ -1298,7 +1298,7 @@ fn test_if_else_missing_bool() {
     // Redeem: op_if { op_add op_verify op_true } op_else { op_equal } op_endif
     // True branch needs 2 Nums + 1 Num (for verify result), false needs 2 Data.
     // Actually let's keep it simple: both branches end with Bool<()>.
-    let typed = TypedScriptBuilder::new().op_if_missing(
+    let typed = TypedScriptBuilder::new().op_if(
         // true branch: add two nums and compare
         |b| b.op_add().add_i64(8).op_num_equal(),
         // false branch: compare two data
@@ -1334,7 +1334,7 @@ fn test_if_else_missing_bool() {
 #[test]
 fn test_if_else_missing_bool_choose_false() {
     // Same as above but choose false branch.
-    let typed = TypedScriptBuilder::new().op_if_missing(|b| b.op_add().add_i64(8).op_num_equal(), |b| b.op_equal());
+    let typed = TypedScriptBuilder::new().op_if(|b| b.op_add().add_i64(8).op_num_equal(), |b| b.op_equal());
 
     // Sig builder: choose false branch, provide 2 Data
     let sig_false = typed.into_sig_builder().choose_false().add_data(&[1, 2, 3]).add_data(&[1, 2, 3]).build();
@@ -1371,7 +1371,7 @@ fn test_if_only_missing() {
     // Body: op_equal op_verify — compares two data, verifies result, returns to ().
     // Missing for body: Data<Data<()>>.
     // Result: Or<Data<Data<()>>, ()> — true needs 2 data, false needs nothing.
-    let typed = TypedScriptBuilder::new().op_if_missing_only(|b| b.op_equal().op_verify()).op_true(); // push true to end with Bool<()>
+    let typed = TypedScriptBuilder::new().op_if_only(|b| b.op_equal().op_verify()).op_true(); // push true to end with Bool<()>
 
     let mut manual = ScriptBuilder::new();
     manual.add_op(OpIf).unwrap().add_op(OpEqual).unwrap().add_op(OpVerify).unwrap().add_op(OpEndIf).unwrap().add_op(OpTrue).unwrap();
@@ -1477,10 +1477,10 @@ fn test_if_dead() {
 fn test_nested_if_missing() {
     // Nested missing ifs: Or<Or<A, B>, C>.
     // Outer if: true branch has inner if, false branch does something else.
-    let typed = TypedScriptBuilder::new().op_if_missing(
+    let typed = TypedScriptBuilder::new().op_if(
         // true branch: another missing if
         |b| {
-            b.op_if_missing(
+            b.op_if(
                 |b2| b2.add_i64(1).add_i64(1).op_num_equal(), // inner true
                 |b2| b2.add_i64(2).add_i64(2).op_num_equal(), // inner false
             )
@@ -1534,7 +1534,7 @@ fn test_if_with_ops_after_endif() {
     // Missing if, then ops after endif that add to Missing.
     // These should distribute into Or branches.
     let typed = TypedScriptBuilder::new()
-        .op_if_missing(
+        .op_if(
             |b| b.op_true(),           // true branch: needs nothing extra, Missing = ()
             |b| b.op_true(),           // false branch: same
         )
@@ -1578,8 +1578,8 @@ fn test_p2sh_if_else_owner() {
     // P2SH execution: owner branch (kip-10 pattern).
     // Redeem: op_if { op_add push(8) op_num_equal } op_else { push(42) push(42) op_num_equal } op_endif
     // Owner (true): provides OpTrue + 3 + 5 + 8
-    let typed = TypedScriptBuilder::new()
-        .op_if_missing(|b| b.op_add().add_i64(8).op_num_equal(), |b| b.add_i64(42).add_i64(42).op_num_equal());
+    let typed =
+        TypedScriptBuilder::new().op_if(|b| b.op_add().add_i64(8).op_num_equal(), |b| b.add_i64(42).add_i64(42).op_num_equal());
 
     let redeem = typed.redeem_script().to_vec();
 
@@ -1607,8 +1607,8 @@ fn test_p2sh_if_else_owner() {
 fn test_p2sh_if_else_borrower() {
     // P2SH execution: borrower branch (kip-10 pattern).
     // Same redeem script, but choose false branch.
-    let typed = TypedScriptBuilder::new()
-        .op_if_missing(|b| b.op_add().add_i64(8).op_num_equal(), |b| b.add_i64(42).add_i64(42).op_num_equal());
+    let typed =
+        TypedScriptBuilder::new().op_if(|b| b.op_add().add_i64(8).op_num_equal(), |b| b.add_i64(42).add_i64(42).op_num_equal());
 
     let redeem = typed.redeem_script().to_vec();
 

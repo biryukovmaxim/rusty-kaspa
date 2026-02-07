@@ -7,7 +7,7 @@ use crate::builder::TypedScriptBuilder;
 use crate::markers::*;
 
 // ---------------------------------------------------------------------------
-// Dynamic condition (Bool on stack): op_if with else
+// Dynamic condition (Bool on stack)
 // Both branches must produce the same Stack AND same Missing.
 // ---------------------------------------------------------------------------
 
@@ -69,14 +69,15 @@ impl<S, M> TypedScriptBuilder<Bool<S>, M> {
 }
 
 // ---------------------------------------------------------------------------
-// Missing condition (empty stack): op_if with else
+// Missing condition (empty stack)
 // The Bool comes from the sig script. Branches may have different Missing.
 // ---------------------------------------------------------------------------
 
 impl<M: AddToMissing> TypedScriptBuilder<(), M> {
     /// Conditional where the Bool is provided by the sig script.
     /// Branches may produce different Missing types, yielding `Or<M2, M3>`.
-    pub fn op_if_missing<S2, M2, M3>(
+    /// The sig builder will call `choose_true()` or `choose_false()` to select.
+    pub fn op_if<S2, M2, M3>(
         mut self,
         true_branch: impl FnOnce(TypedScriptBuilder<(), M>) -> TypedScriptBuilder<S2, M2>,
         false_branch: impl FnOnce(TypedScriptBuilder<(), M>) -> TypedScriptBuilder<S2, M3>,
@@ -98,7 +99,7 @@ impl<M: AddToMissing> TypedScriptBuilder<(), M> {
     /// Conditional with only a true branch where the Bool is from sig script.
     /// The body receives `((), M)` and returns `((), M2)`.
     /// Result Missing is `Or<M2, M>`: true-branch chose `M2`, false does nothing.
-    pub fn op_if_missing_only<M2>(
+    pub fn op_if_only<M2>(
         mut self,
         body: impl FnOnce(TypedScriptBuilder<(), M>) -> TypedScriptBuilder<(), M2>,
     ) -> TypedScriptBuilder<(), Or<M2, M>> {
