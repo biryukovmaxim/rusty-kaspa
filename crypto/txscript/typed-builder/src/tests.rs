@@ -1249,3 +1249,479 @@ fn test_fixed_num_stack_and_math_ops() {
         .unwrap();
     assert_eq!(typed_const.redeem_script(), manual_const.script());
 }
+
+// -----------------------------------------------------------------------
+// Conditional (op_if / op_else / op_endif) tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_if_else_dynamic_bool() {
+    // Dynamic Bool on stack: both branches produce same types.
+    // Script: push(3) push(5) op_less_than op_if { push(1) } op_else { push(0) } op_endif push(1) op_num_equal
+    let typed = TypedScriptBuilder::new()
+        .add_i64(3)
+        .add_i64(5)
+        .op_less_than()
+        .op_if(|b| b.add_i64(1), |b| b.add_i64(0))
+        .add_i64(1)
+        .op_num_equal();
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_i64(3)
+        .unwrap()
+        .add_i64(5)
+        .unwrap()
+        .add_op(OpLessThan)
+        .unwrap()
+        .add_op(OpIf)
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpElse)
+        .unwrap()
+        .add_i64(0)
+        .unwrap()
+        .add_op(OpEndIf)
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpNumEqual)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_if_else_missing_bool() {
+    // Missing Bool: condition comes from sig script.
+    // Redeem: op_if { op_add op_verify op_true } op_else { op_equal } op_endif
+    // True branch needs 2 Nums + 1 Num (for verify result), false needs 2 Data.
+    // Actually let's keep it simple: both branches end with Bool<()>.
+    let typed = TypedScriptBuilder::new().op_if_missing(
+        // true branch: add two nums and compare
+        |b| b.op_add().add_i64(8).op_num_equal(),
+        // false branch: compare two data
+        |b| b.op_equal(),
+    );
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_op(OpIf)
+        .unwrap()
+        .add_op(OpAdd)
+        .unwrap()
+        .add_i64(8)
+        .unwrap()
+        .add_op(OpNumEqual)
+        .unwrap()
+        .add_op(OpElse)
+        .unwrap()
+        .add_op(OpEqual)
+        .unwrap()
+        .add_op(OpEndIf)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+
+    // Sig builder: choose true branch, provide 2 Nums (for op_add)
+    let redeem = typed.redeem_script().to_vec();
+    let sig_true = typed.into_sig_builder().choose_true().add_i64(3).add_i64(5).build();
+    assert!(!sig_true.is_empty());
+    assert!(sig_true.len() > redeem.len());
+}
+
+#[test]
+fn test_if_else_missing_bool_choose_false() {
+    // Same as above but choose false branch.
+    let typed = TypedScriptBuilder::new().op_if_missing(|b| b.op_add().add_i64(8).op_num_equal(), |b| b.op_equal());
+
+    // Sig builder: choose false branch, provide 2 Data
+    let sig_false = typed.into_sig_builder().choose_false().add_data(&[1, 2, 3]).add_data(&[1, 2, 3]).build();
+    assert!(!sig_false.is_empty());
+}
+
+#[test]
+fn test_if_only_dynamic() {
+    // Dynamic Bool, stack-neutral body.
+    // Script: push(true) op_if { push(1) op_drop } op_endif op_true
+    let typed = TypedScriptBuilder::new().op_true().op_if_only(|b| b.add_i64(1).op_drop()).op_true();
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_op(OpTrue)
+        .unwrap()
+        .add_op(OpIf)
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpEndIf)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_if_only_missing() {
+    // Missing Bool, body changes Missing but returns to empty stack.
+    // Body: op_equal op_verify — compares two data, verifies result, returns to ().
+    // Missing for body: Data<Data<()>>.
+    // Result: Or<Data<Data<()>>, ()> — true needs 2 data, false needs nothing.
+    let typed = TypedScriptBuilder::new().op_if_missing_only(|b| b.op_equal().op_verify()).op_true(); // push true to end with Bool<()>
+
+    let mut manual = ScriptBuilder::new();
+    manual.add_op(OpIf).unwrap().add_op(OpEqual).unwrap().add_op(OpVerify).unwrap().add_op(OpEndIf).unwrap().add_op(OpTrue).unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+
+    // choose_true: true branch needs 2 Data
+    let sig_true = typed.into_sig_builder().choose_true().add_data(&[1, 2]).add_data(&[1, 2]).build();
+    assert!(!sig_true.is_empty());
+}
+
+#[test]
+fn test_if_fixed_true() {
+    // Known true: dead branch has arbitrary bytes.
+    let typed = TypedScriptBuilder::new().op_true().op_if_true(
+        |b| b.add_i64(42).add_i64(42).op_num_equal(),
+        |sb| {
+            sb.add_data(&[0xDE, 0xAD]).unwrap();
+        },
+    );
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_op(OpTrue)
+        .unwrap()
+        .add_op(OpIf)
+        .unwrap()
+        .add_i64(42)
+        .unwrap()
+        .add_i64(42)
+        .unwrap()
+        .add_op(OpNumEqual)
+        .unwrap()
+        .add_op(OpElse)
+        .unwrap()
+        .add_data(&[0xDE, 0xAD])
+        .unwrap()
+        .add_op(OpEndIf)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_if_fixed_false_dead() {
+    // Known false: data embedding in dead branch.
+    let typed = TypedScriptBuilder::new().op_false().op_if_false(
+        |sb| {
+            sb.add_data(&[0xCA, 0xFE]).unwrap();
+        },
+        |b| b.add_i64(1).add_i64(1).op_num_equal(),
+    );
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_op(OpFalse)
+        .unwrap()
+        .add_op(OpIf)
+        .unwrap()
+        .add_data(&[0xCA, 0xFE])
+        .unwrap()
+        .add_op(OpElse)
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpNumEqual)
+        .unwrap()
+        .add_op(OpEndIf)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_if_dead() {
+    // op_if_dead: entire block is dead code for data embedding.
+    let typed = TypedScriptBuilder::new()
+        .op_false()
+        .op_if_dead(|sb| {
+            sb.add_data(b"hello world").unwrap();
+        })
+        .op_true();
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_op(OpFalse)
+        .unwrap()
+        .add_op(OpIf)
+        .unwrap()
+        .add_data(b"hello world")
+        .unwrap()
+        .add_op(OpEndIf)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_nested_if_missing() {
+    // Nested missing ifs: Or<Or<A, B>, C>.
+    // Outer if: true branch has inner if, false branch does something else.
+    let typed = TypedScriptBuilder::new().op_if_missing(
+        // true branch: another missing if
+        |b| {
+            b.op_if_missing(
+                |b2| b2.add_i64(1).add_i64(1).op_num_equal(), // inner true
+                |b2| b2.add_i64(2).add_i64(2).op_num_equal(), // inner false
+            )
+        },
+        // false branch
+        |b| b.add_i64(3).add_i64(3).op_num_equal(),
+    );
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_op(OpIf)
+        .unwrap()
+        .add_op(OpIf)
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpNumEqual)
+        .unwrap()
+        .add_op(OpElse)
+        .unwrap()
+        .add_i64(2)
+        .unwrap()
+        .add_i64(2)
+        .unwrap()
+        .add_op(OpNumEqual)
+        .unwrap()
+        .add_op(OpEndIf)
+        .unwrap()
+        .add_op(OpElse)
+        .unwrap()
+        .add_i64(3)
+        .unwrap()
+        .add_i64(3)
+        .unwrap()
+        .add_op(OpNumEqual)
+        .unwrap()
+        .add_op(OpEndIf)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+
+    // Sig: choose outer-true, inner-true
+    let sig = typed.into_sig_builder().choose_true().choose_true().build();
+    assert!(!sig.is_empty());
+}
+
+#[test]
+fn test_if_with_ops_after_endif() {
+    // Missing if, then ops after endif that add to Missing.
+    // These should distribute into Or branches.
+    let typed = TypedScriptBuilder::new()
+        .op_if_missing(
+            |b| b.op_true(),           // true branch: needs nothing extra, Missing = ()
+            |b| b.op_true(),           // false branch: same
+        )
+        .op_verify()                   // pops Bool -> ()
+        .op_add()                      // empty stack: needs 2 Nums
+        .add_i64(5)
+        .op_num_equal(); // needs comparison with 5
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_op(OpIf)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap()
+        .add_op(OpElse)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap()
+        .add_op(OpEndIf)
+        .unwrap()
+        .add_op(OpVerify)
+        .unwrap()
+        .add_op(OpAdd)
+        .unwrap()
+        .add_i64(5)
+        .unwrap()
+        .add_op(OpNumEqual)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+
+    // The missing type is Or<Num<Num<()>>, Num<Num<()>>>
+    // Since both branches had M=(), the ops after distribute identically.
+    // choose_true + provide 2 nums
+    let sig = typed.into_sig_builder().choose_true().add_i64(2).add_i64(3).build();
+    assert!(!sig.is_empty());
+}
+
+#[test]
+fn test_p2sh_if_else_owner() {
+    // P2SH execution: owner branch (kip-10 pattern).
+    // Redeem: op_if { op_add push(8) op_num_equal } op_else { push(42) push(42) op_num_equal } op_endif
+    // Owner (true): provides OpTrue + 3 + 5 + 8
+    let typed = TypedScriptBuilder::new()
+        .op_if_missing(|b| b.op_add().add_i64(8).op_num_equal(), |b| b.add_i64(42).add_i64(42).op_num_equal());
+
+    let redeem = typed.redeem_script().to_vec();
+
+    // Owner sig: choose true, provide 2 nums (for op_add; 8 is in the redeem script)
+    let sig = typed.into_sig_builder().choose_true().add_i64(3).add_i64(5).build();
+
+    let sig_cache = Cache::new(10_000);
+    let reused_values = SigHashReusedValuesUnsync::new();
+
+    let (tx, utxo) = make_p2sh_tx(&redeem, sig);
+    let populated_tx = PopulatedTransaction::new(&tx, vec![utxo.clone()]);
+
+    let mut vm = TxScriptEngine::from_transaction_input(
+        &populated_tx,
+        &populated_tx.tx.inputs[0],
+        0,
+        &utxo,
+        EngineCtx::new(&sig_cache).with_reused(&reused_values),
+        Default::default(),
+    );
+    vm.execute().expect("owner branch should succeed");
+}
+
+#[test]
+fn test_p2sh_if_else_borrower() {
+    // P2SH execution: borrower branch (kip-10 pattern).
+    // Same redeem script, but choose false branch.
+    let typed = TypedScriptBuilder::new()
+        .op_if_missing(|b| b.op_add().add_i64(8).op_num_equal(), |b| b.add_i64(42).add_i64(42).op_num_equal());
+
+    let redeem = typed.redeem_script().to_vec();
+
+    // Borrower sig: choose false (no additional inputs needed — both 42s are in redeem)
+    let sig = typed.into_sig_builder().choose_false().build();
+
+    let sig_cache = Cache::new(10_000);
+    let reused_values = SigHashReusedValuesUnsync::new();
+
+    let (tx, utxo) = make_p2sh_tx(&redeem, sig);
+    let populated_tx = PopulatedTransaction::new(&tx, vec![utxo.clone()]);
+
+    let mut vm = TxScriptEngine::from_transaction_input(
+        &populated_tx,
+        &populated_tx.tx.inputs[0],
+        0,
+        &utxo,
+        EngineCtx::new(&sig_cache).with_reused(&reused_values),
+        Default::default(),
+    );
+    vm.execute().expect("borrower branch should succeed");
+}
+
+#[test]
+fn test_p2sh_if_else_dynamic_both_branches() {
+    // P2SH with dynamic Bool: both branches produce same Missing.
+    // Redeem: push(data1) push(data2) op_equal op_if { push(1) } op_else { push(0) } push(1) op_num_equal
+    let typed = TypedScriptBuilder::new()
+        .add_data(&[0xAA])
+        .add_data(&[0xAA])
+        .op_equal()
+        .op_if(|b| b.add_i64(1), |b| b.add_i64(0))
+        .add_i64(1)
+        .op_num_equal();
+
+    let sig_cache = Cache::new(10_000);
+    let reused_values = SigHashReusedValuesUnsync::new();
+
+    let redeem = typed.redeem_script().to_vec();
+    let sig = typed.into_sig_builder().build();
+
+    let (tx, utxo) = make_p2sh_tx(&redeem, sig);
+    let populated_tx = PopulatedTransaction::new(&tx, vec![utxo.clone()]);
+
+    let mut vm = TxScriptEngine::from_transaction_input(
+        &populated_tx,
+        &populated_tx.tx.inputs[0],
+        0,
+        &utxo,
+        EngineCtx::new(&sig_cache).with_reused(&reused_values),
+        Default::default(),
+    );
+    vm.execute().expect("dynamic if-else should succeed");
+}
+
+#[test]
+fn test_p2sh_if_fixed_true() {
+    // P2SH with fixed true: dead branch present but not executed.
+    let typed = TypedScriptBuilder::new().op_true().op_if_true(
+        |b| b.add_i64(1).add_i64(1).op_num_equal(),
+        |sb| {
+            sb.add_op(OpReturn).unwrap();
+        }, // dead: would fail if executed
+    );
+
+    let sig_cache = Cache::new(10_000);
+    let reused_values = SigHashReusedValuesUnsync::new();
+
+    let redeem = typed.redeem_script().to_vec();
+    let sig = typed.into_sig_builder().build();
+
+    let (tx, utxo) = make_p2sh_tx(&redeem, sig);
+    let populated_tx = PopulatedTransaction::new(&tx, vec![utxo.clone()]);
+
+    let mut vm = TxScriptEngine::from_transaction_input(
+        &populated_tx,
+        &populated_tx.tx.inputs[0],
+        0,
+        &utxo,
+        EngineCtx::new(&sig_cache).with_reused(&reused_values),
+        Default::default(),
+    );
+    vm.execute().expect("fixed true branch should succeed");
+}
+
+#[test]
+fn test_p2sh_if_fixed_false() {
+    // P2SH with fixed false: dead true branch, active false branch.
+    let typed = TypedScriptBuilder::new().op_false().op_if_false(
+        |sb| {
+            sb.add_op(OpReturn).unwrap();
+        }, // dead: would fail if executed
+        |b| b.add_i64(1).add_i64(1).op_num_equal(),
+    );
+
+    let sig_cache = Cache::new(10_000);
+    let reused_values = SigHashReusedValuesUnsync::new();
+
+    let redeem = typed.redeem_script().to_vec();
+    let sig = typed.into_sig_builder().build();
+
+    let (tx, utxo) = make_p2sh_tx(&redeem, sig);
+    let populated_tx = PopulatedTransaction::new(&tx, vec![utxo.clone()]);
+
+    let mut vm = TxScriptEngine::from_transaction_input(
+        &populated_tx,
+        &populated_tx.tx.inputs[0],
+        0,
+        &utxo,
+        EngineCtx::new(&sig_cache).with_reused(&reused_values),
+        Default::default(),
+    );
+    vm.execute().expect("fixed false branch should succeed");
+}
+
+// Compile-fail doc tests are on the public methods in conditionals.rs and sig_builder.rs.

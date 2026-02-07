@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
 use ark_serialize::CanonicalSerialize;
+use kaspa_txscript::opcodes::codes::*;
 use kaspa_txscript::script_builder::ScriptBuilder;
 use kaspa_txscript::zk_precompiles::fields::Fr;
 
@@ -206,6 +207,40 @@ impl<M> ScriptSignatureBuilder<G16Proof<M>> {
         let mut tmp = ScriptBuilder::new();
         tmp.add_data(proof).expect("script size limit exceeded");
         push_reversed(&mut self.buf, &mut tmp);
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ScriptSignatureBuilder — Or resolution (choose_true / choose_false)
+// ---------------------------------------------------------------------------
+
+impl<T, F> ScriptSignatureBuilder<Or<T, F>> {
+    /// Select the true branch. Pushes `OpTrue` (the Bool for `OpIf`)
+    /// and continues with the true-branch Missing type `T`.
+    ///
+    /// ```compile_fail
+    /// use kaspa_txscript_typed_builder::TypedScriptBuilder;
+    /// // Or<(), ()> cannot build() without choosing — should not compile
+    /// let typed = TypedScriptBuilder::new()
+    ///     .op_if_missing(
+    ///         |b| b.op_true(),
+    ///         |b| b.op_true(),
+    ///     );
+    /// typed.into_sig_builder().build();
+    /// ```
+    pub fn choose_true(mut self) -> ScriptSignatureBuilder<T> {
+        let mut tmp = ScriptBuilder::new();
+        tmp.add_op(OpTrue).expect("script size limit exceeded");
+        push_reversed(&mut self.buf, &mut tmp);
+        ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
+    }
+
+    /// Select the false branch. Pushes `OpFalse` (a single `0x00` byte)
+    /// and continues with the false-branch Missing type `F`.
+    pub fn choose_false(mut self) -> ScriptSignatureBuilder<F> {
+        // OpFalse = 0x00 — a single zero byte. Reversed is still [0x00].
+        self.buf.push(0x00);
         ScriptSignatureBuilder { redeem_script: self.redeem_script, buf: self.buf, _phantom: PhantomData }
     }
 }

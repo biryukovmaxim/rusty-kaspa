@@ -75,51 +75,51 @@ impl<S, M> TypedScriptBuilder<Num<Num<S>>, M> {
 // Arithmetic: Binary Num×Num (partial: 1 on stack)
 // ---------------------------------------------------------------------------
 
-impl<M> TypedScriptBuilder<Num<()>, M> {
-    pub fn op_add(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+impl<M: AddToMissing> TypedScriptBuilder<Num<()>, M> {
+    pub fn op_add(self) -> TypedScriptBuilder<Num<()>, M::WithNum> {
         self.emit_op(OpAdd)
     }
-    pub fn op_sub(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+    pub fn op_sub(self) -> TypedScriptBuilder<Num<()>, M::WithNum> {
         self.emit_op(OpSub)
     }
-    pub fn op_mul(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+    pub fn op_mul(self) -> TypedScriptBuilder<Num<()>, M::WithNum> {
         self.emit_op(OpMul)
     }
-    pub fn op_div(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+    pub fn op_div(self) -> TypedScriptBuilder<Num<()>, M::WithNum> {
         self.emit_op(OpDiv)
     }
-    pub fn op_mod(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+    pub fn op_mod(self) -> TypedScriptBuilder<Num<()>, M::WithNum> {
         self.emit_op(OpMod)
     }
-    pub fn op_min(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+    pub fn op_min(self) -> TypedScriptBuilder<Num<()>, M::WithNum> {
         self.emit_op(OpMin)
     }
-    pub fn op_max(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+    pub fn op_max(self) -> TypedScriptBuilder<Num<()>, M::WithNum> {
         self.emit_op(OpMax)
     }
 
-    pub fn op_num_equal(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+    pub fn op_num_equal(self) -> TypedScriptBuilder<Bool<()>, M::WithNum> {
         self.emit_op(OpNumEqual)
     }
-    pub fn op_less_than(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+    pub fn op_less_than(self) -> TypedScriptBuilder<Bool<()>, M::WithNum> {
         self.emit_op(OpLessThan)
     }
-    pub fn op_greater_than(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+    pub fn op_greater_than(self) -> TypedScriptBuilder<Bool<()>, M::WithNum> {
         self.emit_op(OpGreaterThan)
     }
-    pub fn op_less_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+    pub fn op_less_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, M::WithNum> {
         self.emit_op(OpLessThanOrEqual)
     }
-    pub fn op_greater_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+    pub fn op_greater_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, M::WithNum> {
         self.emit_op(OpGreaterThanOrEqual)
     }
-    pub fn op_num_not_equal(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+    pub fn op_num_not_equal(self) -> TypedScriptBuilder<Bool<()>, M::WithNum> {
         self.emit_op(OpNumNotEqual)
     }
-    pub fn op_bool_and(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+    pub fn op_bool_and(self) -> TypedScriptBuilder<Bool<()>, M::WithNum> {
         self.emit_op(OpBoolAnd)
     }
-    pub fn op_bool_or(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+    pub fn op_bool_or(self) -> TypedScriptBuilder<Bool<()>, M::WithNum> {
         self.emit_op(OpBoolOr)
     }
 }
@@ -128,124 +128,128 @@ impl<M> TypedScriptBuilder<Num<()>, M> {
 // Arithmetic: Binary Num×Num (empty stack: need 2 from sig)
 // ---------------------------------------------------------------------------
 
-impl<M> TypedScriptBuilder<(), M> {
+impl<M: AddToMissing> TypedScriptBuilder<(), M>
+where
+    M::WithNum: AddToMissing,
+    M::WithData: AddToMissing,
+{
     // Binary (need 2 from sig)
-    pub fn op_add(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> {
+    pub fn op_add(self) -> TypedScriptBuilder<Num<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpAdd)
     }
-    pub fn op_sub(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> {
+    pub fn op_sub(self) -> TypedScriptBuilder<Num<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpSub)
     }
-    pub fn op_mul(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> {
+    pub fn op_mul(self) -> TypedScriptBuilder<Num<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpMul)
     }
-    pub fn op_div(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> {
+    pub fn op_div(self) -> TypedScriptBuilder<Num<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpDiv)
     }
-    pub fn op_mod(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> {
+    pub fn op_mod(self) -> TypedScriptBuilder<Num<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpMod)
     }
-    pub fn op_min(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> {
+    pub fn op_min(self) -> TypedScriptBuilder<Num<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpMin)
     }
-    pub fn op_max(self) -> TypedScriptBuilder<Num<()>, Num<Num<M>>> {
+    pub fn op_max(self) -> TypedScriptBuilder<Num<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpMax)
     }
 
-    pub fn op_num_equal(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+    pub fn op_num_equal(self) -> TypedScriptBuilder<Bool<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpNumEqual)
     }
-    pub fn op_less_than(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+    pub fn op_less_than(self) -> TypedScriptBuilder<Bool<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpLessThan)
     }
-    pub fn op_greater_than(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+    pub fn op_greater_than(self) -> TypedScriptBuilder<Bool<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpGreaterThan)
     }
-    pub fn op_less_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+    pub fn op_less_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpLessThanOrEqual)
     }
-    pub fn op_greater_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+    pub fn op_greater_than_or_equal(self) -> TypedScriptBuilder<Bool<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpGreaterThanOrEqual)
     }
-    pub fn op_num_not_equal(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+    pub fn op_num_not_equal(self) -> TypedScriptBuilder<Bool<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpNumNotEqual)
     }
-    pub fn op_bool_and(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+    pub fn op_bool_and(self) -> TypedScriptBuilder<Bool<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpBoolAnd)
     }
-    pub fn op_bool_or(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+    pub fn op_bool_or(self) -> TypedScriptBuilder<Bool<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpBoolOr)
     }
 
     // Unary (need 1 from sig)
-    pub fn op_1_add(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+    pub fn op_1_add(self) -> TypedScriptBuilder<Num<()>, M::WithNum> {
         self.emit_op(Op1Add)
     }
-    pub fn op_1_sub(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+    pub fn op_1_sub(self) -> TypedScriptBuilder<Num<()>, M::WithNum> {
         self.emit_op(Op1Sub)
     }
-    pub fn op_negate(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+    pub fn op_negate(self) -> TypedScriptBuilder<Num<()>, M::WithNum> {
         self.emit_op(OpNegate)
     }
-    pub fn op_abs(self) -> TypedScriptBuilder<Num<()>, Num<M>> {
+    pub fn op_abs(self) -> TypedScriptBuilder<Num<()>, M::WithNum> {
         self.emit_op(OpAbs)
     }
-    pub fn op_not(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+    pub fn op_not(self) -> TypedScriptBuilder<Bool<()>, M::WithNum> {
         self.emit_op(OpNot)
     }
-    pub fn op_0_not_equal(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+    pub fn op_0_not_equal(self) -> TypedScriptBuilder<Bool<()>, M::WithNum> {
         self.emit_op(Op0NotEqual)
     }
 
     // Data binary (need 2 from sig)
-    pub fn op_cat(self) -> TypedScriptBuilder<Data<()>, Data<Data<M>>> {
+    pub fn op_cat(self) -> TypedScriptBuilder<Data<()>, <M::WithData as AddToMissing>::WithData> {
         self.emit_op(OpCat)
     }
-    pub fn op_and(self) -> TypedScriptBuilder<Data<()>, Data<Data<M>>> {
+    pub fn op_and(self) -> TypedScriptBuilder<Data<()>, <M::WithData as AddToMissing>::WithData> {
         self.emit_op(OpAnd)
     }
-    pub fn op_or(self) -> TypedScriptBuilder<Data<()>, Data<Data<M>>> {
+    pub fn op_or(self) -> TypedScriptBuilder<Data<()>, <M::WithData as AddToMissing>::WithData> {
         self.emit_op(OpOr)
     }
-    pub fn op_xor(self) -> TypedScriptBuilder<Data<()>, Data<Data<M>>> {
+    pub fn op_xor(self) -> TypedScriptBuilder<Data<()>, <M::WithData as AddToMissing>::WithData> {
         self.emit_op(OpXor)
     }
-    pub fn op_equal(self) -> TypedScriptBuilder<Bool<()>, Data<Data<M>>> {
+    pub fn op_equal(self) -> TypedScriptBuilder<Bool<()>, <M::WithData as AddToMissing>::WithData> {
         self.emit_op(OpEqual)
     }
 
     // Data unary (need 1 from sig)
-    pub fn op_invert(self) -> TypedScriptBuilder<Data<()>, Data<M>> {
+    pub fn op_invert(self) -> TypedScriptBuilder<Data<()>, M::WithData> {
         self.emit_op(OpInvert)
     }
-    pub fn op_size(self) -> TypedScriptBuilder<Num<Data<()>>, Data<M>> {
+    pub fn op_size(self) -> TypedScriptBuilder<Num<Data<()>>, M::WithData> {
         self.emit_op(OpSize)
     }
-    pub fn op_sha256(self) -> TypedScriptBuilder<Hash<()>, Data<M>> {
+    pub fn op_sha256(self) -> TypedScriptBuilder<Hash<()>, M::WithData> {
         self.emit_op(OpSHA256)
     }
-    pub fn op_blake2b(self) -> TypedScriptBuilder<Hash<()>, Data<M>> {
+    pub fn op_blake2b(self) -> TypedScriptBuilder<Hash<()>, M::WithData> {
         self.emit_op(OpBlake2b)
     }
-    pub fn op_bin2num(self) -> TypedScriptBuilder<Num<()>, Data<M>> {
+    pub fn op_bin2num(self) -> TypedScriptBuilder<Num<()>, M::WithData> {
         self.emit_op(OpBin2Num)
     }
 
     // Signature ops (need 2 from sig)
-    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<()>, Data<Data<M>>> {
+    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<()>, <M::WithData as AddToMissing>::WithData> {
         self.emit_op(OpCheckSig)
     }
-    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<()>, Data<Data<M>>> {
+    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<()>, <M::WithData as AddToMissing>::WithData> {
         self.emit_op(OpCheckSigECDSA)
     }
 
     // Blake2b with key (need 2 from sig)
-    pub fn op_blake2b_with_key(self) -> TypedScriptBuilder<Hash<()>, Data<Data<M>>> {
+    pub fn op_blake2b_with_key(self) -> TypedScriptBuilder<Hash<()>, <M::WithData as AddToMissing>::WithData> {
         self.emit_op(OpBlake2bWithKey)
     }
 
     // SeqCommit (need 1 Hash from sig)
-    pub fn op_chainblock_seq_commit(self) -> TypedScriptBuilder<Hash<()>, Hash<M>> {
+    pub fn op_chainblock_seq_commit(self) -> TypedScriptBuilder<Hash<()>, M::WithHash> {
         self.emit_op(OpChainblockSeqCommit)
     }
 }
@@ -287,22 +291,29 @@ impl<S, M> TypedScriptBuilder<Num<Num<Num<S>>>, M> {
 }
 
 // Partial: 2 on stack
-impl<M> TypedScriptBuilder<Num<Num<()>>, M> {
-    pub fn op_within(self) -> TypedScriptBuilder<Bool<()>, Num<M>> {
+impl<M: AddToMissing> TypedScriptBuilder<Num<Num<()>>, M> {
+    pub fn op_within(self) -> TypedScriptBuilder<Bool<()>, M::WithNum> {
         self.emit_op(OpWithin)
     }
 }
 
 // Partial: 1 on stack
-impl<M> TypedScriptBuilder<Num<()>, M> {
-    pub fn op_within(self) -> TypedScriptBuilder<Bool<()>, Num<Num<M>>> {
+impl<M: AddToMissing> TypedScriptBuilder<Num<()>, M>
+where
+    M::WithNum: AddToMissing,
+{
+    pub fn op_within(self) -> TypedScriptBuilder<Bool<()>, <M::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpWithin)
     }
 }
 
 // Empty stack: 3 from sig
-impl<M> TypedScriptBuilder<(), M> {
-    pub fn op_within(self) -> TypedScriptBuilder<Bool<()>, Num<Num<Num<M>>>> {
+impl<M: AddToMissing> TypedScriptBuilder<(), M>
+where
+    M::WithNum: AddToMissing,
+    <M::WithNum as AddToMissing>::WithNum: AddToMissing,
+{
+    pub fn op_within(self) -> TypedScriptBuilder<Bool<()>, <<M::WithNum as AddToMissing>::WithNum as AddToMissing>::WithNum> {
         self.emit_op(OpWithin)
     }
 }
@@ -351,29 +362,29 @@ impl<S, M> TypedScriptBuilder<Data<Data<S>>, M> {
 }
 
 // Partial: 1 Data on stack (need 1 more from sig)
-impl<M> TypedScriptBuilder<Data<()>, M> {
-    pub fn op_cat(self) -> TypedScriptBuilder<Data<()>, Data<M>> {
+impl<M: AddToMissing> TypedScriptBuilder<Data<()>, M> {
+    pub fn op_cat(self) -> TypedScriptBuilder<Data<()>, M::WithData> {
         self.emit_op(OpCat)
     }
-    pub fn op_and(self) -> TypedScriptBuilder<Data<()>, Data<M>> {
+    pub fn op_and(self) -> TypedScriptBuilder<Data<()>, M::WithData> {
         self.emit_op(OpAnd)
     }
-    pub fn op_or(self) -> TypedScriptBuilder<Data<()>, Data<M>> {
+    pub fn op_or(self) -> TypedScriptBuilder<Data<()>, M::WithData> {
         self.emit_op(OpOr)
     }
-    pub fn op_xor(self) -> TypedScriptBuilder<Data<()>, Data<M>> {
+    pub fn op_xor(self) -> TypedScriptBuilder<Data<()>, M::WithData> {
         self.emit_op(OpXor)
     }
-    pub fn op_equal(self) -> TypedScriptBuilder<Bool<()>, Data<M>> {
+    pub fn op_equal(self) -> TypedScriptBuilder<Bool<()>, M::WithData> {
         self.emit_op(OpEqual)
     }
-    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<()>, Data<M>> {
+    pub fn op_check_sig(self) -> TypedScriptBuilder<Bool<()>, M::WithData> {
         self.emit_op(OpCheckSig)
     }
-    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<()>, Data<M>> {
+    pub fn op_check_sig_ecdsa(self) -> TypedScriptBuilder<Bool<()>, M::WithData> {
         self.emit_op(OpCheckSigECDSA)
     }
-    pub fn op_blake2b_with_key(self) -> TypedScriptBuilder<Hash<()>, Data<M>> {
+    pub fn op_blake2b_with_key(self) -> TypedScriptBuilder<Hash<()>, M::WithData> {
         self.emit_op(OpBlake2bWithKey)
     }
 }
@@ -423,22 +434,29 @@ impl<S, M> TypedScriptBuilder<Num<Num<Data<S>>>, M> {
 }
 
 // Partial: 2 on stack (Num<Num<()>>) — need Data from sig
-impl<M> TypedScriptBuilder<Num<Num<()>>, M> {
-    pub fn op_substr(self) -> TypedScriptBuilder<Data<()>, Data<M>> {
+impl<M: AddToMissing> TypedScriptBuilder<Num<Num<()>>, M> {
+    pub fn op_substr(self) -> TypedScriptBuilder<Data<()>, M::WithData> {
         self.emit_op(OpSubstr)
     }
 }
 
 // Partial: 1 on stack (Num<()>) — need Num+Data from sig
-impl<M> TypedScriptBuilder<Num<()>, M> {
-    pub fn op_substr(self) -> TypedScriptBuilder<Data<()>, Data<Num<M>>> {
+impl<M: AddToMissing> TypedScriptBuilder<Num<()>, M>
+where
+    M::WithNum: AddToMissing,
+{
+    pub fn op_substr(self) -> TypedScriptBuilder<Data<()>, <M::WithNum as AddToMissing>::WithData> {
         self.emit_op(OpSubstr)
     }
 }
 
 // Empty stack — need all 3: Data<Num<Num<M>>> (Data deepest, Nums on top)
-impl<M> TypedScriptBuilder<(), M> {
-    pub fn op_substr(self) -> TypedScriptBuilder<Data<()>, Data<Num<Num<M>>>> {
+impl<M: AddToMissing> TypedScriptBuilder<(), M>
+where
+    M::WithNum: AddToMissing,
+    <M::WithNum as AddToMissing>::WithNum: AddToMissing,
+{
+    pub fn op_substr(self) -> TypedScriptBuilder<Data<()>, <<M::WithNum as AddToMissing>::WithNum as AddToMissing>::WithData> {
         self.emit_op(OpSubstr)
     }
 }
