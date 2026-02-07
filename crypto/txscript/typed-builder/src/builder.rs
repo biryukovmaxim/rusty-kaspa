@@ -28,7 +28,7 @@ pub struct TypedScriptBuilder<Stack, Missing> {
 /// still need to be provided before `build()` becomes available.
 pub struct ScriptSignatureBuilder<Missing> {
     pub(crate) redeem_script: Vec<u8>,
-    pub(crate) builder: ScriptBuilder,
+    pub(crate) buf: Vec<u8>,
     pub(crate) _phantom: PhantomData<Missing>,
 }
 

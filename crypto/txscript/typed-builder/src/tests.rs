@@ -18,7 +18,7 @@ fn test_push_and_arithmetic() {
 fn test_missing_inputs() {
     let typed = TypedScriptBuilder::new().op_add().op_num_equal();
 
-    let sig = typed.into_sig_builder().add_i64(8).add_i64(5).add_i64(3).build();
+    let sig = typed.into_sig_builder().add_i64(3).add_i64(5).add_i64(8).build();
 
     assert!(!sig.is_empty());
 }
@@ -28,8 +28,11 @@ fn test_sig_builder_roundtrip() {
     let typed = TypedScriptBuilder::new().op_add().op_num_equal();
 
     let redeem = typed.redeem_script().to_vec();
-    let sig = typed.into_sig_builder().add_i64(8).add_i64(5).add_i64(3).build();
+    let sig = typed.into_sig_builder().add_i64(3).add_i64(5).add_i64(8).build();
 
+    // With the reverse-words algorithm, the final byte order is:
+    // push(8), push(5), push(3), push(redeem_script)
+    // (reversed from call order so first-provided ends up on top of stack)
     let mut manual_sig = ScriptBuilder::new();
     manual_sig.add_i64(8).unwrap().add_i64(5).unwrap().add_i64(3).unwrap().add_data(&redeem).unwrap();
     let expected_sig = manual_sig.drain();
@@ -562,8 +565,8 @@ fn test_p2sh_engine_execution() {
     let sig_cache = Cache::new(10_000);
     let reused_values = SigHashReusedValuesUnsync::new();
 
-    // Correct case: a=8, b=5, c=3 → 5+3=8, 8==8 → true
-    let correct_sig = TypedScriptBuilder::new().op_add().op_num_equal().into_sig_builder().add_i64(8).add_i64(5).add_i64(3).build();
+    // Correct case: 3+5=8 → 8==8 → true (args in chronological order)
+    let correct_sig = TypedScriptBuilder::new().op_add().op_num_equal().into_sig_builder().add_i64(3).add_i64(5).add_i64(8).build();
 
     let (tx, utxo) = make_p2sh_tx(&redeem, correct_sig);
     let populated_tx = PopulatedTransaction::new(&tx, vec![utxo.clone()]);
@@ -578,8 +581,8 @@ fn test_p2sh_engine_execution() {
     );
     vm.execute().expect("correct inputs should succeed");
 
-    // Failing case: a=9
-    let wrong_sig = TypedScriptBuilder::new().op_add().op_num_equal().into_sig_builder().add_i64(9).add_i64(5).add_i64(3).build();
+    // Failing case: 3+5≠9
+    let wrong_sig = TypedScriptBuilder::new().op_add().op_num_equal().into_sig_builder().add_i64(3).add_i64(5).add_i64(9).build();
 
     let (tx_bad, _) = make_p2sh_tx(&redeem, wrong_sig);
     let populated_tx_bad = PopulatedTransaction::new(&tx_bad, vec![utxo.clone()]);
@@ -698,8 +701,11 @@ fn test_p2sh_cat_equal() {
     let sig_cache = Cache::new(10_000);
     let reused_values = SigHashReusedValuesUnsync::new();
 
-    // Correct: [1,2,3] + [4,5,6] = [1,2,3,4,5,6]
-    let correct_sig = typed.into_sig_builder().add_data(&[1, 2, 3]).add_data(&[4, 5, 6]).build();
+    // Correct: [4,5,6] ++ [1,2,3] → but on stack cat expects bottom||top = [1,2,3,4,5,6]
+    // Args in chronological order: first-provided [4,5,6] ends up on top (second arg to cat),
+    // second-provided [1,2,3] ends up below (first arg to cat).
+    // cat([1,2,3], [4,5,6]) = [1,2,3,4,5,6]
+    let correct_sig = typed.into_sig_builder().add_data(&[4, 5, 6]).add_data(&[1, 2, 3]).build();
 
     let (tx, utxo) = make_p2sh_tx(&redeem, correct_sig);
     let populated_tx = PopulatedTransaction::new(&tx, vec![utxo.clone()]);
@@ -1079,11 +1085,11 @@ fn test_zk_groth16_fixed_num_partial() {
 
     let redeem = typed.redeem_script().to_vec();
 
-    // Use the sig builder to provide the missing 2 Bn254Fr elements
+    // Use the sig builder to provide the missing 2 Bn254Fr elements (chronological order)
     let sig = typed
         .into_sig_builder()
-        .add_bn254_fr(Fr::try_from(input1.as_slice()).unwrap())
         .add_bn254_fr(Fr::try_from(input0.as_slice()).unwrap())
+        .add_bn254_fr(Fr::try_from(input1.as_slice()).unwrap())
         .build();
 
     // Verify that the sig is non-empty and contains the redeem script at the end
