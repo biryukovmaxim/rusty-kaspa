@@ -1,6 +1,9 @@
+use std::marker::PhantomData;
+
 use kaspa_txscript::opcodes::codes::*;
 
 use crate::builder::TypedScriptBuilder;
+use crate::markers::sealed;
 use crate::markers::*;
 
 // ===========================================================================
@@ -756,5 +759,595 @@ impl<S, M, A> TypedScriptBuilder<S, M, A> {
     }
     pub fn op_return(self) -> TypedScriptBuilder<S, M, A> {
         self.emit_op(OpReturn)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OpPick (0x79) and OpRoll (0x7a) — runtime-indexed stack access
+// ---------------------------------------------------------------------------
+
+impl<S, M, A> TypedScriptBuilder<Num<S>, M, A> {
+    /// Copies the stack item at runtime `index` (0 = top of remaining stack) to
+    /// the top.  The result is typed as [`Data`] because the element type at an
+    /// arbitrary runtime index cannot be verified statically.
+    ///
+    /// For **compile-time-known** positions prefer the typed equivalents that
+    /// preserve the real element type:
+    /// [`op_dup()`] (index 0), [`op_over()`] (index 1).
+    pub fn op_pick(self) -> TypedScriptBuilder<Data<S>, M, A> {
+        self.emit_op(OpPick)
+    }
+
+    /// Moves the stack item at runtime `index` to the top, removing it from its
+    /// original position.  Typed as [`Data`] for the same reason as [`op_pick`].
+    ///
+    /// **Note:** one element is removed from the interior of `S`, but this
+    /// removal is not reflected in the type — the rest-of-stack type `S` is
+    /// kept unchanged.  This makes `op_roll` *lossy* at the type level.
+    ///
+    /// For **compile-time-known** positions prefer the typed equivalents that
+    /// preserve the real element type:
+    /// [`op_swap()`] (index 1), [`op_rot()`] (index 2).
+    pub fn op_roll(self) -> TypedScriptBuilder<Data<S>, M, A> {
+        self.emit_op(OpRoll)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compile-time indexed pick: PickAt<N>
+// ---------------------------------------------------------------------------
+
+/// Compile-time pick at fixed depth N. Copies the element at depth N to the
+/// top of the stack, preserving the element's real type.
+///
+/// Available for depths 0–5. For larger or runtime indices, use
+/// [`op_pick()`](TypedScriptBuilder::op_pick) which returns [`Data`].
+#[diagnostic::on_unimplemented(
+    message = "cannot pick at compile-time depth {N} from this stack",
+    label = "the stack does not have enough elements for pick({N})",
+    note = "push more elements, use a smaller depth, use the runtime `op_pick()`,\nor use `op_pick_at_missing::<N, T>()` on an empty stack"
+)]
+pub trait PickAt<const N: usize> {
+    type ResultStack;
+}
+
+// Depth 0: copy top (≡ op_dup)
+impl<S: StackEntry, M, A> PickAt<0> for TypedScriptBuilder<S, M, A> {
+    type ResultStack = S::Wrap<S>;
+}
+
+// Depth 1: copy second (≡ op_over)
+impl<S, M, A> PickAt<1> for TypedScriptBuilder<S, M, A>
+where
+    S: StackEntry,
+    S::Rest: StackEntry,
+{
+    type ResultStack = <S::Rest as StackEntry>::Wrap<S>;
+}
+
+// Depth 2
+impl<S, M, A> PickAt<2> for TypedScriptBuilder<S, M, A>
+where
+    S: StackEntry,
+    S::Rest: StackEntry,
+    <S::Rest as StackEntry>::Rest: StackEntry,
+{
+    type ResultStack = <<S::Rest as StackEntry>::Rest as StackEntry>::Wrap<S>;
+}
+
+// Depth 3
+impl<S, M, A> PickAt<3> for TypedScriptBuilder<S, M, A>
+where
+    S: StackEntry,
+    S::Rest: StackEntry,
+    <S::Rest as StackEntry>::Rest: StackEntry,
+    <<S::Rest as StackEntry>::Rest as StackEntry>::Rest: StackEntry,
+{
+    type ResultStack = <<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Wrap<S>;
+}
+
+// Depth 4
+impl<S, M, A> PickAt<4> for TypedScriptBuilder<S, M, A>
+where
+    S: StackEntry,
+    S::Rest: StackEntry,
+    <S::Rest as StackEntry>::Rest: StackEntry,
+    <<S::Rest as StackEntry>::Rest as StackEntry>::Rest: StackEntry,
+    <<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest: StackEntry,
+{
+    type ResultStack = <<<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Wrap<S>;
+}
+
+// Depth 5
+#[allow(clippy::type_complexity)]
+impl<S, M, A> PickAt<5> for TypedScriptBuilder<S, M, A>
+where
+    S: StackEntry,
+    S::Rest: StackEntry,
+    <S::Rest as StackEntry>::Rest: StackEntry,
+    <<S::Rest as StackEntry>::Rest as StackEntry>::Rest: StackEntry,
+    <<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest: StackEntry,
+    <<<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest: StackEntry,
+{
+    type ResultStack =
+        <<<<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Wrap<S>;
+}
+
+// ---------------------------------------------------------------------------
+// Compile-time indexed roll: RollAt<N>
+// ---------------------------------------------------------------------------
+
+/// Compile-time roll at fixed depth N. Moves the element at depth N to the
+/// top of the stack, removing it from its original position and preserving
+/// its real type.
+///
+/// Available for depths 0–5. For larger or runtime indices, use
+/// [`op_roll()`](TypedScriptBuilder::op_roll) which returns [`Data`].
+#[diagnostic::on_unimplemented(
+    message = "cannot roll at compile-time depth {N} from this stack",
+    label = "the stack does not have enough elements for roll({N})",
+    note = "push more elements, use a smaller depth, use the runtime `op_roll()`,\nor use `op_roll_at_missing::<N, T>()` on an empty stack"
+)]
+pub trait RollAt<const N: usize> {
+    type ResultStack;
+}
+
+// Depth 0: identity (no-op)
+impl<S: StackEntry, M, A> RollAt<0> for TypedScriptBuilder<S, M, A> {
+    type ResultStack = S;
+}
+
+// Depth 1: swap (≡ op_swap)
+// [A, B, rest] → [B, A, rest]
+impl<S, M, A> RollAt<1> for TypedScriptBuilder<S, M, A>
+where
+    S: StackEntry,
+    S::Rest: StackEntry,
+{
+    type ResultStack = <S::Rest as StackEntry>::Wrap<S::Wrap<<S::Rest as StackEntry>::Rest>>;
+}
+
+// Depth 2: rot (≡ op_rot)
+// [A, B, C, rest] → [C, A, B, rest]
+#[allow(clippy::type_complexity)]
+impl<S, M, A> RollAt<2> for TypedScriptBuilder<S, M, A>
+where
+    S: StackEntry,
+    S::Rest: StackEntry,
+    <S::Rest as StackEntry>::Rest: StackEntry,
+{
+    type ResultStack = <<S::Rest as StackEntry>::Rest as StackEntry>::Wrap<
+        S::Wrap<<S::Rest as StackEntry>::Wrap<<<S::Rest as StackEntry>::Rest as StackEntry>::Rest>>,
+    >;
+}
+
+// Depth 3
+// [A, B, C, D, rest] → [D, A, B, C, rest]
+#[allow(clippy::type_complexity)]
+impl<S, M, A> RollAt<3> for TypedScriptBuilder<S, M, A>
+where
+    S: StackEntry,
+    S::Rest: StackEntry,
+    <S::Rest as StackEntry>::Rest: StackEntry,
+    <<S::Rest as StackEntry>::Rest as StackEntry>::Rest: StackEntry,
+{
+    type ResultStack = <<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Wrap<
+        S::Wrap<
+            <S::Rest as StackEntry>::Wrap<
+                <<S::Rest as StackEntry>::Rest as StackEntry>::Wrap<
+                    <<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest,
+                >,
+            >,
+        >,
+    >;
+}
+
+// Depth 4
+// [A, B, C, D, E, rest] → [E, A, B, C, D, rest]
+#[allow(clippy::type_complexity)]
+impl<S, M, A> RollAt<4> for TypedScriptBuilder<S, M, A>
+where
+    S: StackEntry,
+    S::Rest: StackEntry,
+    <S::Rest as StackEntry>::Rest: StackEntry,
+    <<S::Rest as StackEntry>::Rest as StackEntry>::Rest: StackEntry,
+    <<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest: StackEntry,
+{
+    type ResultStack = <<<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Wrap<
+        S::Wrap<
+            <S::Rest as StackEntry>::Wrap<
+                <<S::Rest as StackEntry>::Rest as StackEntry>::Wrap<
+                    <<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Wrap<
+                        <<<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest,
+                    >,
+                >,
+            >,
+        >,
+    >;
+}
+
+// Depth 5
+// [A, B, C, D, E, F, rest] → [F, A, B, C, D, E, rest]
+#[allow(clippy::type_complexity)]
+impl<S, M, A> RollAt<5> for TypedScriptBuilder<S, M, A>
+where
+    S: StackEntry,
+    S::Rest: StackEntry,
+    <S::Rest as StackEntry>::Rest: StackEntry,
+    <<S::Rest as StackEntry>::Rest as StackEntry>::Rest: StackEntry,
+    <<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest: StackEntry,
+    <<<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest: StackEntry,
+{
+    type ResultStack = <<<<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Wrap<
+        S::Wrap<
+            <S::Rest as StackEntry>::Wrap<
+                <<S::Rest as StackEntry>::Rest as StackEntry>::Wrap<
+                    <<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Wrap<
+                        <<<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Wrap<
+                            <<<<<S::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest as StackEntry>::Rest,
+                        >,
+                    >,
+                >,
+            >,
+        >,
+    >;
+}
+
+// ---------------------------------------------------------------------------
+// Compile-time pick/roll methods (on-stack)
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::type_complexity)]
+impl<S, M, A> TypedScriptBuilder<S, M, A> {
+    /// Copy the element at compile-time depth N to the top of the stack.
+    /// Preserves the element's real type. Pushes N and emits `OpPick`.
+    ///
+    /// Equivalent to `op_dup` (N=0), `op_over` (N=1), etc., but works
+    /// for arbitrary depths up to 5.
+    ///
+    /// For runtime (dynamic) indices, use [`op_pick()`](Self::op_pick)
+    /// which returns [`Data`].
+    pub fn op_pick_at<const N: usize>(mut self) -> TypedScriptBuilder<<Self as PickAt<N>>::ResultStack, M, A>
+    where
+        Self: PickAt<N>,
+    {
+        self.builder.add_i64(N as i64).expect("script size limit exceeded");
+        self.builder.add_op(OpPick).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Move the element at compile-time depth N to the top of the stack,
+    /// removing it from its original position. Preserves the element's real
+    /// type. Pushes N and emits `OpRoll`.
+    ///
+    /// Equivalent to identity (N=0), `op_swap` (N=1), `op_rot` (N=2), etc.
+    ///
+    /// For runtime (dynamic) indices, use [`op_roll()`](Self::op_roll)
+    /// which returns [`Data`].
+    pub fn op_roll_at<const N: usize>(mut self) -> TypedScriptBuilder<<Self as RollAt<N>>::ResultStack, M, A>
+    where
+        Self: RollAt<N>,
+    {
+        self.builder.add_i64(N as i64).expect("script size limit exceeded");
+        self.builder.add_op(OpRoll).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Beyond-stack pick/roll (empty typed stack — element from sig script)
+// ---------------------------------------------------------------------------
+
+impl<M: AddToMissing, A> TypedScriptBuilder<(), M, A> {
+    /// Pick from beyond the typed stack at compile-time depth N.
+    /// The caller specifies the element type `T` (e.g., `Num<()>`, `Data<()>`).
+    /// One element of type T is added to Missing for the sig builder.
+    ///
+    /// Pushes N and emits `OpPick`.
+    pub fn op_pick_at_missing<const N: usize, T: IntoMissing>(mut self) -> TypedScriptBuilder<T::Wrap<()>, T::AddTo<M>, A> {
+        self.builder.add_i64(N as i64).expect("script size limit exceeded");
+        self.builder.add_op(OpPick).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Roll from beyond the typed stack at compile-time depth N.
+    /// The caller specifies the element type `T` (e.g., `Num<()>`, `Data<()>`).
+    /// One element of type T is added to Missing for the sig builder.
+    ///
+    /// Pushes N and emits `OpRoll`.
+    pub fn op_roll_at_missing<const N: usize, T: IntoMissing>(mut self) -> TypedScriptBuilder<T::Wrap<()>, T::AddTo<M>, A> {
+        self.builder.add_i64(N as i64).expect("script size limit exceeded");
+        self.builder.add_op(OpRoll).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FixedNumInputs — generalized compile-time element counting
+// ---------------------------------------------------------------------------
+
+/// Trait for consuming 0..N elements of type `T` from the stack and
+/// transitioning to `FixedNum<N, T, Rest>`.  Any shortfall is added to
+/// the Missing type for the signature builder.
+#[diagnostic::on_unimplemented(
+    message = "cannot call `add_fixed_num::<{N}, _>()` on this stack",
+    label = "expected 0..N elements of the requested type on the stack",
+    note = "push elements with the appropriate add method, then call .add_fixed_num::<N, T>()\nAny shortfall is added to missing inputs for the signature builder."
+)]
+pub trait FixedNumInputs<const N: usize, T> {
+    type Rest;
+    type NewMissing;
+}
+
+macro_rules! impl_fixed_num {
+    // Entry point: T marker, NotT trait, N literal, N underscore tokens
+    ($T:ident, $NotT:ident, $N:literal; $($tokens:tt)*) => {
+        impl_fixed_num!(@step $T, $NotT, $N; stack=[]; missing=[$($tokens)*]);
+    };
+
+    // All tokens shifted from missing to stack → emit final (K=N) impl
+    (@step $T:ident, $NotT:ident, $N:literal; stack=[$($s:tt)*]; missing=[]) => {
+        impl_fixed_num!(@emit $T, $NotT, $N; [$($s)*]; []);
+    };
+
+    // Emit impl for current K, then shift one token from missing to stack
+    (@step $T:ident, $NotT:ident, $N:literal; stack=[$($s:tt)*]; missing=[_ $($m:tt)*]) => {
+        impl_fixed_num!(@emit $T, $NotT, $N; [$($s)*]; [_ $($m)*]);
+        impl_fixed_num!(@step $T, $NotT, $N; stack=[$($s)* _]; missing=[$($m)*]);
+    };
+
+    // Emit a single impl
+    (@emit $T:ident, $NotT:ident, $N:literal; [$($s:tt)*]; [$($m:tt)*]) => {
+        impl<S: sealed::$NotT, M, A> FixedNumInputs<$N, $T<()>>
+            for TypedScriptBuilder<impl_fixed_num!(@wrap $T, [$($s)*] S), M, A>
+        {
+            type Rest = S;
+            type NewMissing = impl_fixed_num!(@wrap $T, [$($m)*] M);
+        }
+    };
+
+    // Helper: wrap $inner in K layers of $T<...>
+    (@wrap $T:ident, [] $inner:ty) => { $inner };
+    (@wrap $T:ident, [_ $($rest:tt)*] $inner:ty) => {
+        $T<impl_fixed_num!(@wrap $T, [$($rest)*] $inner)>
+    };
+}
+
+// Bn254Fr: N=0..32 (ZK field elements — N=0 is valid for circuits with no public inputs)
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 0;);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 1; _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 2; _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 3; _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 4; _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 5; _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 6; _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 7; _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 8; _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 9; _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 10; _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 11; _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 12; _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 13; _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 14; _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 15; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 16; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 17; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 18; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 19; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 20; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 21; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 22; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 23; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 24; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 25; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 26; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 27; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 28; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 29; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 30; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 31; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(Bn254Fr, NotBn254Fr, 32; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+
+// SchnorrSig: N=1..20 (multisig)
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 1; _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 2; _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 3; _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 4; _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 5; _ _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 6; _ _ _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 7; _ _ _ _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 8; _ _ _ _ _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 9; _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 10; _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 11; _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 12; _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 13; _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 14; _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 15; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 16; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 17; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 18; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 19; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(SchnorrSig, NotSchnorrSig, 20; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+
+// XOnlyPubkey: N=1..20 (multisig)
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 1; _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 2; _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 3; _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 4; _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 5; _ _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 6; _ _ _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 7; _ _ _ _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 8; _ _ _ _ _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 9; _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 10; _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 11; _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 12; _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 13; _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 14; _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 15; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 16; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 17; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 18; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 19; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(XOnlyPubkey, NotXOnlyPubkey, 20; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+
+// EcdsaSig: N=1..20 (multisig)
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 1; _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 2; _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 3; _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 4; _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 5; _ _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 6; _ _ _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 7; _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 8; _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 9; _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 10; _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 11; _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 12; _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 13; _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 14; _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 15; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 16; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 17; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 18; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 19; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaSig, NotEcdsaSig, 20; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+
+// EcdsaPubkey: N=1..20 (multisig)
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 1; _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 2; _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 3; _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 4; _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 5; _ _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 6; _ _ _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 7; _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 8; _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 9; _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 10; _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 11; _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 12; _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 13; _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 14; _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 15; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 16; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 17; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 18; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 19; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+impl_fixed_num!(EcdsaPubkey, NotEcdsaPubkey, 20; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
+
+/// Derived from `kaspa_txscript::MAX_PUB_KEYS_PER_MUTLTISIG`.
+const MAX_MULTISIG_KEYS: i64 = kaspa_txscript::MAX_PUB_KEYS_PER_MUTLTISIG as i64;
+
+// ---------------------------------------------------------------------------
+// FixedNum push methods
+// ---------------------------------------------------------------------------
+
+impl<S, M, A> TypedScriptBuilder<S, M, A> {
+    /// Push the input count N and transition the stack to `FixedNum<N, T, Rest>`.
+    ///
+    /// If fewer than N elements of type `T` are on the stack, the shortfall is
+    /// added to the missing-inputs type for the signature builder.
+    ///
+    /// Requires turbofish for `T`: `.add_fixed_num::<3, SchnorrSig<()>>()`.
+    pub fn add_fixed_num<const N: usize, T>(
+        mut self,
+    ) -> TypedScriptBuilder<FixedNum<N, T, <Self as FixedNumInputs<N, T>>::Rest>, <Self as FixedNumInputs<N, T>>::NewMissing, A>
+    where
+        Self: FixedNumInputs<N, T>,
+    {
+        self.builder.add_i64(N as i64).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+    }
+
+    /// Convenience: push a Schnorr signature count.
+    /// Compile-time error if N exceeds `MAX_PUB_KEYS_PER_MUTLTISIG` (20).
+    pub fn add_fixed_num_schnorr_sigs<const N: usize>(
+        self,
+    ) -> TypedScriptBuilder<
+        FixedNum<N, SchnorrSig<()>, <Self as FixedNumInputs<N, SchnorrSig<()>>>::Rest>,
+        <Self as FixedNumInputs<N, SchnorrSig<()>>>::NewMissing,
+        A,
+    >
+    where
+        Self: FixedNumInputs<N, SchnorrSig<()>>,
+    {
+        const { assert!(N as i64 <= MAX_MULTISIG_KEYS) };
+        self.add_fixed_num::<N, SchnorrSig<()>>()
+    }
+
+    /// Convenience: push an x-only public key count.
+    /// Compile-time error if N exceeds `MAX_PUB_KEYS_PER_MUTLTISIG` (20).
+    pub fn add_fixed_num_xonly_pubkeys<const N: usize>(
+        self,
+    ) -> TypedScriptBuilder<
+        FixedNum<N, XOnlyPubkey<()>, <Self as FixedNumInputs<N, XOnlyPubkey<()>>>::Rest>,
+        <Self as FixedNumInputs<N, XOnlyPubkey<()>>>::NewMissing,
+        A,
+    >
+    where
+        Self: FixedNumInputs<N, XOnlyPubkey<()>>,
+    {
+        const { assert!(N as i64 <= MAX_MULTISIG_KEYS) };
+        self.add_fixed_num::<N, XOnlyPubkey<()>>()
+    }
+
+    /// Convenience: push an ECDSA signature count.
+    /// Compile-time error if N exceeds `MAX_PUB_KEYS_PER_MUTLTISIG` (20).
+    pub fn add_fixed_num_ecdsa_sigs<const N: usize>(
+        self,
+    ) -> TypedScriptBuilder<
+        FixedNum<N, EcdsaSig<()>, <Self as FixedNumInputs<N, EcdsaSig<()>>>::Rest>,
+        <Self as FixedNumInputs<N, EcdsaSig<()>>>::NewMissing,
+        A,
+    >
+    where
+        Self: FixedNumInputs<N, EcdsaSig<()>>,
+    {
+        const { assert!(N as i64 <= MAX_MULTISIG_KEYS) };
+        self.add_fixed_num::<N, EcdsaSig<()>>()
+    }
+
+    /// Convenience: push an ECDSA public key count.
+    /// Compile-time error if N exceeds `MAX_PUB_KEYS_PER_MUTLTISIG` (20).
+    pub fn add_fixed_num_ecdsa_pubkeys<const N: usize>(
+        self,
+    ) -> TypedScriptBuilder<
+        FixedNum<N, EcdsaPubkey<()>, <Self as FixedNumInputs<N, EcdsaPubkey<()>>>::Rest>,
+        <Self as FixedNumInputs<N, EcdsaPubkey<()>>>::NewMissing,
+        A,
+    >
+    where
+        Self: FixedNumInputs<N, EcdsaPubkey<()>>,
+    {
+        const { assert!(N as i64 <= MAX_MULTISIG_KEYS) };
+        self.add_fixed_num::<N, EcdsaPubkey<()>>()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multisig: Schnorr (OpCheckMultiSig 0xae, OpCheckMultiSigVerify 0xaf)
+// ---------------------------------------------------------------------------
+
+impl<const NK: usize, const NS: usize, S, M, A>
+    TypedScriptBuilder<FixedNum<NK, XOnlyPubkey<()>, FixedNum<NS, SchnorrSig<()>, S>>, M, A>
+{
+    pub fn op_check_multi_sig(self) -> TypedScriptBuilder<Bool<S>, M, A> {
+        self.emit_op(OpCheckMultiSig)
+    }
+    pub fn op_check_multi_sig_verify(self) -> TypedScriptBuilder<S, M, A> {
+        self.emit_op(OpCheckMultiSigVerify)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multisig: ECDSA (OpCheckMultiSigECDSA 0xa9)
+// ---------------------------------------------------------------------------
+
+impl<const NK: usize, const NS: usize, S, M, A>
+    TypedScriptBuilder<FixedNum<NK, EcdsaPubkey<()>, FixedNum<NS, EcdsaSig<()>, S>>, M, A>
+{
+    pub fn op_check_multi_sig_ecdsa(self) -> TypedScriptBuilder<Bool<S>, M, A> {
+        self.emit_op(OpCheckMultiSigECDSA)
     }
 }

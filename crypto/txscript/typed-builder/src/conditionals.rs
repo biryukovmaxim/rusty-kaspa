@@ -69,6 +69,43 @@ impl<S, M, A> TypedScriptBuilder<Bool<S>, M, A> {
         result.builder.add_op(OpEndIf).expect("script size limit exceeded");
         result
     }
+
+    /// OpNotIf: the **inverse** of OpIf. The first closure (`false_branch`)
+    /// runs when the Bool is **false**; the second (`true_branch`) when **true**.
+    /// Both branches must produce the same stack, missing, and alt stack types.
+    pub fn op_not_if<S2, M2, A2>(
+        mut self,
+        false_branch: impl FnOnce(TypedScriptBuilder<S, M, A>) -> TypedScriptBuilder<S2, M2, A2>,
+        true_branch: impl FnOnce(TypedScriptBuilder<S, M, A>) -> TypedScriptBuilder<S2, M2, A2>,
+    ) -> TypedScriptBuilder<S2, M2, A2> {
+        self.builder.add_op(OpNotIf).expect("script size limit exceeded");
+
+        let false_builder = TypedScriptBuilder { builder: self.builder, _phantom: PhantomData };
+        let mut result = false_branch(false_builder);
+
+        result.builder.add_op(OpElse).expect("script size limit exceeded");
+
+        let true_builder = TypedScriptBuilder { builder: result.builder, _phantom: PhantomData };
+        let mut result = true_branch(true_builder);
+
+        result.builder.add_op(OpEndIf).expect("script size limit exceeded");
+        result
+    }
+
+    /// OpNotIf with only a false branch (no else). The body runs when the Bool
+    /// is **false** and must be stack-neutral.
+    pub fn op_not_if_only(
+        mut self,
+        body: impl FnOnce(TypedScriptBuilder<S, M, A>) -> TypedScriptBuilder<S, M, A>,
+    ) -> TypedScriptBuilder<S, M, A> {
+        self.builder.add_op(OpNotIf).expect("script size limit exceeded");
+
+        let inner = TypedScriptBuilder { builder: self.builder, _phantom: PhantomData };
+        let mut result = body(inner);
+
+        result.builder.add_op(OpEndIf).expect("script size limit exceeded");
+        result
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +148,46 @@ impl<M: AddToMissing, A> TypedScriptBuilder<(), M, A> {
         body: impl FnOnce(TypedScriptBuilder<(), M, A>) -> TypedScriptBuilder<(), M2, A>,
     ) -> TypedScriptBuilder<(), Or<M2, M>, A> {
         self.builder.add_op(OpIf).expect("script size limit exceeded");
+
+        let inner = TypedScriptBuilder { builder: self.builder, _phantom: PhantomData };
+        let mut result = body(inner);
+
+        result.builder.add_op(OpEndIf).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: result.builder, _phantom: PhantomData }
+    }
+
+    /// OpNotIf where the Bool is provided by the sig script.
+    /// The first closure (`false_branch`) runs when Bool is false;
+    /// the second (`true_branch`) when true.
+    /// Branches may produce different Missing types, yielding `Or<M3, M2>`:
+    /// `Or<true_missing, false_missing>` to match the `Or<T, F>` convention.
+    pub fn op_not_if<S2, M2, M3, A2>(
+        mut self,
+        false_branch: impl FnOnce(TypedScriptBuilder<(), M, A>) -> TypedScriptBuilder<S2, M2, A2>,
+        true_branch: impl FnOnce(TypedScriptBuilder<(), M, A>) -> TypedScriptBuilder<S2, M3, A2>,
+    ) -> TypedScriptBuilder<S2, Or<M3, M2>, A2> {
+        self.builder.add_op(OpNotIf).expect("script size limit exceeded");
+
+        let false_builder = TypedScriptBuilder { builder: self.builder, _phantom: PhantomData };
+        let mut result = false_branch(false_builder);
+
+        result.builder.add_op(OpElse).expect("script size limit exceeded");
+
+        let true_builder: TypedScriptBuilder<(), M, A> = TypedScriptBuilder { builder: result.builder, _phantom: PhantomData };
+        let mut result = true_branch(true_builder);
+
+        result.builder.add_op(OpEndIf).expect("script size limit exceeded");
+        TypedScriptBuilder { builder: result.builder, _phantom: PhantomData }
+    }
+
+    /// OpNotIf with only a false branch where the Bool is from sig script.
+    /// The body runs when Bool is false. Result Missing is `Or<M, M2>`:
+    /// true branch does nothing (`M` unchanged), false branch produces `M2`.
+    pub fn op_not_if_only<M2>(
+        mut self,
+        body: impl FnOnce(TypedScriptBuilder<(), M, A>) -> TypedScriptBuilder<(), M2, A>,
+    ) -> TypedScriptBuilder<(), Or<M, M2>, A> {
+        self.builder.add_op(OpNotIf).expect("script size limit exceeded");
 
         let inner = TypedScriptBuilder { builder: self.builder, _phantom: PhantomData };
         let mut result = body(inner);

@@ -80,6 +80,10 @@ pub struct Or<T, F>(PhantomData<(T, F)>);
 pub(crate) mod sealed {
     pub trait Sealed {}
     pub trait NotBn254Fr {}
+    pub trait NotSchnorrSig {}
+    pub trait NotXOnlyPubkey {}
+    pub trait NotEcdsaSig {}
+    pub trait NotEcdsaPubkey {}
 }
 
 /// Trait implemented by all type-level stack markers.
@@ -125,35 +129,53 @@ impl<const N: usize, T, S> StackEntry for FixedNum<N, T, S> {
     type Rest = S;
     type Wrap<U> = FixedNum<N, T, U>;
 }
-impl<const N: usize, T, S> sealed::NotBn254Fr for FixedNum<N, T, S> {}
-
-macro_rules! impl_not_bn254fr {
-    ($($Marker:ident),*) => {$(
-        impl<S> sealed::NotBn254Fr for $Marker<S> {}
-    )*};
+/// Generates `Not*` trait impls for all marker types except the excluded one.
+/// The excluded type is the one the trait is "not": e.g. `NotBn254Fr` excludes `Bn254Fr`.
+macro_rules! impl_not_marker {
+    ($not_trait:ident excluding $excluded:ident; $($Other:ident),*) => {
+        impl sealed::$not_trait for () {}
+        impl<const N: usize, T, S> sealed::$not_trait for FixedNum<N, T, S> {}
+        $( impl<S> sealed::$not_trait for $Other<S> {} )*
+    };
 }
-impl_not_bn254fr!(
-    Num,
-    Bool,
-    Data,
-    Hash,
-    Groth16Tag,
-    R0SuccinctTag,
-    R0SuccinctSeal,
-    R0SuccinctClaim,
-    R0SuccinctHashFn,
-    R0SuccinctControlIndex,
-    R0SuccinctControlDigests,
-    R0SuccinctJournalDigest,
-    R0SuccinctImageId,
-    G16Vk,
-    G16Proof,
-    SchnorrSig,
-    XOnlyPubkey,
-    EcdsaSig,
-    EcdsaPubkey
+
+// All simple marker types (excluding those that get their own Not* trait).
+// Each invocation lists every marker EXCEPT the excluded one.
+impl_not_marker!(NotBn254Fr excluding Bn254Fr;
+    Num, Bool, Data, Hash,
+    Groth16Tag, R0SuccinctTag, R0SuccinctSeal, R0SuccinctClaim,
+    R0SuccinctHashFn, R0SuccinctControlIndex, R0SuccinctControlDigests,
+    R0SuccinctJournalDigest, R0SuccinctImageId, G16Vk, G16Proof,
+    SchnorrSig, XOnlyPubkey, EcdsaSig, EcdsaPubkey
 );
-impl sealed::NotBn254Fr for () {}
+impl_not_marker!(NotSchnorrSig excluding SchnorrSig;
+    Num, Bool, Data, Hash, Bn254Fr,
+    Groth16Tag, R0SuccinctTag, R0SuccinctSeal, R0SuccinctClaim,
+    R0SuccinctHashFn, R0SuccinctControlIndex, R0SuccinctControlDigests,
+    R0SuccinctJournalDigest, R0SuccinctImageId, G16Vk, G16Proof,
+    XOnlyPubkey, EcdsaSig, EcdsaPubkey
+);
+impl_not_marker!(NotXOnlyPubkey excluding XOnlyPubkey;
+    Num, Bool, Data, Hash, Bn254Fr,
+    Groth16Tag, R0SuccinctTag, R0SuccinctSeal, R0SuccinctClaim,
+    R0SuccinctHashFn, R0SuccinctControlIndex, R0SuccinctControlDigests,
+    R0SuccinctJournalDigest, R0SuccinctImageId, G16Vk, G16Proof,
+    SchnorrSig, EcdsaSig, EcdsaPubkey
+);
+impl_not_marker!(NotEcdsaSig excluding EcdsaSig;
+    Num, Bool, Data, Hash, Bn254Fr,
+    Groth16Tag, R0SuccinctTag, R0SuccinctSeal, R0SuccinctClaim,
+    R0SuccinctHashFn, R0SuccinctControlIndex, R0SuccinctControlDigests,
+    R0SuccinctJournalDigest, R0SuccinctImageId, G16Vk, G16Proof,
+    SchnorrSig, XOnlyPubkey, EcdsaPubkey
+);
+impl_not_marker!(NotEcdsaPubkey excluding EcdsaPubkey;
+    Num, Bool, Data, Hash, Bn254Fr,
+    Groth16Tag, R0SuccinctTag, R0SuccinctSeal, R0SuccinctClaim,
+    R0SuccinctHashFn, R0SuccinctControlIndex, R0SuccinctControlDigests,
+    R0SuccinctJournalDigest, R0SuccinctImageId, G16Vk, G16Proof,
+    SchnorrSig, XOnlyPubkey, EcdsaSig
+);
 
 // ---------------------------------------------------------------------------
 // AddToMissing trait — distributes new Missing layers into Or branches
@@ -283,6 +305,41 @@ impl<const N: usize, T, S> AddToMissing for FixedNum<N, T, S> {
     type WithEcdsaSig = EcdsaSig<FixedNum<N, T, S>>;
     type WithEcdsaPubkey = EcdsaPubkey<FixedNum<N, T, S>>;
 }
+
+// ---------------------------------------------------------------------------
+// IntoMissing trait — maps a marker type to the corresponding AddToMissing
+// associated type. Used by beyond-stack `op_pick_at_missing` / `op_roll_at_missing`.
+// ---------------------------------------------------------------------------
+
+/// Trait for marker types that can be added to the Missing accumulator.
+///
+/// Used by [`op_pick_at_missing`](crate::TypedScriptBuilder::op_pick_at_missing)
+/// and [`op_roll_at_missing`](crate::TypedScriptBuilder::op_roll_at_missing)
+/// to add the expected element type when picking/rolling from beyond the
+/// typed stack.
+pub trait IntoMissing: StackEntry {
+    type AddTo<M: AddToMissing>;
+}
+
+macro_rules! impl_into_missing {
+    ($($Marker:ident => $with:ident),* $(,)?) => {$(
+        impl<S> IntoMissing for $Marker<S> {
+            type AddTo<M: AddToMissing> = M::$with;
+        }
+    )*};
+}
+
+impl_into_missing!(
+    Num => WithNum,
+    Bool => WithBool,
+    Data => WithData,
+    Hash => WithHash,
+    Bn254Fr => WithBn254Fr,
+    SchnorrSig => WithSchnorrSig,
+    XOnlyPubkey => WithXOnlyPubkey,
+    EcdsaSig => WithEcdsaSig,
+    EcdsaPubkey => WithEcdsaPubkey,
+);
 
 impl<T: AddToMissing, F: AddToMissing> AddToMissing for Or<T, F> {
     type WithNum = Or<T::WithNum, F::WithNum>;

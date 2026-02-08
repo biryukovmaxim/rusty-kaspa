@@ -11,7 +11,8 @@ mod tests;
 
 pub use builder::*;
 pub use markers::*;
-pub use zk::{G16FixedNumInputs, G16Verify, R0SuccinctVerify};
+pub use ops::{FixedNumInputs, PickAt, RollAt};
+pub use zk::{G16Verify, R0SuccinctVerify};
 
 // Re-export dependency types used in the public API.
 pub use kaspa_consensus_core::hashing::sighash_type::SigHashType;

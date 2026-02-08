@@ -2139,4 +2139,612 @@ fn test_p2sh_op_2_rot() {
     vm.execute().expect("op_2_rot should succeed at runtime");
 }
 
+// -----------------------------------------------------------------------
+// OpNotIf tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_not_if_dynamic_bool() {
+    // OpNotIf: false_branch runs when Bool is false, true_branch when true.
+    // Script: push(0) op_not_if { push(1) } op_else { push(2) } op_endif push(1) op_num_equal
+    // Since 0 = false, the false_branch runs → pushes 1.
+    let typed = TypedScriptBuilder::new().op_false().op_not_if(|b| b.add_i64(1), |b| b.add_i64(2)).add_i64(1).op_num_equal();
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_op(OpFalse)
+        .unwrap()
+        .add_op(OpNotIf)
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpElse)
+        .unwrap()
+        .add_i64(2)
+        .unwrap()
+        .add_op(OpEndIf)
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpNumEqual)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_not_if_only_dynamic() {
+    // OpNotIf with only a false branch. Body runs when Bool is false.
+    let typed = TypedScriptBuilder::new().op_false().op_not_if_only(|b| b.add_i64(1).op_drop()).op_true();
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_op(OpFalse)
+        .unwrap()
+        .add_op(OpNotIf)
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpEndIf)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_not_if_missing_bool() {
+    // Missing Bool variant: Bool comes from sig script.
+    let typed = TypedScriptBuilder::new().op_not_if(
+        |b| b.op_equal(),                         // false branch: compare two data
+        |b| b.op_add().add_i64(8).op_num_equal(), // true branch: add two nums
+    );
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_op(OpNotIf)
+        .unwrap()
+        .add_op(OpEqual)
+        .unwrap()
+        .add_op(OpElse)
+        .unwrap()
+        .add_op(OpAdd)
+        .unwrap()
+        .add_i64(8)
+        .unwrap()
+        .add_op(OpNumEqual)
+        .unwrap()
+        .add_op(OpEndIf)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+
+    // choose_true → true branch needs 2 Nums
+    let sig_true = typed.into_sig_builder().choose_true().add_i64(3).add_i64(5).build();
+    assert!(!sig_true.is_empty());
+}
+
+#[test]
+fn test_not_if_only_missing() {
+    // Missing Bool, only false branch.
+    let typed = TypedScriptBuilder::new().op_not_if_only(|b| b.op_equal().op_verify()).op_true();
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_op(OpNotIf)
+        .unwrap()
+        .add_op(OpEqual)
+        .unwrap()
+        .add_op(OpVerify)
+        .unwrap()
+        .add_op(OpEndIf)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+
+    // choose_true → true branch does nothing, Missing = ()
+    let sig_true = typed.into_sig_builder().choose_true().build();
+    assert!(!sig_true.is_empty());
+}
+
+#[test]
+fn test_p2sh_not_if_dynamic() {
+    // P2SH execution: OpNotIf with dynamic Bool
+    // push(true) op_not_if { push(0) } op_else { push(1) } push(1) op_num_equal
+    // Bool is true → else branch runs → pushes 1
+    let typed = TypedScriptBuilder::new().op_true().op_not_if(|b| b.add_i64(0), |b| b.add_i64(1)).add_i64(1).op_num_equal();
+
+    let redeem = typed.redeem_script().to_vec();
+    let sig = typed.into_sig_builder().build();
+
+    let sig_cache = Cache::new(10_000);
+    let reused_values = SigHashReusedValuesUnsync::new();
+
+    let (tx, utxo) = make_p2sh_tx(&redeem, sig);
+    let populated_tx = PopulatedTransaction::new(&tx, vec![utxo.clone()]);
+
+    let mut vm = TxScriptEngine::from_transaction_input(
+        &populated_tx,
+        &populated_tx.tx.inputs[0],
+        0,
+        &utxo,
+        EngineCtx::new(&sig_cache).with_reused(&reused_values),
+        Default::default(),
+    );
+    vm.execute().expect("op_not_if with true Bool should run else branch");
+}
+
+// -----------------------------------------------------------------------
+// OpPick and OpRoll tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_op_pick_bytes() {
+    // push(10) push(20) push(1) op_pick → copies item at index 1 (=10) to top as Data
+    // Stack after pick: [Data, Num(20), Num(10)]
+    // We verify bytecode matches since the result is typed as Data.
+    let typed = TypedScriptBuilder::new()
+        .add_i64(10)
+        .add_i64(20)
+        .add_i64(1)
+        .op_pick()
+        .op_drop() // drop the picked Data
+        .op_drop() // drop Num(20)
+        .op_drop() // drop Num(10)
+        .op_true();
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_i64(10)
+        .unwrap()
+        .add_i64(20)
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpPick)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_op_roll_bytes() {
+    // push(10) push(20) push(1) op_roll → moves item at index 1 (=10) to top as Data
+    // Stack after roll: [Data, Num(20), Num(10)] (note: lossy — the removal from S is not tracked)
+    // We just verify bytecode matches.
+    let typed = TypedScriptBuilder::new()
+        .add_i64(10)
+        .add_i64(20)
+        .add_i64(1)
+        .op_roll()
+        .op_drop() // drop the rolled Data
+        .op_drop() // drop Num(20)
+        .op_drop() // drop Num(10)
+        .op_true();
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_i64(10)
+        .unwrap()
+        .add_i64(20)
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpRoll)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+// -----------------------------------------------------------------------
+// Multisig tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_schnorr_multisig_bytes() {
+    // Build a 2-of-3 Schnorr multisig script using FixedNum
+    let typed = TypedScriptBuilder::new()
+        .add_schnorr_sig(
+            &secp256k1::schnorr::Signature::from_slice(&[0xAA; 64]).unwrap(),
+            kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL,
+        )
+        .add_schnorr_sig(
+            &secp256k1::schnorr::Signature::from_slice(&[0xBB; 64]).unwrap(),
+            kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL,
+        )
+        .add_fixed_num_schnorr_sigs::<2>()
+        .add_xonly_pubkey(&[0x11; 32])
+        .add_xonly_pubkey(&[0x22; 32])
+        .add_xonly_pubkey(&[0x33; 32])
+        .add_fixed_num_xonly_pubkeys::<3>()
+        .op_check_multi_sig();
+
+    let mut manual = ScriptBuilder::new();
+    // sigs
+    let mut sig1 = [0u8; 65];
+    sig1[..64].copy_from_slice(&[0xAA; 64]);
+    sig1[64] = kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL.to_u8();
+    let mut sig2 = [0u8; 65];
+    sig2[..64].copy_from_slice(&[0xBB; 64]);
+    sig2[64] = kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL.to_u8();
+    manual.add_data(&sig1).unwrap();
+    manual.add_data(&sig2).unwrap();
+    manual.add_i64(2).unwrap();
+    // pubkeys
+    manual.add_data(&[0x11; 32]).unwrap();
+    manual.add_data(&[0x22; 32]).unwrap();
+    manual.add_data(&[0x33; 32]).unwrap();
+    manual.add_i64(3).unwrap();
+    manual.add_op(OpCheckMultiSig).unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_ecdsa_multisig_bytes() {
+    // Build a 1-of-2 ECDSA multisig script using FixedNum
+    let ecdsa_sig = secp256k1::ecdsa::Signature::from_compact(&[0xCC; 64]).unwrap();
+    let typed = TypedScriptBuilder::new()
+        .add_ecdsa_sig(&ecdsa_sig, kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL)
+        .add_fixed_num_ecdsa_sigs::<1>()
+        .add_ecdsa_pubkey(&[0x11; 33])
+        .add_ecdsa_pubkey(&[0x22; 33])
+        .add_fixed_num_ecdsa_pubkeys::<2>()
+        .op_check_multi_sig_ecdsa();
+
+    let mut manual = ScriptBuilder::new();
+    let mut sig_bytes = [0u8; 65];
+    sig_bytes[..64].copy_from_slice(&ecdsa_sig.serialize_compact());
+    sig_bytes[64] = kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL.to_u8();
+    manual.add_data(&sig_bytes).unwrap();
+    manual.add_i64(1).unwrap();
+    manual.add_data(&[0x11; 33]).unwrap();
+    manual.add_data(&[0x22; 33]).unwrap();
+    manual.add_i64(2).unwrap();
+    manual.add_op(OpCheckMultiSigECDSA).unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_schnorr_multisig_verify_bytes() {
+    // OpCheckMultiSigVerify variant
+    let typed = TypedScriptBuilder::new()
+        .add_schnorr_sig(
+            &secp256k1::schnorr::Signature::from_slice(&[0xAA; 64]).unwrap(),
+            kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL,
+        )
+        .add_fixed_num_schnorr_sigs::<1>()
+        .add_xonly_pubkey(&[0x11; 32])
+        .add_fixed_num_xonly_pubkeys::<1>()
+        .op_check_multi_sig_verify()
+        .op_true();
+
+    let mut manual = ScriptBuilder::new();
+    let mut sig1 = [0u8; 65];
+    sig1[..64].copy_from_slice(&[0xAA; 64]);
+    sig1[64] = kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL.to_u8();
+    manual.add_data(&sig1).unwrap();
+    manual.add_i64(1).unwrap();
+    manual.add_data(&[0x11; 32]).unwrap();
+    manual.add_i64(1).unwrap();
+    manual.add_op(OpCheckMultiSigVerify).unwrap();
+    manual.add_op(OpTrue).unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+// -----------------------------------------------------------------------
+// Generalized FixedNum tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_generalized_fixed_num_schnorr_sig() {
+    // Push 2 SchnorrSigs, use add_fixed_num_schnorr_sigs::<2>()
+    // After add_fixed_num, the stack is FixedNum<2, SchnorrSig<()>, ()>
+    // op_drop removes the FixedNum (the count value on the runtime stack)
+    // leaving () underneath. Then push true.
+    let typed = TypedScriptBuilder::new()
+        .add_schnorr_sig(&secp256k1::schnorr::Signature::from_slice(&[0xAA; 64]).unwrap(), kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL)
+        .add_schnorr_sig(&secp256k1::schnorr::Signature::from_slice(&[0xBB; 64]).unwrap(), kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL)
+        .add_fixed_num_schnorr_sigs::<2>()
+        .op_drop() // drop FixedNum (the count on the runtime stack)
+        .op_true();
+
+    let mut manual = ScriptBuilder::new();
+    let mut sig1 = [0u8; 65];
+    sig1[..64].copy_from_slice(&[0xAA; 64]);
+    sig1[64] = kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL.to_u8();
+    let mut sig2 = [0u8; 65];
+    sig2[..64].copy_from_slice(&[0xBB; 64]);
+    sig2[64] = kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL.to_u8();
+    manual.add_data(&sig1).unwrap();
+    manual.add_data(&sig2).unwrap();
+    manual.add_i64(2).unwrap();
+    manual.add_op(OpDrop).unwrap();
+    manual.add_op(OpTrue).unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_fixed_num_bn254fr_zero() {
+    // N=0 is valid for Bn254Fr (circuits with no public inputs)
+    let fr = Fr::try_from([0u8; 32].as_slice()).unwrap();
+    let typed = TypedScriptBuilder::new().add_g16_fixed_num::<0>().op_drop().op_true();
+
+    let mut manual = ScriptBuilder::new();
+    manual.add_i64(0).unwrap().add_op(OpDrop).unwrap().add_op(OpTrue).unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+    let _ = fr; // suppress unused
+}
+
+// ---------------------------------------------------------------------------
+// Compile-time indexed pick/roll (PickAt / RollAt)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pick_at_depth_0_is_dup() {
+    // pick_at::<0> copies the top element — equivalent to op_dup.
+    // Both copies are Num, so op_num_equal type-checks.
+    let typed = TypedScriptBuilder::new().add_i64(42).op_pick_at::<0>().op_num_equal(); // Num<Num<()>> → Bool<()>
+
+    let mut manual = ScriptBuilder::new();
+    manual.add_i64(42).unwrap().add_i64(0).unwrap().add_op(OpPick).unwrap().add_op(OpNumEqual).unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_pick_at_depth_1_is_over() {
+    // pick_at::<1> copies the second element — equivalent to op_over.
+    // Stack: [Data, Num] → pick(1) → [Num, Data, Num]
+    let typed = TypedScriptBuilder::new()
+        .add_i64(10)
+        .add_data(&[0xAB])
+        .op_pick_at::<1>()
+        // Stack: Num<Data<Num<()>>>
+        .op_1_add() // proves top is Num
+        .op_drop()
+        .op_drop()
+        .op_drop()
+        .op_true();
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_i64(10)
+        .unwrap()
+        .add_data(&[0xAB])
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpPick)
+        .unwrap()
+        .add_op(Op1Add)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_pick_at_preserves_type_depth_2() {
+    // Stack: [Num(10), Bool, Num(20)]
+    // pick_at::<2> copies Num(20) from depth 2 to top.
+    // Result: [Num, Num(10), Bool, Num(20)] — top two are Num so op_add works.
+    let typed = TypedScriptBuilder::new()
+        .add_i64(20)
+        .op_true()
+        .add_i64(10)
+        .op_pick_at::<2>()
+        // Stack: Num<Num<Bool<Num<()>>>>
+        .op_add() // proves top two are Num
+        .op_drop()
+        .op_drop()
+        .op_drop()
+        .op_true();
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_i64(20)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap()
+        .add_i64(10)
+        .unwrap()
+        .add_i64(2)
+        .unwrap()
+        .add_op(OpPick)
+        .unwrap()
+        .add_op(OpAdd)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_roll_at_depth_0_identity() {
+    // roll_at::<0> is a no-op (identity): moves top to top.
+    let typed = TypedScriptBuilder::new().add_i64(42).op_roll_at::<0>().add_i64(42).op_num_equal();
+
+    let mut manual = ScriptBuilder::new();
+    manual.add_i64(42).unwrap().add_i64(0).unwrap().add_op(OpRoll).unwrap().add_i64(42).unwrap().add_op(OpNumEqual).unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_roll_at_depth_1_is_swap() {
+    // roll_at::<1> swaps top two elements.
+    // Stack: [Num(10), Data] → roll(1) → [Data, Num(10)]
+    let typed = TypedScriptBuilder::new()
+        .add_data(&[1, 2, 3])
+        .add_i64(10)
+        .op_roll_at::<1>()
+        // Stack: Data<Num<()>> — Data is now on top
+        .op_sha256() // proves top is Data (→ Hash)
+        .op_drop()
+        .op_drop()
+        .op_true();
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_data(&[1, 2, 3])
+        .unwrap()
+        .add_i64(10)
+        .unwrap()
+        .add_i64(1)
+        .unwrap()
+        .add_op(OpRoll)
+        .unwrap()
+        .add_op(OpSHA256)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_roll_at_depth_2_is_rot() {
+    // roll_at::<2> rotates: [A, B, C, rest] → [C, A, B, rest]
+    // Stack: [Hash, Num(5), Data] → roll(2) → [Data, Hash, Num(5)]
+    let typed = TypedScriptBuilder::new()
+        .add_data(&[0xFF])
+        .add_i64(5)
+        .add_hash(&kaspa_hashes::Hash::from_bytes([0u8; 32]))
+        .op_roll_at::<2>()
+        // Stack: Data<Hash<Num<()>>> — Data moved to top
+        .op_sha256() // proves top is Data (→ Hash)
+        .op_drop()
+        .op_drop()
+        .op_drop()
+        .op_true();
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_data(&[0xFF])
+        .unwrap()
+        .add_i64(5)
+        .unwrap()
+        .add_data(&[0u8; 32])
+        .unwrap()
+        .add_i64(2)
+        .unwrap()
+        .add_op(OpRoll)
+        .unwrap()
+        .add_op(OpSHA256)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpDrop)
+        .unwrap()
+        .add_op(OpTrue)
+        .unwrap();
+
+    assert_eq!(typed.redeem_script(), manual.script());
+}
+
+#[test]
+fn test_pick_at_missing_on_empty_stack() {
+    // Beyond-stack: pick from sig-script-provided area.
+    // Empty stack, op_pick_at_missing adds Num to Missing.
+    let typed = TypedScriptBuilder::new()
+        .op_pick_at_missing::<0, Num<()>>()
+        // Stack: Num<()>, Missing: Num<()>
+        .add_i64(5)
+        // Stack: Num<Num<()>>, Missing: Num<()>
+        .op_add()
+        // Stack: Num<()>, Missing: Num<()>
+        .add_i64(15)
+        .op_num_equal();
+
+    let sig = typed.into_sig_builder().add_i64(10).build();
+    assert!(!sig.is_empty());
+
+    // Verify bytecodes
+    let redeem = TypedScriptBuilder::new()
+        .op_pick_at_missing::<0, Num<()>>()
+        .add_i64(5)
+        .op_add()
+        .add_i64(15)
+        .op_num_equal()
+        .redeem_script()
+        .to_vec();
+
+    let mut manual = ScriptBuilder::new();
+    manual
+        .add_i64(0)
+        .unwrap()
+        .add_op(OpPick)
+        .unwrap()
+        .add_i64(5)
+        .unwrap()
+        .add_op(OpAdd)
+        .unwrap()
+        .add_i64(15)
+        .unwrap()
+        .add_op(OpNumEqual)
+        .unwrap();
+
+    assert_eq!(redeem, manual.script());
+}
+
+#[test]
+fn test_roll_at_missing_on_empty_stack() {
+    // Beyond-stack: roll from sig-script-provided area with Data type.
+    let typed = TypedScriptBuilder::new()
+        .op_roll_at_missing::<0, Data<()>>()
+        // Stack: Data<()>, Missing: Data<()>
+        .op_sha256()
+        .op_drop()
+        .op_true();
+
+    let sig = typed.into_sig_builder().add_data(&[1, 2, 3]).build();
+    assert!(!sig.is_empty());
+}
+
 // Compile-fail doc tests are on the public methods in conditionals.rs and sig_builder.rs.

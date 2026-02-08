@@ -1,10 +1,8 @@
-use std::marker::PhantomData;
-
 use kaspa_txscript::opcodes::codes::*;
 
 use crate::builder::TypedScriptBuilder;
-use crate::markers::sealed;
 use crate::markers::*;
+use crate::ops::FixedNumInputs;
 
 // ---------------------------------------------------------------------------
 // ZK Precompile: RISC0 succinct verify (trait-based)
@@ -42,87 +40,6 @@ impl<S, M, A> R0SuccinctVerify
         self.emit_op(OpZkPrecompile)
     }
 }
-
-// ---------------------------------------------------------------------------
-// ZK Precompile: FixedNum input counting (trait + macro)
-// ---------------------------------------------------------------------------
-
-#[diagnostic::on_unimplemented(
-    message = "cannot call `add_g16_fixed_num::<{N}>()` on this stack",
-    label = "expected 0..N Bn254Fr elements on the stack",
-    note = "push Bn254Fr elements with .add_bn254_fr(), then call .add_g16_fixed_num::<N>()\nAny shortfall is added to missing inputs for the signature builder."
-)]
-pub trait G16FixedNumInputs<const N: usize> {
-    type Rest;
-    type NewMissing;
-}
-
-macro_rules! impl_g16_fixed_num {
-    // Entry point: N as literal, N underscore tokens for counting
-    ($N:literal; $($tokens:tt)*) => {
-        impl_g16_fixed_num!(@step $N; stack=[]; missing=[$($tokens)*]);
-    };
-
-    // All tokens shifted from missing to stack → emit final (K=N) impl
-    (@step $N:literal; stack=[$($s:tt)*]; missing=[]) => {
-        impl_g16_fixed_num!(@emit $N; [$($s)*]; []);
-    };
-
-    // Emit impl for current K, then shift one token from missing to stack
-    (@step $N:literal; stack=[$($s:tt)*]; missing=[_ $($m:tt)*]) => {
-        impl_g16_fixed_num!(@emit $N; [$($s)*]; [_ $($m)*]);
-        impl_g16_fixed_num!(@step $N; stack=[$($s)* _]; missing=[$($m)*]);
-    };
-
-    // Emit a single impl
-    (@emit $N:literal; [$($s:tt)*]; [$($m:tt)*]) => {
-        impl<S: sealed::NotBn254Fr, M> G16FixedNumInputs<$N>
-            for TypedScriptBuilder<impl_g16_fixed_num!(@wrap [$($s)*] S), M>
-        {
-            type Rest = S;
-            type NewMissing = impl_g16_fixed_num!(@wrap [$($m)*] M);
-        }
-    };
-
-    // Helper: wrap $inner in K layers of Bn254Fr<...>
-    (@wrap [] $inner:ty) => { $inner };
-    (@wrap [_ $($rest:tt)*] $inner:ty) => {
-        Bn254Fr<impl_g16_fixed_num!(@wrap [$($rest)*] $inner)>
-    };
-}
-
-impl_g16_fixed_num!(1; _);
-impl_g16_fixed_num!(2; _ _);
-impl_g16_fixed_num!(3; _ _ _);
-impl_g16_fixed_num!(4; _ _ _ _);
-impl_g16_fixed_num!(5; _ _ _ _ _);
-impl_g16_fixed_num!(6; _ _ _ _ _ _);
-impl_g16_fixed_num!(7; _ _ _ _ _ _ _);
-impl_g16_fixed_num!(8; _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(9; _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(10; _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(11; _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(12; _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(13; _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(14; _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(15; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(16; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(17; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(18; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(19; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(20; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(21; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(22; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(23; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(24; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(25; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(26; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(27; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(28; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(29; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(30; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(31; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
-impl_g16_fixed_num!(32; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _);
 
 // ---------------------------------------------------------------------------
 // ZK Precompile: Groth16 verify (trait-based)
@@ -181,29 +98,22 @@ impl<S, M, A> TypedScriptBuilder<S, M, A> {
         R0SuccinctVerify::risc0_succinct_verify(self)
     }
 
-    /// Pushes the input count N and transitions the stack to `FixedNum<N, Bn254Fr, Rest>`.
+    /// Backward-compatible alias for [`add_fixed_num::<N, Bn254Fr<()>>()`].
     ///
+    /// Pushes the input count N and transitions the stack to `FixedNum<N, Bn254Fr, Rest>`.
     /// If fewer than N `Bn254Fr` elements are on the stack, the shortfall is added
     /// to the missing-inputs type for the signature builder.
-    ///
-    /// ```compile_fail
-    /// use kaspa_txscript_typed_builder::TypedScriptBuilder;
-    /// // N=0 has no impls (starts at 1) — should not compile
-    /// let _ = TypedScriptBuilder::new()
-    ///     .add_g16_fixed_num::<0>();
-    /// ```
     pub fn add_g16_fixed_num<const N: usize>(
-        mut self,
+        self,
     ) -> TypedScriptBuilder<
-        FixedNum<N, Bn254Fr<()>, <Self as G16FixedNumInputs<N>>::Rest>,
-        <Self as G16FixedNumInputs<N>>::NewMissing,
+        FixedNum<N, Bn254Fr<()>, <Self as FixedNumInputs<N, Bn254Fr<()>>>::Rest>,
+        <Self as FixedNumInputs<N, Bn254Fr<()>>>::NewMissing,
         A,
     >
     where
-        Self: G16FixedNumInputs<N>,
+        Self: FixedNumInputs<N, Bn254Fr<()>>,
     {
-        self.builder.add_i64(N as i64).expect("script size limit exceeded");
-        TypedScriptBuilder { builder: self.builder, _phantom: PhantomData }
+        self.add_fixed_num::<N, Bn254Fr<()>>()
     }
 
     /// Verifies a Groth16 ZK proof.
