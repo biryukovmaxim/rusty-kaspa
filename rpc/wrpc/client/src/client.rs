@@ -691,6 +691,10 @@ impl KaspaRpcClient {
     pub fn trigger_abort(&self) -> Result<()> {
         Ok(self.inner.rpc_client.trigger_abort()?)
     }
+
+    pub fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.inner)
+    }
 }
 
 #[async_trait]

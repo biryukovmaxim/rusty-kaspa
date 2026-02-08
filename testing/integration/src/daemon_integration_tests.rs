@@ -9,7 +9,7 @@ use kaspa_alloc::init_allocator_with_default_settings;
 use kaspa_consensus::params::SIMNET_PARAMS;
 use kaspa_consensus_core::header::Header;
 use kaspa_consensusmanager::ConsensusManager;
-use kaspa_core::{task::runtime::AsyncRuntime, trace};
+use kaspa_core::{info, task::runtime::AsyncRuntime, trace, warn};
 use kaspa_grpc_client::GrpcClient;
 use kaspa_notify::scope::{BlockAddedScope, UtxosChangedScope, VirtualDaaScoreChangedScope};
 use kaspa_rpc_core::{Notification, RpcTransactionId, api::rpc::RpcApi};
@@ -400,21 +400,26 @@ async fn daemon_wrpc_client_drop_test() {
     // Wait for wRPC server to be ready
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Create and connect a wRPC client
-    let wrpc_client = kaspad.new_wrpc_client();
-    wrpc_client.connect(None).await.expect("wRPC client should connect");
+    let cloned = {
+        // Create and connect a wRPC client
+        let wrpc_client = kaspad.new_wrpc_client();
+        wrpc_client.connect(None).await.expect("wRPC client should connect");
 
-    // Verify the client is connected by making an RPC call
-    let server_info = wrpc_client.get_server_info().await.expect("Should get server info");
-    assert!(!server_info.server_version.is_empty(), "Server version should not be empty");
-
-    // Drop the client WITHOUT calling disconnect() - this tests the Drop implementation
-    // The Drop impl should log a warning and initiate cleanup
-    drop(wrpc_client);
+        // Verify the client is connected by making an RPC call
+        let server_info = wrpc_client.get_server_info().await.expect("Should get server info");
+        assert!(!server_info.server_version.is_empty(), "Server version should not be empty");
+        let cloned = wrpc_client.clone();
+        warn!("wRPC client ref count: {}", wrpc_client.strong_count());
+        // Drop the client WITHOUT calling disconnect() - this tests the Drop implementation
+        // The Drop impl should log a warning and initiate cleanup
+        drop(wrpc_client);
+        cloned
+    };
 
     // Give the fire-and-forget cleanup task time to run
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    warn!("wRPC client ref count: {}", cloned.strong_count());
+    assert_eq!(cloned.strong_count(), 1);
     // Clean up
     kaspad.shutdown();
 }
