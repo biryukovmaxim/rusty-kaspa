@@ -9,7 +9,7 @@ use kaspa_alloc::init_allocator_with_default_settings;
 use kaspa_consensus::params::SIMNET_PARAMS;
 use kaspa_consensus_core::header::Header;
 use kaspa_consensusmanager::ConsensusManager;
-use kaspa_core::{info, task::runtime::AsyncRuntime, trace, warn};
+use kaspa_core::{task::runtime::AsyncRuntime, trace, warn};
 use kaspa_grpc_client::GrpcClient;
 use kaspa_notify::scope::{BlockAddedScope, UtxosChangedScope, VirtualDaaScoreChangedScope};
 use kaspa_rpc_core::{Notification, RpcTransactionId, api::rpc::RpcApi};
