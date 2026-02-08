@@ -1079,6 +1079,13 @@ pub trait FixedNumInputs<const N: usize, T> {
     type NewMissing;
 }
 
+/// Type alias for the return type of `add_fixed_num` and its convenience wrappers.
+pub type FixedNumResult<const N: usize, T, S, M, A> = TypedScriptBuilder<
+    FixedNum<N, T, <TypedScriptBuilder<S, M, A> as FixedNumInputs<N, T>>::Rest>,
+    <TypedScriptBuilder<S, M, A> as FixedNumInputs<N, T>>::NewMissing,
+    A,
+>;
+
 macro_rules! impl_fixed_num {
     // Entry point: T marker, NotT trait, N literal, N underscore tokens
     ($T:ident, $NotT:ident, $N:literal; $($tokens:tt)*) => {
@@ -1252,7 +1259,7 @@ impl<S, M, A> TypedScriptBuilder<S, M, A> {
     /// Requires turbofish for `T`: `.add_fixed_num::<3, SchnorrSig<()>>()`.
     pub fn add_fixed_num<const N: usize, T>(
         mut self,
-    ) -> TypedScriptBuilder<FixedNum<N, T, <Self as FixedNumInputs<N, T>>::Rest>, <Self as FixedNumInputs<N, T>>::NewMissing, A>
+    ) -> FixedNumResult<N, T, S, M, A>
     where
         Self: FixedNumInputs<N, T>,
     {
@@ -1264,11 +1271,7 @@ impl<S, M, A> TypedScriptBuilder<S, M, A> {
     /// Compile-time error if N exceeds `MAX_PUB_KEYS_PER_MUTLTISIG` (20).
     pub fn add_fixed_num_schnorr_sigs<const N: usize>(
         self,
-    ) -> TypedScriptBuilder<
-        FixedNum<N, SchnorrSig<()>, <Self as FixedNumInputs<N, SchnorrSig<()>>>::Rest>,
-        <Self as FixedNumInputs<N, SchnorrSig<()>>>::NewMissing,
-        A,
-    >
+    ) -> FixedNumResult<N, SchnorrSig<()>, S, M, A>
     where
         Self: FixedNumInputs<N, SchnorrSig<()>>,
     {
@@ -1280,11 +1283,7 @@ impl<S, M, A> TypedScriptBuilder<S, M, A> {
     /// Compile-time error if N exceeds `MAX_PUB_KEYS_PER_MUTLTISIG` (20).
     pub fn add_fixed_num_xonly_pubkeys<const N: usize>(
         self,
-    ) -> TypedScriptBuilder<
-        FixedNum<N, XOnlyPubkey<()>, <Self as FixedNumInputs<N, XOnlyPubkey<()>>>::Rest>,
-        <Self as FixedNumInputs<N, XOnlyPubkey<()>>>::NewMissing,
-        A,
-    >
+    ) -> FixedNumResult<N, XOnlyPubkey<()>, S, M, A>
     where
         Self: FixedNumInputs<N, XOnlyPubkey<()>>,
     {
@@ -1296,11 +1295,7 @@ impl<S, M, A> TypedScriptBuilder<S, M, A> {
     /// Compile-time error if N exceeds `MAX_PUB_KEYS_PER_MUTLTISIG` (20).
     pub fn add_fixed_num_ecdsa_sigs<const N: usize>(
         self,
-    ) -> TypedScriptBuilder<
-        FixedNum<N, EcdsaSig<()>, <Self as FixedNumInputs<N, EcdsaSig<()>>>::Rest>,
-        <Self as FixedNumInputs<N, EcdsaSig<()>>>::NewMissing,
-        A,
-    >
+    ) -> FixedNumResult<N, EcdsaSig<()>, S, M, A>
     where
         Self: FixedNumInputs<N, EcdsaSig<()>>,
     {
@@ -1312,11 +1307,7 @@ impl<S, M, A> TypedScriptBuilder<S, M, A> {
     /// Compile-time error if N exceeds `MAX_PUB_KEYS_PER_MUTLTISIG` (20).
     pub fn add_fixed_num_ecdsa_pubkeys<const N: usize>(
         self,
-    ) -> TypedScriptBuilder<
-        FixedNum<N, EcdsaPubkey<()>, <Self as FixedNumInputs<N, EcdsaPubkey<()>>>::Rest>,
-        <Self as FixedNumInputs<N, EcdsaPubkey<()>>>::NewMissing,
-        A,
-    >
+    ) -> FixedNumResult<N, EcdsaPubkey<()>, S, M, A>
     where
         Self: FixedNumInputs<N, EcdsaPubkey<()>>,
     {

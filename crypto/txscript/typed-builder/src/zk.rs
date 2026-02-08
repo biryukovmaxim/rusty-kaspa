@@ -2,7 +2,7 @@ use kaspa_txscript::opcodes::codes::*;
 
 use crate::builder::TypedScriptBuilder;
 use crate::markers::*;
-use crate::ops::FixedNumInputs;
+use crate::ops::{FixedNumInputs, FixedNumResult};
 
 // ---------------------------------------------------------------------------
 // ZK Precompile: RISC0 succinct verify (trait-based)
@@ -105,11 +105,7 @@ impl<S, M, A> TypedScriptBuilder<S, M, A> {
     /// to the missing-inputs type for the signature builder.
     pub fn add_g16_fixed_num<const N: usize>(
         self,
-    ) -> TypedScriptBuilder<
-        FixedNum<N, Bn254Fr<()>, <Self as FixedNumInputs<N, Bn254Fr<()>>>::Rest>,
-        <Self as FixedNumInputs<N, Bn254Fr<()>>>::NewMissing,
-        A,
-    >
+    ) -> FixedNumResult<N, Bn254Fr<()>, S, M, A>
     where
         Self: FixedNumInputs<N, Bn254Fr<()>>,
     {
