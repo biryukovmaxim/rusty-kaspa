@@ -8,12 +8,12 @@ use crate::markers::*;
 
 // ---------------------------------------------------------------------------
 // Dynamic condition (Bool on stack)
-// Both branches must produce the same Stack AND same Missing.
+// Both branches must produce the same Stack, Missing, AND AltStack.
 // ---------------------------------------------------------------------------
 
-impl<S, M> TypedScriptBuilder<Bool<S>, M> {
+impl<S, M, A> TypedScriptBuilder<Bool<S>, M, A> {
     /// Conditional with both branches. The `Bool` on top of the stack is consumed.
-    /// Both branches must produce the same stack and missing types.
+    /// Both branches must produce the same stack, missing, and alt stack types.
     ///
     /// ```compile_fail
     /// use kaspa_txscript_typed_builder::TypedScriptBuilder;
@@ -36,11 +36,11 @@ impl<S, M> TypedScriptBuilder<Bool<S>, M> {
     ///         |b| b.op_equal(),                           // Missing = Data<Data<()>>
     ///     );
     /// ```
-    pub fn op_if<S2, M2>(
+    pub fn op_if<S2, M2, A2>(
         mut self,
-        true_branch: impl FnOnce(TypedScriptBuilder<S, M>) -> TypedScriptBuilder<S2, M2>,
-        false_branch: impl FnOnce(TypedScriptBuilder<S, M>) -> TypedScriptBuilder<S2, M2>,
-    ) -> TypedScriptBuilder<S2, M2> {
+        true_branch: impl FnOnce(TypedScriptBuilder<S, M, A>) -> TypedScriptBuilder<S2, M2, A2>,
+        false_branch: impl FnOnce(TypedScriptBuilder<S, M, A>) -> TypedScriptBuilder<S2, M2, A2>,
+    ) -> TypedScriptBuilder<S2, M2, A2> {
         self.builder.add_op(OpIf).expect("script size limit exceeded");
 
         let true_builder = TypedScriptBuilder { builder: self.builder, _phantom: PhantomData };
@@ -56,8 +56,11 @@ impl<S, M> TypedScriptBuilder<Bool<S>, M> {
     }
 
     /// Conditional with only a true branch (no else). The body must be
-    /// stack-neutral: it receives `(S, M)` and must return `(S, M)`.
-    pub fn op_if_only(mut self, body: impl FnOnce(TypedScriptBuilder<S, M>) -> TypedScriptBuilder<S, M>) -> TypedScriptBuilder<S, M> {
+    /// stack-neutral: it receives `(S, M, A)` and must return `(S, M, A)`.
+    pub fn op_if_only(
+        mut self,
+        body: impl FnOnce(TypedScriptBuilder<S, M, A>) -> TypedScriptBuilder<S, M, A>,
+    ) -> TypedScriptBuilder<S, M, A> {
         self.builder.add_op(OpIf).expect("script size limit exceeded");
 
         let inner = TypedScriptBuilder { builder: self.builder, _phantom: PhantomData };
@@ -71,17 +74,19 @@ impl<S, M> TypedScriptBuilder<Bool<S>, M> {
 // ---------------------------------------------------------------------------
 // Missing condition (empty stack)
 // The Bool comes from the sig script. Branches may have different Missing.
+// Both branches must produce the same AltStack.
 // ---------------------------------------------------------------------------
 
-impl<M: AddToMissing> TypedScriptBuilder<(), M> {
+impl<M: AddToMissing, A> TypedScriptBuilder<(), M, A> {
     /// Conditional where the Bool is provided by the sig script.
     /// Branches may produce different Missing types, yielding `Or<M2, M3>`.
     /// The sig builder will call `choose_true()` or `choose_false()` to select.
-    pub fn op_if<S2, M2, M3>(
+    /// Both branches must produce the same AltStack type.
+    pub fn op_if<S2, M2, M3, A2>(
         mut self,
-        true_branch: impl FnOnce(TypedScriptBuilder<(), M>) -> TypedScriptBuilder<S2, M2>,
-        false_branch: impl FnOnce(TypedScriptBuilder<(), M>) -> TypedScriptBuilder<S2, M3>,
-    ) -> TypedScriptBuilder<S2, Or<M2, M3>> {
+        true_branch: impl FnOnce(TypedScriptBuilder<(), M, A>) -> TypedScriptBuilder<S2, M2, A2>,
+        false_branch: impl FnOnce(TypedScriptBuilder<(), M, A>) -> TypedScriptBuilder<S2, M3, A2>,
+    ) -> TypedScriptBuilder<S2, Or<M2, M3>, A2> {
         self.builder.add_op(OpIf).expect("script size limit exceeded");
 
         let true_builder = TypedScriptBuilder { builder: self.builder, _phantom: PhantomData };
@@ -89,7 +94,7 @@ impl<M: AddToMissing> TypedScriptBuilder<(), M> {
 
         result.builder.add_op(OpElse).expect("script size limit exceeded");
 
-        let false_builder: TypedScriptBuilder<(), M> = TypedScriptBuilder { builder: result.builder, _phantom: PhantomData };
+        let false_builder: TypedScriptBuilder<(), M, A> = TypedScriptBuilder { builder: result.builder, _phantom: PhantomData };
         let mut result = false_branch(false_builder);
 
         result.builder.add_op(OpEndIf).expect("script size limit exceeded");
@@ -97,12 +102,14 @@ impl<M: AddToMissing> TypedScriptBuilder<(), M> {
     }
 
     /// Conditional with only a true branch where the Bool is from sig script.
-    /// The body receives `((), M)` and returns `((), M2)`.
+    /// The body receives `((), M, A)` and returns `((), M2, A2)`.
     /// Result Missing is `Or<M2, M>`: true-branch chose `M2`, false does nothing.
+    /// Both branches must produce the same AltStack type — since the false branch
+    /// does nothing, A2 must equal A.
     pub fn op_if_only<M2>(
         mut self,
-        body: impl FnOnce(TypedScriptBuilder<(), M>) -> TypedScriptBuilder<(), M2>,
-    ) -> TypedScriptBuilder<(), Or<M2, M>> {
+        body: impl FnOnce(TypedScriptBuilder<(), M, A>) -> TypedScriptBuilder<(), M2, A>,
+    ) -> TypedScriptBuilder<(), Or<M2, M>, A> {
         self.builder.add_op(OpIf).expect("script size limit exceeded");
 
         let inner = TypedScriptBuilder { builder: self.builder, _phantom: PhantomData };
@@ -117,14 +124,14 @@ impl<M: AddToMissing> TypedScriptBuilder<(), M> {
 // Fixed conditions (Bool known at build time)
 // ---------------------------------------------------------------------------
 
-impl<S, M> TypedScriptBuilder<Bool<S>, M> {
+impl<S, M, A> TypedScriptBuilder<Bool<S>, M, A> {
     /// The Bool on top is known to be true. Only the true branch is type-checked;
     /// the dead branch receives a raw `&mut ScriptBuilder` for arbitrary bytes.
-    pub fn op_if_true<S2, M2>(
+    pub fn op_if_true<S2, M2, A2>(
         mut self,
-        true_branch: impl FnOnce(TypedScriptBuilder<S, M>) -> TypedScriptBuilder<S2, M2>,
+        true_branch: impl FnOnce(TypedScriptBuilder<S, M, A>) -> TypedScriptBuilder<S2, M2, A2>,
         dead_branch: impl FnOnce(&mut ScriptBuilder),
-    ) -> TypedScriptBuilder<S2, M2> {
+    ) -> TypedScriptBuilder<S2, M2, A2> {
         self.builder.add_op(OpIf).expect("script size limit exceeded");
 
         let true_builder = TypedScriptBuilder { builder: self.builder, _phantom: PhantomData };
@@ -138,11 +145,11 @@ impl<S, M> TypedScriptBuilder<Bool<S>, M> {
 
     /// The Bool on top is known to be false. Only the false branch is type-checked;
     /// the dead branch receives a raw `&mut ScriptBuilder` for arbitrary bytes.
-    pub fn op_if_false<S2, M2>(
+    pub fn op_if_false<S2, M2, A2>(
         mut self,
         dead_branch: impl FnOnce(&mut ScriptBuilder),
-        false_branch: impl FnOnce(TypedScriptBuilder<S, M>) -> TypedScriptBuilder<S2, M2>,
-    ) -> TypedScriptBuilder<S2, M2> {
+        false_branch: impl FnOnce(TypedScriptBuilder<S, M, A>) -> TypedScriptBuilder<S2, M2, A2>,
+    ) -> TypedScriptBuilder<S2, M2, A2> {
         self.builder.add_op(OpIf).expect("script size limit exceeded");
         dead_branch(&mut self.builder);
 
@@ -157,7 +164,7 @@ impl<S, M> TypedScriptBuilder<Bool<S>, M> {
 
     /// The Bool is known; the entire if/else is dead code (e.g. for data embedding).
     /// The dead branch receives a raw `&mut ScriptBuilder`.
-    pub fn op_if_dead(mut self, dead_branch: impl FnOnce(&mut ScriptBuilder)) -> TypedScriptBuilder<S, M> {
+    pub fn op_if_dead(mut self, dead_branch: impl FnOnce(&mut ScriptBuilder)) -> TypedScriptBuilder<S, M, A> {
         self.builder.add_op(OpIf).expect("script size limit exceeded");
         dead_branch(&mut self.builder);
         self.builder.add_op(OpEndIf).expect("script size limit exceeded");

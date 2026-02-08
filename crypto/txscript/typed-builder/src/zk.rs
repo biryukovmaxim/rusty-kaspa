@@ -18,10 +18,11 @@ use crate::markers::*;
 pub trait R0SuccinctVerify {
     type Rest;
     type Missing;
-    fn risc0_succinct_verify(self) -> TypedScriptBuilder<Bool<Self::Rest>, Self::Missing>;
+    type AltStack;
+    fn risc0_succinct_verify(self) -> TypedScriptBuilder<Bool<Self::Rest>, Self::Missing, Self::AltStack>;
 }
 
-impl<S, M> R0SuccinctVerify
+impl<S, M, A> R0SuccinctVerify
     for TypedScriptBuilder<
         R0SuccinctTag<
             R0SuccinctImageId<
@@ -31,11 +32,13 @@ impl<S, M> R0SuccinctVerify
             >,
         >,
         M,
+        A,
     >
 {
     type Rest = S;
     type Missing = M;
-    fn risc0_succinct_verify(self) -> TypedScriptBuilder<Bool<S>, M> {
+    type AltStack = A;
+    fn risc0_succinct_verify(self) -> TypedScriptBuilder<Bool<S>, M, A> {
         self.emit_op(OpZkPrecompile)
     }
 }
@@ -132,19 +135,22 @@ impl_g16_fixed_num!(32; _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
 )]
 pub trait G16Verify {
     type Missing;
-    fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, Self::Missing>;
+    type AltStack;
+    fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, Self::Missing, Self::AltStack>;
 }
 
-impl<S, M> G16Verify for TypedScriptBuilder<Groth16Tag<G16Vk<G16Proof<Num<Bn254Fr<S>>>>>, M> {
+impl<S, M, A> G16Verify for TypedScriptBuilder<Groth16Tag<G16Vk<G16Proof<Num<Bn254Fr<S>>>>>, M, A> {
     type Missing = M;
-    fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, M> {
+    type AltStack = A;
+    fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, M, A> {
         self.emit_op(OpZkPrecompile)
     }
 }
 
-impl<const N: usize, S, M> G16Verify for TypedScriptBuilder<Groth16Tag<G16Vk<G16Proof<FixedNum<N, Bn254Fr<()>, S>>>>, M> {
+impl<const N: usize, S, M, A> G16Verify for TypedScriptBuilder<Groth16Tag<G16Vk<G16Proof<FixedNum<N, Bn254Fr<()>, S>>>>, M, A> {
     type Missing = M;
-    fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, M> {
+    type AltStack = A;
+    fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, M, A> {
         self.emit_op(OpZkPrecompile)
     }
 }
@@ -155,7 +161,7 @@ impl<const N: usize, S, M> G16Verify for TypedScriptBuilder<Groth16Tag<G16Vk<G16
 // so that #[diagnostic::on_unimplemented] messages actually appear.
 // ---------------------------------------------------------------------------
 
-impl<S, M> TypedScriptBuilder<S, M> {
+impl<S, M, A> TypedScriptBuilder<S, M, A> {
     /// Verifies a RISC0 succinct ZK proof.
     ///
     /// The stack (top→bottom) must be:
@@ -164,7 +170,11 @@ impl<S, M> TypedScriptBuilder<S, M> {
     /// `R0SuccinctClaim`, `R0SuccinctSeal`.
     pub fn risc0_succinct_verify(
         self,
-    ) -> TypedScriptBuilder<Bool<<Self as R0SuccinctVerify>::Rest>, <Self as R0SuccinctVerify>::Missing>
+    ) -> TypedScriptBuilder<
+        Bool<<Self as R0SuccinctVerify>::Rest>,
+        <Self as R0SuccinctVerify>::Missing,
+        <Self as R0SuccinctVerify>::AltStack,
+    >
     where
         Self: R0SuccinctVerify,
     {
@@ -184,7 +194,11 @@ impl<S, M> TypedScriptBuilder<S, M> {
     /// ```
     pub fn add_g16_fixed_num<const N: usize>(
         mut self,
-    ) -> TypedScriptBuilder<FixedNum<N, Bn254Fr<()>, <Self as G16FixedNumInputs<N>>::Rest>, <Self as G16FixedNumInputs<N>>::NewMissing>
+    ) -> TypedScriptBuilder<
+        FixedNum<N, Bn254Fr<()>, <Self as G16FixedNumInputs<N>>::Rest>,
+        <Self as G16FixedNumInputs<N>>::NewMissing,
+        A,
+    >
     where
         Self: G16FixedNumInputs<N>,
     {
@@ -219,7 +233,7 @@ impl<S, M> TypedScriptBuilder<S, M> {
     ///     .add_groth16_tag()
     ///     .groth16_verify();
     /// ```
-    pub fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, <Self as G16Verify>::Missing>
+    pub fn groth16_verify(self) -> TypedScriptBuilder<Bool<()>, <Self as G16Verify>::Missing, <Self as G16Verify>::AltStack>
     where
         Self: G16Verify,
     {
