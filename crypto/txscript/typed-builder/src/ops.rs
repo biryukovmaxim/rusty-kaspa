@@ -1257,9 +1257,7 @@ impl<S, M, A> TypedScriptBuilder<S, M, A> {
     /// added to the missing-inputs type for the signature builder.
     ///
     /// Requires turbofish for `T`: `.add_fixed_num::<3, SchnorrSig<()>>()`.
-    pub fn add_fixed_num<const N: usize, T>(
-        mut self,
-    ) -> FixedNumResult<N, T, S, M, A>
+    pub fn add_fixed_num<const N: usize, T>(mut self) -> FixedNumResult<N, T, S, M, A>
     where
         Self: FixedNumInputs<N, T>,
     {
@@ -1269,9 +1267,7 @@ impl<S, M, A> TypedScriptBuilder<S, M, A> {
 
     /// Convenience: push a Schnorr signature count.
     /// Compile-time error if N exceeds `MAX_PUB_KEYS_PER_MUTLTISIG` (20).
-    pub fn add_fixed_num_schnorr_sigs<const N: usize>(
-        self,
-    ) -> FixedNumResult<N, SchnorrSig<()>, S, M, A>
+    pub fn add_fixed_num_schnorr_sigs<const N: usize>(self) -> FixedNumResult<N, SchnorrSig<()>, S, M, A>
     where
         Self: FixedNumInputs<N, SchnorrSig<()>>,
     {
@@ -1281,9 +1277,7 @@ impl<S, M, A> TypedScriptBuilder<S, M, A> {
 
     /// Convenience: push an x-only public key count.
     /// Compile-time error if N exceeds `MAX_PUB_KEYS_PER_MUTLTISIG` (20).
-    pub fn add_fixed_num_xonly_pubkeys<const N: usize>(
-        self,
-    ) -> FixedNumResult<N, XOnlyPubkey<()>, S, M, A>
+    pub fn add_fixed_num_xonly_pubkeys<const N: usize>(self) -> FixedNumResult<N, XOnlyPubkey<()>, S, M, A>
     where
         Self: FixedNumInputs<N, XOnlyPubkey<()>>,
     {
@@ -1293,9 +1287,7 @@ impl<S, M, A> TypedScriptBuilder<S, M, A> {
 
     /// Convenience: push an ECDSA signature count.
     /// Compile-time error if N exceeds `MAX_PUB_KEYS_PER_MUTLTISIG` (20).
-    pub fn add_fixed_num_ecdsa_sigs<const N: usize>(
-        self,
-    ) -> FixedNumResult<N, EcdsaSig<()>, S, M, A>
+    pub fn add_fixed_num_ecdsa_sigs<const N: usize>(self) -> FixedNumResult<N, EcdsaSig<()>, S, M, A>
     where
         Self: FixedNumInputs<N, EcdsaSig<()>>,
     {
@@ -1305,9 +1297,7 @@ impl<S, M, A> TypedScriptBuilder<S, M, A> {
 
     /// Convenience: push an ECDSA public key count.
     /// Compile-time error if N exceeds `MAX_PUB_KEYS_PER_MUTLTISIG` (20).
-    pub fn add_fixed_num_ecdsa_pubkeys<const N: usize>(
-        self,
-    ) -> FixedNumResult<N, EcdsaPubkey<()>, S, M, A>
+    pub fn add_fixed_num_ecdsa_pubkeys<const N: usize>(self) -> FixedNumResult<N, EcdsaPubkey<()>, S, M, A>
     where
         Self: FixedNumInputs<N, EcdsaPubkey<()>>,
     {

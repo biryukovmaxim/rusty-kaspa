@@ -103,9 +103,7 @@ impl<S, M, A> TypedScriptBuilder<S, M, A> {
     /// Pushes the input count N and transitions the stack to `FixedNum<N, Bn254Fr, Rest>`.
     /// If fewer than N `Bn254Fr` elements are on the stack, the shortfall is added
     /// to the missing-inputs type for the signature builder.
-    pub fn add_g16_fixed_num<const N: usize>(
-        self,
-    ) -> FixedNumResult<N, Bn254Fr<()>, S, M, A>
+    pub fn add_g16_fixed_num<const N: usize>(self) -> FixedNumResult<N, Bn254Fr<()>, S, M, A>
     where
         Self: FixedNumInputs<N, Bn254Fr<()>>,
     {

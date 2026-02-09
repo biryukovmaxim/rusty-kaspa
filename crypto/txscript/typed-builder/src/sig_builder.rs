@@ -187,7 +187,7 @@ impl<M> ScriptSignatureBuilder<R0SuccinctControlIndex<M>> {
 
 impl<M> ScriptSignatureBuilder<R0SuccinctControlDigests<M>> {
     pub fn add_r0_succinct_control_digests(mut self, digests: &[u8]) -> ScriptSignatureBuilder<M> {
-        assert!(digests.len() % 32 == 0, "control digests length must be a multiple of 32, got {}", digests.len());
+        assert_eq!(digests.len() % 32, 0, "control digests length must be a multiple of 32, got {}", digests.len());
         let mut tmp = ScriptBuilder::new();
         tmp.add_data(digests).expect("script size limit exceeded");
         push_reversed(&mut self.buf, &mut tmp);

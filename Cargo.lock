@@ -3733,7 +3733,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-txscript-typed-builder"
-version = "1.1.0-rc.2"
+version = "1.1.0-rc.3"
 dependencies = [
  "ark-bn254",
  "ark-groth16",
