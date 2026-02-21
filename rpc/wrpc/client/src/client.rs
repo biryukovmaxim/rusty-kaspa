@@ -14,6 +14,7 @@ use kaspa_rpc_core::{
 };
 pub use kaspa_rpc_macros::build_wrpc_client_interface;
 use std::fmt::Debug;
+use std::sync::Weak;
 use workflow_core::{channel::Multiplexer, runtime as application_runtime};
 use workflow_dom::utils::window;
 use workflow_rpc::client::Ctl as WrpcCtl;
@@ -23,6 +24,38 @@ pub use workflow_rpc::client::{
 use workflow_serializer::prelude::*;
 type RpcClientNotifier = Arc<Notifier<Notification, ChannelConnection>>;
 
+#[cfg(feature = "test-util")]
+pub struct Inner {
+    rpc_client: Arc<RpcClient<RpcApiOps>>,
+    notification_relay_channel: Channel<Notification>,
+    notification_intake_channel: Mutex<Channel<Notification>>,
+    notifier: Arc<Mutex<Option<RpcClientNotifier>>>,
+    encoding: Encoding,
+    wrpc_ctl_multiplexer: Multiplexer<WrpcCtl>,
+    rpc_ctl: RpcCtl,
+    background_services_running: Arc<AtomicBool>,
+    service_ctl: DuplexChannel<()>,
+    connect_guard: AsyncMutex<()>,
+    disconnect_guard: AsyncMutex<()>,
+    /// When true (default), dropping the client while still connected will
+    /// attempt best-effort cleanup. Set to false for explicit lifecycle control.
+    auto_cleanup_on_drop: bool,
+    // ---
+    // The permanent url passed in the constructor
+    // (dominant, overrides Resolver if supplied).
+    ctor_url: Mutex<Option<String>>,
+    // The url passed in the connect() method
+    // (overrides default URL and the Resolver).
+    default_url: Mutex<Option<String>>,
+    // The current url wRPC is connected to
+    // (possibly acquired via the Resolver).
+    current_url: Mutex<Option<String>>,
+    resolver: Mutex<Option<Resolver>>,
+    network_id: Mutex<Option<NetworkId>>,
+    node_descriptor: Mutex<Option<Arc<NodeDescriptor>>>,
+}
+
+#[cfg(not(feature = "test-util"))]
 struct Inner {
     rpc_client: Arc<RpcClient<RpcApiOps>>,
     notification_relay_channel: Channel<Notification>,
@@ -692,8 +725,14 @@ impl KaspaRpcClient {
         Ok(self.inner.rpc_client.trigger_abort()?)
     }
 
+    #[cfg(feature = "test-util")]
     pub fn strong_count(&self) -> usize {
         Arc::strong_count(&self.inner)
+    }
+
+    #[cfg(feature = "test-util")]
+    pub fn weak_clone(&self) -> Weak<Inner> {
+        Arc::downgrade(&self.inner)
     }
 }
 

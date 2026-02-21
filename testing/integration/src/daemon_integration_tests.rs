@@ -408,7 +408,7 @@ async fn daemon_wrpc_client_drop_test() {
         // Verify the client is connected by making an RPC call
         let server_info = wrpc_client.get_server_info().await.expect("Should get server info");
         assert!(!server_info.server_version.is_empty(), "Server version should not be empty");
-        let cloned = wrpc_client.clone();
+        let cloned = wrpc_client.weak_clone();
         warn!("wRPC client ref count: {}", wrpc_client.strong_count());
         // Drop the client WITHOUT calling disconnect() - this tests the Drop implementation
         // The Drop impl should log a warning and initiate cleanup
