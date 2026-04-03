@@ -15,10 +15,12 @@ kaspa-consensus-core.workspace = true
 kaspa-consensus-notify.workspace = true
 kaspa-p2p-lib.workspace = true
 kaspa-p2p-mining.workspace = true
-kaspa-utils.workspace = true
+kaspa-utils = { workspace = true, features = ["fd_budget"]}
 kaspa-utils-tower.workspace = true
 kaspa-hashes.workspace = true
 kaspa-muhash.workspace = true
+kaspa-seq-commit.workspace = true
+kaspa-smt.workspace = true
 kaspa-connectionmanager.workspace = true
 kaspa-addressmanager.workspace = true
 kaspa-consensusmanager.workspace = true

@@ -3,8 +3,7 @@
 //!
 
 use crate::imports::*;
-use kaspa_consensus_client::{TransactionOutput, TransactionOutputInner};
-use kaspa_consensus_core::tx::CovenantBinding;
+use kaspa_consensus_client::{CovenantBinding as ClientCovenantBinding, TransactionOutput, TransactionOutputInner};
 use kaspa_txscript::pay_to_address_script;
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -69,7 +68,7 @@ pub struct PaymentOutput {
     #[wasm_bindgen(getter_with_clone)]
     pub address: Address,
     pub amount: u64,
-    pub covenant: Option<CovenantBinding>,
+    pub covenant: Option<ClientCovenantBinding>,
 }
 
 impl TryCastFromJs for PaymentOutput {
@@ -115,7 +114,7 @@ impl PaymentOutput {
 
     /// Factory method for covenant variant
     #[wasm_bindgen(js_name = withCovenant)]
-    pub fn with_covenant(address: Address, amount: u64, covenant: CovenantBinding) -> Self {
+    pub fn with_covenant(address: Address, amount: u64, covenant: ClientCovenantBinding) -> Self {
         Self { address, amount, covenant: Some(covenant) }
     }
 }

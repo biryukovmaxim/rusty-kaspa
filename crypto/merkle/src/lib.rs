@@ -1,3 +1,9 @@
+#![no_std]
+
+extern crate alloc;
+extern crate core;
+
+use alloc::vec;
 use kaspa_hashes::{Hash, Hasher, MerkleBranchHash, ZERO_HASH};
 
 pub fn calc_merkle_root(hashes: impl ExactSizeIterator<Item = Hash>) -> Hash {
@@ -49,10 +55,11 @@ fn cold_path_empty() -> Hash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kaspa_hashes::{HasherBase, SeqCommitmentMerkleBranchHash, TransactionHash};
-    use std::iter;
+    use alloc::vec::Vec;
+    use core::iter;
+    use kaspa_hashes::{HasherBase, SeqCommitMerkleBranch, TransactionHash};
     fn seq_comm_merkle_root(hashes: impl ExactSizeIterator<Item = Hash>) -> Hash {
-        calc_merkle_root_with_hasher::<SeqCommitmentMerkleBranchHash, true>(hashes)
+        calc_merkle_root_with_hasher::<SeqCommitMerkleBranch, true>(hashes)
     }
     fn make_hash(data: &[u8]) -> Hash {
         let mut hasher = TransactionHash::new();
@@ -61,10 +68,10 @@ mod tests {
     }
     #[test]
     fn test_empty_returns_zero_hash() {
-        let root = calc_merkle_root(std::iter::empty());
+        let root = calc_merkle_root(core::iter::empty());
         assert_eq!(root, ZERO_HASH, "Empty input should return ZERO_HASH");
 
-        let seq_root = seq_comm_merkle_root(std::iter::empty());
+        let seq_root = seq_comm_merkle_root(core::iter::empty());
         assert_eq!(seq_root, ZERO_HASH, "Empty input should return ZERO_HASH for seq_comm");
     }
 
@@ -75,7 +82,7 @@ mod tests {
         let expected = entry;
         assert_eq!(root, expected);
 
-        let expected = merkle_hash_with_hasher(entry, ZERO_HASH, SeqCommitmentMerkleBranchHash::default());
+        let expected = merkle_hash_with_hasher(entry, ZERO_HASH, SeqCommitMerkleBranch::default());
         let seq_comm_root = seq_comm_merkle_root(iter::once(entry));
         assert_eq!(seq_comm_root, expected, "Single entry should return merkle hash of entry with ZERO_HASH");
     }
@@ -90,7 +97,7 @@ mod tests {
         assert_eq!(root, expected, "Two entries should hash directly together");
 
         let seq_root = seq_comm_merkle_root([h1, h2].into_iter());
-        let seq_expected = merkle_hash_with_hasher(h1, h2, SeqCommitmentMerkleBranchHash::default());
+        let seq_expected = merkle_hash_with_hasher(h1, h2, SeqCommitMerkleBranch::default());
         assert_eq!(seq_root, seq_expected, "Two entries should hash directly together for seq_comm");
     }
 

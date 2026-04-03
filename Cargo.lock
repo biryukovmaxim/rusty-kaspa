@@ -60,7 +60,7 @@ dependencies = [
  "getrandom 0.2.15",
  "once_cell",
  "version_check",
- "zerocopy",
+ "zerocopy 0.7.35",
 ]
 
 [[package]]
@@ -2659,6 +2659,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "include_dir"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
+dependencies = [
+ "include_dir_macros",
+]
+
+[[package]]
+name = "include_dir_macros"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
 name = "include_bytes_aligned"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2749,9 +2768,9 @@ dependencies = [
 
 [[package]]
 name = "ipnet"
-version = "2.10.1"
+version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddc24109865250148c2e0f3d25d4f0f479571723792d3802153c60922a4fb708"
+checksum = "469fb0b9cefa57e3ef31275ee7cacb78f2fdca44e4765491884a2b119d4eb130"
 
 [[package]]
 name = "is-terminal"
@@ -2824,14 +2843,14 @@ dependencies = [
 
 [[package]]
 name = "kaspa-addresses"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "borsh",
  "criterion",
  "js-sys",
  "serde",
  "smallvec",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "wasm-bindgen",
  "wasm-bindgen-test",
  "web-sys",
@@ -2841,7 +2860,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-addressmanager"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "borsh",
  "igd-next",
@@ -2857,20 +2876,20 @@ dependencies = [
  "rocksdb",
  "rv",
  "serde",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
 [[package]]
 name = "kaspa-alloc"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "mimalloc",
 ]
 
 [[package]]
 name = "kaspa-bip32"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "borsh",
  "bs58",
@@ -2889,7 +2908,7 @@ dependencies = [
  "serde",
  "sha2",
  "subtle",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "wasm-bindgen",
  "workflow-wasm",
  "zeroize",
@@ -2897,7 +2916,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-cli"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "borsh",
@@ -2928,7 +2947,7 @@ dependencies = [
  "serde",
  "serde_json",
  "textwrap 0.16.1",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "wasm-bindgen",
  "web-sys",
@@ -2944,7 +2963,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-connectionmanager"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "duration-string",
  "futures-util",
@@ -2961,7 +2980,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-consensus"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "arc-swap",
  "async-channel 2.3.1",
@@ -2985,6 +3004,9 @@ dependencies = [
  "kaspa-muhash",
  "kaspa-notify",
  "kaspa-pow",
+ "kaspa-seq-commit",
+ "kaspa-smt",
+ "kaspa-smt-store",
  "kaspa-txscript",
  "kaspa-txscript-errors",
  "kaspa-utils",
@@ -2999,15 +3021,16 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
 [[package]]
 name = "kaspa-consensus-client"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "ahash",
+ "borsh",
  "cfg-if 1.0.0",
  "faster-hex 0.9.0",
  "hex",
@@ -3025,15 +3048,16 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "wasm-bindgen",
+ "wasm-bindgen-test",
  "workflow-log",
  "workflow-wasm",
 ]
 
 [[package]]
 name = "kaspa-consensus-core"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3053,6 +3077,7 @@ dependencies = [
  "kaspa-math",
  "kaspa-merkle",
  "kaspa-muhash",
+ "kaspa-smt",
  "kaspa-txscript-errors",
  "kaspa-utils",
  "rand 0.8.5",
@@ -3061,7 +3086,8 @@ dependencies = [
  "serde-wasm-bindgen",
  "serde_json",
  "smallvec",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
+ "tokio",
  "wasm-bindgen",
  "wasm-bindgen-test",
  "web-sys",
@@ -3073,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-consensus-notify"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-channel 2.3.1",
  "cfg-if 1.0.0",
@@ -3086,13 +3112,13 @@ dependencies = [
  "kaspa-utils",
  "log",
  "paste",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "triggered",
 ]
 
 [[package]]
 name = "kaspa-consensus-wasm"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "cfg-if 1.0.0",
  "faster-hex 0.9.0",
@@ -3108,7 +3134,7 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "wasm-bindgen",
  "workflow-log",
  "workflow-wasm",
@@ -3116,7 +3142,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-consensusmanager"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "duration-string",
  "futures",
@@ -3135,7 +3161,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-core"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "cfg-if 1.0.0",
@@ -3145,7 +3171,7 @@ dependencies = [
  "log",
  "log4rs",
  "num_cpus",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "triggered",
  "wasm-bindgen",
@@ -3154,7 +3180,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-daemon"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "borsh",
@@ -3166,7 +3192,7 @@ dependencies = [
  "kaspa-wallet-core",
  "nw-sys",
  "serde",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "workflow-core",
  "workflow-log",
  "workflow-node",
@@ -3176,7 +3202,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-database"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "bincode",
  "enum-primitive-derive",
@@ -3193,12 +3219,12 @@ dependencies = [
  "serde",
  "smallvec",
  "tempfile",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "kaspa-grpc-client"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-channel 2.3.1",
  "async-stream",
@@ -3221,7 +3247,7 @@ dependencies = [
  "rand 0.8.5",
  "regex",
  "rustls",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -3230,7 +3256,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-grpc-core"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-channel 2.3.1",
  "async-stream",
@@ -3250,7 +3276,7 @@ dependencies = [
  "prost",
  "rand 0.8.5",
  "regex",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -3261,7 +3287,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-grpc-server"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-channel 2.3.1",
  "async-stream",
@@ -3287,7 +3313,7 @@ dependencies = [
  "prost",
  "rand 0.8.5",
  "rustls",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -3297,7 +3323,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-grpc-simple-client-example"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "futures",
  "kaspa-grpc-client",
@@ -3307,7 +3333,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-hashes"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "blake2b_simd",
  "blake3",
@@ -3318,18 +3344,19 @@ dependencies = [
  "js-sys",
  "kaspa-utils",
  "keccak",
- "once_cell",
  "rand 0.8.5",
  "serde",
  "sha2",
+ "sha2-const-stable",
  "sha3",
  "wasm-bindgen",
  "workflow-wasm",
+ "zerocopy 0.8.42",
 ]
 
 [[package]]
 name = "kaspa-index-core"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-channel 2.3.1",
  "async-trait",
@@ -3342,13 +3369,13 @@ dependencies = [
  "log",
  "paste",
  "serde",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "triggered",
 ]
 
 [[package]]
 name = "kaspa-index-processor"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-channel 2.3.1",
  "async-trait",
@@ -3369,14 +3396,14 @@ dependencies = [
  "parking_lot",
  "paste",
  "rand 0.8.5",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "triggered",
 ]
 
 [[package]]
 name = "kaspa-math"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "borsh",
  "criterion",
@@ -3388,7 +3415,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "serde",
  "serde-wasm-bindgen",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "wasm-bindgen",
  "workflow-core",
  "workflow-log",
@@ -3397,14 +3424,14 @@ dependencies = [
 
 [[package]]
 name = "kaspa-merkle"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "kaspa-hashes",
 ]
 
 [[package]]
 name = "kaspa-metrics-core"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "borsh",
@@ -3413,14 +3440,14 @@ dependencies = [
  "kaspa-rpc-core",
  "separator",
  "serde",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "workflow-core",
  "workflow-log",
 ]
 
 [[package]]
 name = "kaspa-mining"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "criterion",
  "futures-util",
@@ -3441,21 +3468,21 @@ dependencies = [
  "serde",
  "smallvec",
  "sweep-bptree",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
 [[package]]
 name = "kaspa-mining-errors"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "kaspa-consensus-core",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "kaspa-muhash"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "criterion",
  "kaspa-hashes",
@@ -3468,7 +3495,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-notify"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-channel 2.3.1",
  "async-trait",
@@ -3493,7 +3520,7 @@ dependencies = [
  "paste",
  "rand 0.8.5",
  "serde",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "triggered",
  "workflow-core",
@@ -3504,7 +3531,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-p2p-flows"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3523,12 +3550,14 @@ dependencies = [
  "kaspa-notify",
  "kaspa-p2p-lib",
  "kaspa-p2p-mining",
+ "kaspa-seq-commit",
+ "kaspa-smt",
  "kaspa-utils",
  "kaspa-utils-tower",
  "log",
  "parking_lot",
  "rand 0.8.5",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "uuid 1.18.1",
@@ -3536,7 +3565,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-p2p-lib"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "borsh",
  "ctrlc",
@@ -3557,7 +3586,7 @@ dependencies = [
  "rand 0.8.5",
  "seqlock",
  "serde",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -3567,7 +3596,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-p2p-mining"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "kaspa-consensus-core",
  "kaspa-consensusmanager",
@@ -3584,19 +3613,19 @@ dependencies = [
 
 [[package]]
 name = "kaspa-perf-monitor"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "kaspa-core",
  "log",
  "portable-atomic",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "workflow-perf-monitor",
 ]
 
 [[package]]
 name = "kaspa-pow"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "criterion",
  "js-sys",
@@ -3612,7 +3641,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-rpc-core"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-channel 2.3.1",
  "async-trait",
@@ -3645,7 +3674,7 @@ dependencies = [
  "serde_json",
  "serde_nested_with",
  "smallvec",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "uuid 1.18.1",
  "wasm-bindgen",
  "workflow-core",
@@ -3655,7 +3684,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-rpc-macros"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "convert_case 0.6.0",
  "proc-macro-error",
@@ -3667,7 +3696,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-rpc-service"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "kaspa-addresses",
@@ -3696,8 +3725,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaspa-seq-commit"
+version = "1.1.0"
+dependencies = [
+ "kaspa-consensus-core",
+ "kaspa-hashes",
+ "kaspa-merkle",
+ "kaspa-smt",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "kaspa-smt"
+version = "1.1.0"
+dependencies = [
+ "blake3",
+ "kaspa-hashes",
+ "rand 0.8.5",
+ "thiserror 2.0.18",
+ "zerocopy 0.8.42",
+]
+
+[[package]]
+name = "kaspa-smt-store"
+version = "1.1.0"
+dependencies = [
+ "kaspa-core",
+ "kaspa-database",
+ "kaspa-hashes",
+ "kaspa-seq-commit",
+ "kaspa-smt",
+ "kaspa-utils",
+ "log",
+ "parking_lot",
+ "rand 0.8.5",
+ "rayon",
+ "rocksdb",
+ "zerocopy 0.8.42",
+]
+
+[[package]]
 name = "kaspa-stratum-bridge"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3708,7 +3777,9 @@ dependencies = [
  "faster-hex 0.1.1",
  "futures-util",
  "hex",
+ "include_dir",
  "kaspa-addresses",
+ "kaspa-alloc",
  "kaspa-consensus-core",
  "kaspa-core",
  "kaspa-grpc-client",
@@ -3719,6 +3790,7 @@ dependencies = [
  "kaspa-rpc-service",
  "kaspa-utils",
  "kaspad",
+ "mimalloc",
  "num-bigint",
  "num-traits",
  "once_cell",
@@ -3727,7 +3799,8 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "thiserror 1.0.64",
+ "serde_yaml",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-test",
  "tracing",
@@ -3736,12 +3809,11 @@ dependencies = [
  "tracing-subscriber 0.3.22",
  "uuid 1.18.1",
  "windows-sys 0.52.0",
- "yaml-rust",
 ]
 
 [[package]]
 name = "kaspa-testing-integration"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-channel 2.3.1",
  "async-trait",
@@ -3795,14 +3867,14 @@ dependencies = [
  "serde_json",
  "smallvec",
  "tempfile",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "workflow-perf-monitor",
 ]
 
 [[package]]
 name = "kaspa-txscript"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "ark-bn254",
  "ark-ec",
@@ -3842,24 +3914,24 @@ dependencies = [
  "serde_json",
  "sha2",
  "smallvec",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "wasm-bindgen",
  "workflow-wasm",
 ]
 
 [[package]]
 name = "kaspa-txscript-errors"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "borsh",
  "kaspa-hashes",
  "secp256k1",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "kaspa-utils"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "arc-swap",
  "async-channel 2.3.1",
@@ -3886,7 +3958,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "sysinfo",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "triggered",
  "uuid 1.18.1",
@@ -3895,7 +3967,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-utils-tower"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "bytes",
  "cfg-if 1.0.0",
@@ -3911,7 +3983,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-utxoindex"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "futures",
  "kaspa-consensus",
@@ -3927,12 +3999,12 @@ dependencies = [
  "rand 0.8.5",
  "rocksdb",
  "serde",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "kaspa-wallet"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-std",
  "async-trait",
@@ -3944,7 +4016,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-wallet-cli-wasm"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "js-sys",
@@ -3958,7 +4030,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-wallet-core"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "aes",
  "ahash",
@@ -4022,7 +4094,7 @@ dependencies = [
  "sha2",
  "slugify-rs",
  "sorted-insert",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -4039,7 +4111,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-wallet-keys"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "borsh",
@@ -4061,7 +4133,7 @@ dependencies = [
  "serde-wasm-bindgen",
  "serde_json",
  "sha2",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -4072,7 +4144,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-wallet-macros"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "convert_case 0.5.0",
  "proc-macro-error",
@@ -4085,7 +4157,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-wallet-pskt"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "bincode",
  "derive_builder",
@@ -4106,7 +4178,7 @@ dependencies = [
  "serde-wasm-bindgen",
  "serde_json",
  "serde_repr",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "wasm-bindgen",
  "wasm-bindgen-test",
  "web-sys",
@@ -4115,7 +4187,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-wasm"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "cfg-if 1.0.0",
  "js-sys",
@@ -4143,7 +4215,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-wasm-core"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "faster-hex 0.9.0",
  "hexplay",
@@ -4154,7 +4226,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-wrpc-client"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-std",
  "async-trait",
@@ -4175,7 +4247,7 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "toml",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -4190,7 +4262,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-wrpc-example-subscriber"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "ctrlc",
  "futures",
@@ -4205,7 +4277,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-wrpc-proxy"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "clap 4.5.51",
@@ -4215,7 +4287,7 @@ dependencies = [
  "kaspa-rpc-macros",
  "kaspa-wrpc-server",
  "num_cpus",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "workflow-core",
  "workflow-log",
@@ -4224,7 +4296,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-wrpc-server"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-trait",
  "borsh",
@@ -4242,7 +4314,7 @@ dependencies = [
  "paste",
  "rustls",
  "serde",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "workflow-core",
  "workflow-log",
@@ -4252,7 +4324,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-wrpc-simple-client-example"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "futures",
  "kaspa-rpc-core",
@@ -4262,7 +4334,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-wrpc-vcc-v2"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "futures",
  "kaspa-addresses",
@@ -4273,7 +4345,7 @@ dependencies = [
 
 [[package]]
 name = "kaspa-wrpc-wasm"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "ahash",
  "async-std",
@@ -4303,7 +4375,7 @@ dependencies = [
 
 [[package]]
 name = "kaspad"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-channel 2.3.1",
  "cfg-if 1.0.0",
@@ -4346,7 +4418,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "tempfile",
- "thiserror 1.0.64",
+ "thiserror 2.0.18",
  "tokio",
  "toml",
  "workflow-log",
@@ -4476,12 +4548,6 @@ dependencies = [
  "pkg-config",
  "vcpkg",
 ]
-
-[[package]]
-name = "linked-hash-map"
-version = "0.5.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0717cef1bc8b636c6e1c1bbdefc09e6322da8a9321966e8928ef80d20f7f770f"
 
 [[package]]
 name = "linkme"
@@ -5470,7 +5536,7 @@ version = "0.2.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77957b295656769bb8ad2b6a6b09d897d94f05c41b069aede1fcdaa675eaea04"
 dependencies = [
- "zerocopy",
+ "zerocopy 0.7.35",
 ]
 
 [[package]]
@@ -6186,7 +6252,7 @@ dependencies = [
 
 [[package]]
 name = "rothschild"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-channel 2.3.1",
  "clap 4.5.51",
@@ -6653,6 +6719,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2-const-stable"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f179d4e11094a893b82fff208f74d448a7512f99f5a0acbd5c679b705f83ed9"
+
+[[package]]
 name = "sha3"
 version = "0.10.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6729,7 +6801,7 @@ dependencies = [
 
 [[package]]
 name = "simpa"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "async-channel 2.3.1",
  "cfg-if 1.0.0",
@@ -7724,8 +7796,6 @@ dependencies = [
  "cfg-if 1.0.0",
  "once_cell",
  "rustversion",
- "serde",
- "serde_json",
  "wasm-bindgen-macro",
 ]
 
@@ -8591,12 +8661,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a5cbf750400958819fb6178eaa83bee5cd9c29a26a40cc241df8c70fdd46984"
 
 [[package]]
-name = "yaml-rust"
-version = "0.4.5"
+name = "zerocopy"
+version = "0.7.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56c1936c4cc7a1c9ab21a1ebb602eb942ba868cbd44a99cb7cdc5892335e1c85"
+checksum = "1b9b4fd18abc82b8136838da5d50bae7bdea537c574d8dc1a34ed098d6c166f0"
 dependencies = [
- "linked-hash-map",
+ "byteorder",
+ "zerocopy-derive 0.7.35",
 ]
 
 [[package]]
@@ -8612,12 +8683,11 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.7.35"
+version = "0.8.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b9b4fd18abc82b8136838da5d50bae7bdea537c574d8dc1a34ed098d6c166f0"
+checksum = "f2578b716f8a7a858b7f02d5bd870c14bf4ddbbcf3a4c05414ba6503640505e3"
 dependencies = [
- "byteorder",
- "zerocopy-derive",
+ "zerocopy-derive 0.8.42",
 ]
 
 [[package]]
@@ -8625,6 +8695,17 @@ name = "zerocopy-derive"
 version = "0.7.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa4f8080344d4671fb4e831a13ad1e68092748387dfc4f55e356242fae12ce3e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.110",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.8.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e6cc098ea4d3bd6246687de65af3f920c430e236bee1e3bf2e441463f08a02f"
 dependencies = [
  "proc-macro2",
  "quote",
