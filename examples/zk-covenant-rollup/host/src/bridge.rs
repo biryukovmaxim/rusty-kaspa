@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 
 use kaspa_consensus_core::constants::TX_VERSION;
 use kaspa_txscript::opcodes::codes::{
-    Op0, Op1Sub, OpAdd, OpBlake2b, OpCat, OpCovOutCount, OpCovOutputIdx, OpData32, OpDrop, OpDup, OpElse, OpEndIf, OpEqual,
+    Op0, Op1Sub, OpAdd, OpBlake2b, OpCat, OpCovOutputCount, OpCovOutputIdx, OpData32, OpDrop, OpDup, OpElse, OpEndIf, OpEqual,
     OpEqualVerify, OpFalse, OpFromAltStack, OpGreaterThan, OpGreaterThanOrEqual, OpIf, OpInputCovenantId, OpNip, OpNum2Bin, OpOver,
     OpRoll, OpRot, OpSHA256, OpSub, OpSwap, OpToAltStack, OpTrue, OpTxInputAmount, OpTxInputCount, OpTxInputIndex,
     OpTxInputScriptSigLen, OpTxInputScriptSigSubstr, OpTxInputSpk, OpTxOutputAmount, OpTxOutputCount, OpTxOutputSpk, OpVerify,
@@ -463,7 +463,7 @@ impl PermissionRedeemEmitter for PermissionRedeem {
             // Verify no covenant continuation outputs remain.
             b.add_op(OpTxInputIndex).unwrap();
             b.add_op(OpInputCovenantId).unwrap();
-            b.add_op(OpCovOutCount).unwrap();
+            b.add_op(OpCovOutputCount).unwrap();
             b.add_i64(0).unwrap();
             b.add_op(OpEqualVerify).unwrap();
             // Main: [deduct]
@@ -511,7 +511,7 @@ impl PermissionRedeemEmitter for PermissionRedeem {
             b.add_op(OpTxInputIndex).unwrap();
             b.add_op(OpInputCovenantId).unwrap();
             b.add_op(OpDup).unwrap(); // [..., covenant_id, covenant_id]
-            b.add_op(OpCovOutCount).unwrap(); // [..., covenant_id, count]
+            b.add_op(OpCovOutputCount).unwrap(); // [..., covenant_id, count]
             b.add_op(OpDup).unwrap(); // [..., covenant_id, count, count]
             b.add_i64(1).unwrap();
             b.add_op(OpEqualVerify).unwrap(); // [..., covenant_id, count]
@@ -607,7 +607,7 @@ impl PermissionRedeemEmitter for PermissionRedeem {
         // ── delegate change index = 1 + CovOutCount (after withdrawal + optional continuation) ──
         b.add_op(OpTxInputIndex).unwrap();
         b.add_op(OpInputCovenantId).unwrap();
-        b.add_op(OpCovOutCount).unwrap();
+        b.add_op(OpCovOutputCount).unwrap();
         b.add_i64(1).unwrap();
         b.add_op(OpAdd).unwrap();
         // Main: [expected_change, delegate_idx], Alt: [expected_spk]

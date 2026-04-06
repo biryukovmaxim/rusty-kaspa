@@ -2659,6 +2659,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "include_bytes_aligned"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ee796ad498c8d9a1d68e477df8f754ed784ef875de1414ebdaf169f70a6a784"
+
+[[package]]
 name = "include_dir"
 version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2676,12 +2682,6 @@ dependencies = [
  "proc-macro2",
  "quote",
 ]
-
-[[package]]
-name = "include_bytes_aligned"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ee796ad498c8d9a1d68e477df8f754ed784ef875de1414ebdaf169f70a6a784"
 
 [[package]]
 name = "indexed_db_futures"
@@ -8661,16 +8661,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a5cbf750400958819fb6178eaa83bee5cd9c29a26a40cc241df8c70fdd46984"
 
 [[package]]
-name = "zerocopy"
-version = "0.7.35"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b9b4fd18abc82b8136838da5d50bae7bdea537c574d8dc1a34ed098d6c166f0"
-dependencies = [
- "byteorder",
- "zerocopy-derive 0.7.35",
-]
-
-[[package]]
 name = "yaml-rust2"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8679,6 +8669,16 @@ dependencies = [
  "arraydeque",
  "encoding_rs",
  "hashlink",
+]
+
+[[package]]
+name = "zerocopy"
+version = "0.7.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b9b4fd18abc82b8136838da5d50bae7bdea537c574d8dc1a34ed098d6c166f0"
+dependencies = [
+ "byteorder",
+ "zerocopy-derive 0.7.35",
 ]
 
 [[package]]
@@ -8749,7 +8749,7 @@ dependencies = [
 
 [[package]]
 name = "zk-covenant-inline-core"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "bytemuck",
  "sha2",
@@ -8757,7 +8757,7 @@ dependencies = [
 
 [[package]]
 name = "zk-covenant-rollup-core"
-version = "1.1.0-rc.3"
+version = "1.1.0"
 dependencies = [
  "blake2b_simd",
  "blake3",
@@ -8765,6 +8765,8 @@ dependencies = [
  "kaspa-addresses",
  "kaspa-hashes",
  "kaspa-merkle",
+ "kaspa-seq-commit",
+ "kaspa-smt",
  "kaspa-txscript",
  "sha2",
 ]

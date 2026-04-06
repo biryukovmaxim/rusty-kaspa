@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use kaspa_consensus_core::tx::{ScriptPublicKey, TransactionOutput};
-use kaspa_hashes::{Hash, SeqCommitmentMerkleBranchHash};
+use kaspa_hashes::Hash;
+use kaspa_hashes::SeqCommitActiveNode;
+use kaspa_smt::tree::SparseMerkleTree;
 use kaspa_txscript::pay_to_script_hash_script;
 use kaspa_txscript::seq_commit_accessor::SeqCommitAccessor;
 use zk_covenant_rollup_core::{
@@ -9,17 +11,17 @@ use zk_covenant_rollup_core::{
     p2sh::blake2b_script_hash,
     pad_to_depth, pay_to_pubkey_spk, perm_leaf_hash,
     permission_tree::{required_depth, StreamingPermTreeBuilder},
-    seq_commit::seq_commitment_leaf,
+    seq_commit::{self, activity_leaf, from_hash, lane_tip_next, seq_commit_tx_digest, smt_leaf_hash, to_hash, ActivityDigestBuilder},
     smt::Smt,
     state::{AccountWitness, StateRoot},
-    MAX_DELEGATE_INPUTS,
+    CommitmentWitness, MAX_DELEGATE_INPUTS, ROLLUP_LANE_KEY,
 };
 
 use crate::bridge::build_delegate_entry_script;
 
 use crate::mock_tx::{
     create_entry_tx, create_exit_tx, create_exit_tx_insufficient, create_prev_tx, create_transfer_tx, create_unknown_action_tx,
-    create_v0_tx, create_v1_non_action_tx, ZkTransaction,
+    create_v1_non_action_tx, ZkTransaction,
 };
 
 /// Mock implementation of SeqCommitAccessor for testing
@@ -115,9 +117,18 @@ impl Transfer {
 pub struct MockChain {
     pub block_hashes: Vec<Hash>,
     pub block_txs: Vec<Vec<ZkTransaction>>,
+    /// Per-block context hashes (host precomputes, guest reads as [u32; 8])
+    pub block_context_hashes: Vec<[u32; 8]>,
     pub accessor: MockSeqCommitAccessor,
+    /// Final lane tip after processing all blocks (stored in UTXO as rollup state).
+    pub final_lane_tip: [u32; 8],
+    /// Final seq_commit derived from lane tip + SMT (verified against block header).
     pub final_seq_commit: Hash,
     pub final_state_root: StateRoot,
+    /// Commitment witness header (Pod — written as one slice)
+    pub commitment_witness: CommitmentWitness,
+    /// Serialized SMT proof for the rollup lane (OwnedSmtProof::to_bytes)
+    pub smt_proof_bytes: Vec<u8>,
     /// Full permission redeem script (if exits occurred)
     pub permission_redeem: Option<Vec<u8>>,
     /// blake2b(permission_redeem) — script hash for journal verification
@@ -127,7 +138,7 @@ pub struct MockChain {
 }
 
 /// Build a mock chain with account-based transfers
-pub fn build_mock_chain(initial_seq_commit: Hash, covenant_id_bytes: &[u8; 32], non_activity_blocks: u32) -> MockChain {
+pub fn build_mock_chain(initial_lane_tip: Hash, covenant_id_bytes: &[u8; 32]) -> MockChain {
     // Initialize accounts
     let mut smt = Smt::new();
     let mut balances: HashMap<AccountName, u64> = HashMap::new();
@@ -161,8 +172,9 @@ pub fn build_mock_chain(initial_seq_commit: Hash, covenant_id_bytes: &[u8; 32], 
 
     let mut block_hashes: Vec<Hash> = Vec::new();
     let mut block_txs: Vec<Vec<ZkTransaction>> = Vec::new();
+    let mut block_context_hashes: Vec<[u32; 8]> = Vec::new();
     let mut accessor_map = HashMap::new();
-    let mut seq_commit = initial_seq_commit;
+    let mut lane_tip = from_bytes(initial_lane_tip.as_bytes());
     let mut perm_builder = StreamingPermTreeBuilder::new();
 
     for (block_idx, transfers) in blocks.iter().enumerate() {
@@ -171,16 +183,13 @@ pub fn build_mock_chain(initial_seq_commit: Hash, covenant_id_bytes: &[u8; 32], 
 
         let mut txs = Vec::new();
 
-        // Add a regular V0 tx first
-        txs.push(create_v0_tx([0xDEADBEEF, block_idx as u32, 0, 0, 0, 0, 0, 0]));
-
-        // Block 1: Add a V1 non-action tx (should be ignored by guest)
+        // Block 1: Add a V1 non-action tx (should be ignored by guest action processing)
         if block_idx == 0 {
             println!("  Adding V1 non-action tx (should be ignored)");
             txs.push(create_v1_non_action_tx());
         }
 
-        // Block 2: Add an unknown action tx (has action prefix but unknown op code)
+        // Block 2: Add an unknown action tx (unknown op code — ignored)
         if block_idx == 1 {
             println!("  Adding unknown action tx (should be ignored)");
             txs.push(create_unknown_action_tx());
@@ -431,46 +440,23 @@ pub fn build_mock_chain(initial_seq_commit: Hash, covenant_id_bytes: &[u8; 32], 
             }
         }
 
-        // Compute tx leaf digests for seq_commitment
-        let tx_digests: Vec<Hash> = txs
-            .iter()
-            .map(|tx| {
-                let leaf = seq_commitment_leaf(&tx.tx_id(), tx.version());
-                Hash::from_bytes(bytemuck::cast_slice(&leaf).try_into().unwrap())
-            })
-            .collect();
+        // Compute activity digest for this block's lane transactions
+        let context_hash = [0u32; 8]; // mock: zero context hash
+        let mut activity_builder = ActivityDigestBuilder::new();
+        for (merge_idx, tx) in txs.iter().enumerate() {
+            let tx_digest = seq_commit_tx_digest(&tx.tx_id(), tx.version());
+            activity_builder.add_leaf(to_hash(&activity_leaf(&tx_digest, merge_idx as u32)));
+        }
+        let activity_digest = from_hash(activity_builder.finalize());
+        lane_tip = lane_tip_next(&lane_tip, &ROLLUP_LANE_KEY, &activity_digest, &context_hash);
+        accessor_map.insert(block_hashes[block_idx], Hash::from_bytes(bytemuck::cast(lane_tip)));
 
-        // Update seq_commitment
-        seq_commit = calc_accepted_id_merkle_root(seq_commit, tx_digests.into_iter());
-        accessor_map.insert(block_hashes[block_idx], seq_commit);
-
+        block_context_hashes.push(context_hash);
         block_txs.push(txs);
     }
 
-    // Append non-activity blocks (V0-only transactions, no state changes)
-    if non_activity_blocks > 0 {
-        println!("\n  Appending {} non-activity blocks (3000 V0 txs each)", non_activity_blocks);
-        let activity_block_count = block_hashes.len();
-        for i in 0..non_activity_blocks {
-            let abs_idx = activity_block_count + i as usize;
-            block_hashes.push(Hash::from_u64_word((abs_idx + 1) as u64));
-
-            let txs: Vec<ZkTransaction> =
-                (0..3000u32).map(|tx_idx| create_v0_tx([0xBEEF0000 | i, tx_idx, 0, 0, 0, 0, 0, 0])).collect();
-
-            let tx_digests: Vec<Hash> = txs
-                .iter()
-                .map(|tx| {
-                    let leaf = seq_commitment_leaf(&tx.tx_id(), tx.version());
-                    Hash::from_bytes(bytemuck::cast_slice(&leaf).try_into().unwrap())
-                })
-                .collect();
-
-            seq_commit = calc_accepted_id_merkle_root(seq_commit, tx_digests.into_iter());
-            accessor_map.insert(block_hashes[abs_idx], seq_commit);
-            block_txs.push(txs);
-        }
-    }
+    // Non-activity blocks (zero lane txs) are not sent to the guest —
+    // the lane tip is unchanged so there's nothing to prove.
 
     // Compute permission tree data if exits occurred
     let perm_count = perm_builder.leaf_count();
@@ -500,12 +486,43 @@ pub fn build_mock_chain(initial_seq_commit: Hash, covenant_id_bytes: &[u8; 32], 
     let final_root = smt.root();
     println!("\nFinal state root: {}", faster_hex::hex_string(bytemuck::bytes_of(&final_root)));
 
+    // Build commitment witness using a real 256-bit active-lanes SMT.
+    let payload_and_ctx_digest = [0u32; 8]; // mock
+    let parent_seq_commit = from_bytes(initial_lane_tip.as_bytes());
+    let blue_score = 0u64;
+
+    // Insert rollup lane leaf into the active-lanes SMT
+    let lane_key_hash = to_hash(&ROLLUP_LANE_KEY);
+    let leaf_hash = to_hash(&smt_leaf_hash(&ROLLUP_LANE_KEY, &lane_tip, blue_score));
+    let mut lanes_smt = SparseMerkleTree::<SeqCommitActiveNode>::new();
+    lanes_smt.insert(lane_key_hash, leaf_hash);
+
+    let lanes_root = from_hash(lanes_smt.root());
+    let smt_proof = lanes_smt.prove(&lane_key_hash).expect("lane key must be in SMT");
+    let smt_proof_bytes = smt_proof.to_bytes();
+
+    let sr = seq_commit::seq_state_root(&lanes_root, &payload_and_ctx_digest);
+    let final_seq_commit = seq_commit::seq_commit(&parent_seq_commit, &sr);
+
+    // Fix: the accessor must return the seq_commit (accepted_id_merkle_root),
+    // not the lane_tip. OpChainblockSeqCommit returns the block's seq_commit.
+    let final_seq_commit_hash = Hash::from_bytes(bytemuck::cast(final_seq_commit));
+    if let Some(last_hash) = block_hashes.last() {
+        accessor_map.insert(*last_hash, final_seq_commit_hash);
+    }
+
+    let witness = CommitmentWitness { payload_and_ctx_digest, parent_seq_commit, blue_score };
+
     MockChain {
         block_hashes,
         block_txs,
+        block_context_hashes,
         accessor: MockSeqCommitAccessor(accessor_map),
-        final_seq_commit: seq_commit,
+        final_lane_tip: lane_tip,
+        final_seq_commit: Hash::from_bytes(bytemuck::cast(final_seq_commit)),
         final_state_root: final_root,
+        commitment_witness: witness,
+        smt_proof_bytes,
         permission_redeem,
         permission_spk_hash,
         perm_redeem_script_len,
@@ -521,14 +538,6 @@ pub fn build_initial_smt() -> Smt {
     smt
 }
 
-pub fn calc_accepted_id_merkle_root(prev: Hash, tx_digests: impl ExactSizeIterator<Item = Hash>) -> Hash {
-    kaspa_merkle::merkle_hash_with_hasher(
-        prev,
-        kaspa_merkle::calc_merkle_root_with_hasher::<SeqCommitmentMerkleBranchHash, true>(tx_digests),
-        SeqCommitmentMerkleBranchHash::new(),
-    )
-}
-
 pub fn from_bytes(arr: [u8; 32]) -> [u32; 8] {
     let mut out = [0; 8];
     bytemuck::bytes_of_mut(&mut out).copy_from_slice(&arr);
@@ -541,8 +550,8 @@ mod tests {
 
     #[test]
     fn mock_chain_has_permission_data() {
-        let prev_seq = calc_accepted_id_merkle_root(Hash::default(), std::iter::empty());
-        let chain = build_mock_chain(prev_seq, &[0xFF; 32], 0);
+        let prev_seq = Hash::default();
+        let chain = build_mock_chain(prev_seq, &[0xFF; 32]);
 
         // Valid exits occurred → permission fields must be populated
         assert!(chain.permission_redeem.is_some(), "should have permission redeem script");
@@ -552,8 +561,8 @@ mod tests {
 
     #[test]
     fn mock_chain_permission_tree_has_two_leaves() {
-        let prev_seq = calc_accepted_id_merkle_root(Hash::default(), std::iter::empty());
-        let chain = build_mock_chain(prev_seq, &[0xFF; 32], 0);
+        let prev_seq = Hash::default();
+        let chain = build_mock_chain(prev_seq, &[0xFF; 32]);
 
         // Only 2 valid exits (Eve 100, Dave 200); the 2 invalid exits should NOT add leaves.
         // We verify this indirectly: the permission redeem script length should be
@@ -565,8 +574,8 @@ mod tests {
 
     #[test]
     fn mock_chain_final_state_matches_expected_balances() {
-        let prev_seq = calc_accepted_id_merkle_root(Hash::default(), std::iter::empty());
-        let chain = build_mock_chain(prev_seq, &[0xFF; 32], 0);
+        let prev_seq = Hash::default();
+        let chain = build_mock_chain(prev_seq, &[0xFF; 32]);
 
         // Expected final balances:
         //   Block 1: Alice→Bob 100 (A=900,B=600), Bob→Charlie 50 (B=550,C=50)
@@ -590,9 +599,9 @@ mod tests {
 
     #[test]
     fn mock_chain_deterministic() {
-        let prev_seq = calc_accepted_id_merkle_root(Hash::default(), std::iter::empty());
-        let chain1 = build_mock_chain(prev_seq, &[0xFF; 32], 0);
-        let chain2 = build_mock_chain(prev_seq, &[0xFF; 32], 0);
+        let prev_seq = Hash::default();
+        let chain1 = build_mock_chain(prev_seq, &[0xFF; 32]);
+        let chain2 = build_mock_chain(prev_seq, &[0xFF; 32]);
 
         assert_eq!(chain1.final_state_root, chain2.final_state_root);
         assert_eq!(chain1.final_seq_commit, chain2.final_seq_commit);
@@ -603,7 +612,7 @@ mod tests {
     fn mock_chain_blocks_without_exits_have_no_permission_effect() {
         // Blocks 1 and 2 have no exits. Verify this by checking that a chain
         // with only those blocks produces no permission data.
-        let _prev_seq = calc_accepted_id_merkle_root(Hash::default(), std::iter::empty());
+        let _prev_seq = Hash::default();
 
         // Build a minimal chain with no exits to verify the no-exit path
         let _smt = build_initial_smt();

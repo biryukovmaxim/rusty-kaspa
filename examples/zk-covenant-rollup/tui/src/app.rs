@@ -733,7 +733,7 @@ impl App {
                         let rec = &self.covenants[self.covenant_list_index].1;
                         let starting_block = rec.deploy_starting_block.unwrap_or(self.pruning_point);
                         let initial_seq = rec.deploy_initial_seq.unwrap_or_else(|| {
-                            zk_covenant_rollup_host::mock_chain::calc_accepted_id_merkle_root(Hash::default(), std::iter::empty())
+                            Hash::default()
                         });
                         let prover_cov_id = rec.on_chain_covenant_id.unwrap_or(id);
                         let initial_state_root = zk_covenant_rollup_core::state::empty_tree_root();
@@ -1628,13 +1628,16 @@ impl App {
         let proof = self.completed_proofs.remove(0);
 
         // Extract new state from journal
+        // Journal layout: prev_state(32) | prev_lane_tip(32) | new_state(32) | new_lane_tip(32)
+        //                 | new_seq_commit(32) | covenant_id(32) [| perm_hash(32)]
         let journal = &proof.receipt.journal.bytes;
-        if journal.len() < 128 {
-            self.log(format!("Invalid journal length: {} (need >= 128)", journal.len()));
+        if journal.len() < 192 {
+            self.log(format!("Invalid journal length: {} (need >= 192)", journal.len()));
             return;
         }
         let new_state_hash: [u32; 8] = bytemuck::pod_read_unaligned(&journal[64..96]);
-        let new_seq_commitment: [u32; 8] = bytemuck::pod_read_unaligned(&journal[96..128]);
+        let new_lane_tip: [u32; 8] = bytemuck::pod_read_unaligned(&journal[96..128]);
+        let new_seq_commit: [u32; 8] = bytemuck::pod_read_unaligned(&journal[128..160]);
 
         let program_id: [u8; 32] = bytemuck::cast(ZK_COVENANT_ROLLUP_GUEST_ID);
         let zk_tag = match proof.proof_kind {
@@ -1647,7 +1650,7 @@ impl App {
         loop {
             let script = build_redeem_script(
                 proof.public_input.prev_state_hash,
-                proof.public_input.prev_seq_commitment,
+                proof.public_input.prev_lane_tip,
                 computed_len,
                 &program_id,
                 &zk_tag,
@@ -1661,18 +1664,18 @@ impl App {
 
         let input_redeem = build_redeem_script(
             proof.public_input.prev_state_hash,
-            proof.public_input.prev_seq_commitment,
+            proof.public_input.prev_lane_tip,
             computed_len,
             &program_id,
             &zk_tag,
         );
-        let output_redeem = build_redeem_script(new_state_hash, new_seq_commitment, computed_len, &program_id, &zk_tag);
+        let output_redeem = build_redeem_script(new_state_hash, new_lane_tip, computed_len, &program_id, &zk_tag);
         let output_spk = pay_to_script_hash_script(&output_redeem);
 
         // Build sig_script
         let sig_script = match proof.proof_kind {
             ProofKind::Succinct => {
-                match self.build_succinct_sig_script(&proof.receipt, proof.block_prove_to, &new_state_hash, &input_redeem) {
+                match self.build_succinct_sig_script(&proof.receipt, proof.block_prove_to, &new_lane_tip, &new_state_hash, &input_redeem) {
                     Ok(s) => s,
                     Err(e) => {
                         self.log(format!("Failed to build succinct sig_script: {e}"));
@@ -1681,7 +1684,7 @@ impl App {
                 }
             }
             ProofKind::Groth16 => {
-                match self.build_groth16_sig_script(&proof.receipt, proof.block_prove_to, &new_state_hash, &input_redeem) {
+                match self.build_groth16_sig_script(&proof.receipt, proof.block_prove_to, &new_lane_tip, &new_state_hash, &input_redeem) {
                     Ok(s) => s,
                     Err(e) => {
                         self.log(format!("Failed to build groth16 sig_script: {e}"));
@@ -1785,9 +1788,9 @@ impl App {
 
         // ── Local script verification before submitting ──
         {
-            let new_seq_as_hash = Hash::from_slice(bytemuck::bytes_of(&new_seq_commitment));
+            let seq_commit_hash = Hash::from_slice(bytemuck::bytes_of(&new_seq_commit));
             let mut map = std::collections::HashMap::new();
-            map.insert(proof.block_prove_to, new_seq_as_hash);
+            map.insert(proof.block_prove_to, seq_commit_hash);
             let accessor = zk_covenant_rollup_host::mock_chain::MockSeqCommitAccessor(map);
 
             // Log prover state for debugging
@@ -1795,9 +1798,9 @@ impl App {
                 self.log(format!(
                     "Prover state: prev_proved_block={} prev_proved_seq={} last_processed_block={} last_processed_seq={} current_state={}",
                     Hash::from_bytes(bytemuck::cast(prover.prev_proved_state_root)),
-                    prover.prev_proved_seq_commitment,
+                    prover.prev_proved_lane_tip,
                     prover.last_processed_block,
-                    prover.seq_commitment,
+                    prover.lane_tip,
                     Hash::from_bytes(bytemuck::cast(prover.state_root)),
                 ));
             }
@@ -1805,9 +1808,9 @@ impl App {
                 "Proof data: block_prove_to={} prev_state={} prev_seq={} new_state={} new_seq={}",
                 proof.block_prove_to,
                 Hash::from_bytes(bytemuck::cast(proof.public_input.prev_state_hash)),
-                Hash::from_bytes(bytemuck::cast(proof.public_input.prev_seq_commitment)),
+                Hash::from_bytes(bytemuck::cast(proof.public_input.prev_lane_tip)),
                 Hash::from_bytes(bytemuck::cast(new_state_hash)),
-                Hash::from_bytes(bytemuck::cast(new_seq_commitment)),
+                Hash::from_bytes(bytemuck::cast(new_lane_tip)),
             ));
 
             let utxos = vec![covenant_entry.clone(), collateral_entry.clone()];
@@ -1856,6 +1859,7 @@ impl App {
         &self,
         receipt: &risc0_zkvm::Receipt,
         block_prove_to: Hash,
+        new_lane_tip: &[u32; 8],
         new_state_hash: &[u32; 8],
         input_redeem: &[u8],
     ) -> Result<Vec<u8>, String> {
@@ -1868,6 +1872,8 @@ impl App {
         let control_digests_bytes: Vec<u8> =
             succinct.control_inclusion_proof.digests.iter().flat_map(|d| d.as_bytes()).copied().collect();
 
+        // Stack layout (bottom → top, after P2SH extracts redeem):
+        //   [seal, claim, hashfn, ctrl_idx, ctrl_digests, new_lane_tip, new_state_hash, block_prove_to]
         Ok(ScriptBuilder::new()
             .add_data(&seal_bytes)
             .unwrap()
@@ -1879,9 +1885,11 @@ impl App {
             .unwrap()
             .add_data(&control_digests_bytes)
             .unwrap()
-            .add_data(block_prove_to.as_bytes().as_slice())
+            .add_data(bytemuck::bytes_of(new_lane_tip))
             .unwrap()
             .add_data(bytemuck::bytes_of(new_state_hash))
+            .unwrap()
+            .add_data(block_prove_to.as_bytes().as_slice())
             .unwrap()
             .add_data(input_redeem)
             .unwrap()
@@ -1892,18 +1900,23 @@ impl App {
         &self,
         receipt: &risc0_zkvm::Receipt,
         block_prove_to: Hash,
+        new_lane_tip: &[u32; 8],
         new_state_hash: &[u32; 8],
         input_redeem: &[u8],
     ) -> Result<Vec<u8>, String> {
         let groth16 = receipt.inner.groth16().map_err(|e| format!("Not a groth16 receipt: {e}"))?;
         let compressed_proof = zk_covenant_common::seal_to_compressed_proof(&groth16.seal);
 
+        // Stack layout (bottom → top, after P2SH extracts redeem):
+        //   [proof, new_lane_tip, new_state_hash, block_prove_to]
         Ok(ScriptBuilder::new()
             .add_data(&compressed_proof)
             .unwrap()
-            .add_data(block_prove_to.as_bytes().as_slice())
+            .add_data(bytemuck::bytes_of(new_lane_tip))
             .unwrap()
             .add_data(bytemuck::bytes_of(new_state_hash))
+            .unwrap()
+            .add_data(block_prove_to.as_bytes().as_slice())
             .unwrap()
             .add_data(input_redeem)
             .unwrap()
@@ -2807,7 +2820,7 @@ impl App {
                         let state = ProvingState {
                             last_proved_block_hash: prover.last_processed_block,
                             state_root: Hash::from_bytes(bytemuck::cast(prover.state_root)),
-                            seq_commitment: prover.seq_commitment,
+                            seq_commitment: prover.lane_tip,
                             proof_count: self.db.get_proving_state(covenant_id).ok().flatten().map(|s| s.proof_count + 1).unwrap_or(1),
                         };
                         if let Err(e) = self.db.put_proving_state(covenant_id, &state) {
@@ -3115,7 +3128,7 @@ impl App {
             let rec = &self.covenants[0].1;
             let starting_block = rec.deploy_starting_block.unwrap_or(self.pruning_point);
             let initial_seq = rec.deploy_initial_seq.unwrap_or_else(|| {
-                zk_covenant_rollup_host::mock_chain::calc_accepted_id_merkle_root(Hash::default(), std::iter::empty())
+                Hash::default()
             });
             let prover_cov_id = rec.on_chain_covenant_id.unwrap_or(id);
             let initial_state_root = zk_covenant_rollup_core::state::empty_tree_root();

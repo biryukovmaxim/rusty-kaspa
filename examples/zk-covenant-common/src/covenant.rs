@@ -1,6 +1,6 @@
 use kaspa_consensus_core::constants::TX_VERSION;
 use kaspa_txscript::opcodes::codes::{
-    OpBlake2b, OpCat, OpCovOutCount, OpData32, OpEqual, OpEqualVerify, OpInputCovenantId, OpSwap, OpTxInputIndex, OpTxOutputSpk,
+    OpBlake2b, OpCat, OpCovOutputCount, OpData32, OpEqual, OpEqualVerify, OpInputCovenantId, OpSwap, OpTxInputIndex, OpTxOutputSpk,
 };
 use kaspa_txscript::script_builder::ScriptBuilder;
 
@@ -64,6 +64,6 @@ impl CovenantBase for ScriptBuilder {
     }
 
     fn verify_covenant_single_output(&mut self) -> Result<&mut Self, Self::Error> {
-        self.add_op(OpTxInputIndex)?.add_op(OpInputCovenantId)?.add_op(OpCovOutCount)?.add_i64(1)?.add_op(OpEqualVerify)
+        self.add_op(OpTxInputIndex)?.add_op(OpInputCovenantId)?.add_op(OpCovOutputCount)?.add_i64(1)?.add_op(OpEqualVerify)
     }
 }

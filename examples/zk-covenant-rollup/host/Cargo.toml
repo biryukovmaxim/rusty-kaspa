@@ -20,7 +20,7 @@ cuda = ["risc0-zkvm/cuda"]
 kaspa-consensus-core = { path = "../../../consensus/core" }
 kaspa-txscript = { path = "../../../crypto/txscript" }
 kaspa-hashes = { path = "../../../crypto/hashes" }
-kaspa-merkle = { path = "../../../crypto/merkle" }
+kaspa-smt = { path = "../../../crypto/smt", features = ["test-utils"] }
 
 blake3 = "1.5"
 borsh = { version = "1.6.0"}

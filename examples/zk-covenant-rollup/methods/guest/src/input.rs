@@ -1,7 +1,7 @@
 use alloc::vec;
 use bytemuck::Zeroable;
 use risc0_zkvm::serde::WordRead;
-use zk_covenant_rollup_core::{AlignedBytes, PublicInput, state::AccountWitness};
+use zk_covenant_rollup_core::{AlignedBytes, CommitmentWitness, PublicInput, state::AccountWitness};
 
 /// Read a single u32 from stdin
 pub fn read_u32(stdin: &mut impl WordRead) -> u32 {
@@ -34,6 +34,13 @@ pub fn read_public_input(stdin: &mut impl WordRead) -> PublicInput {
 /// Read account witness from stdin
 pub fn read_account_witness(stdin: &mut impl WordRead) -> AccountWitness {
     let mut witness = AccountWitness::zeroed();
+    stdin.read_words(bytemuck::cast_slice_mut(bytemuck::bytes_of_mut(&mut witness))).unwrap();
+    witness
+}
+
+/// Read commitment witness (fixed-size Pod) from stdin
+pub fn read_commitment_witness(stdin: &mut impl WordRead) -> CommitmentWitness {
+    let mut witness = CommitmentWitness::zeroed();
     stdin.read_words(bytemuck::cast_slice_mut(bytemuck::bytes_of_mut(&mut witness))).unwrap();
     witness
 }

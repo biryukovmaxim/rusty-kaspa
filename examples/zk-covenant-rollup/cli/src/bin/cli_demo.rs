@@ -17,7 +17,8 @@ use kaspa_txscript::{pay_to_address_script, pay_to_script_hash_script};
 use kaspa_wrpc_client::prelude::{NetworkId, NetworkType, Notification};
 use risc0_zkvm::sha::Digestible;
 use zk_covenant_rollup_core::permission_tree::{perm_empty_leaf_hash, PermissionTree};
-use zk_covenant_rollup_core::seq_commit::{calc_accepted_id_merkle_root, seq_commitment_leaf, StreamingMerkleBuilder};
+use zk_covenant_rollup_core::seq_commit::{ActivityDigestBuilder, activity_leaf, from_hash, lane_tip_next, seq_commit_tx_digest, to_hash};
+use zk_covenant_rollup_core::ROLLUP_LANE_KEY;
 use zk_covenant_rollup_core::state::empty_tree_root;
 use zk_covenant_rollup_host::bridge::{build_delegate_entry_script, build_permission_redeem_converged, build_permission_sig_script};
 use zk_covenant_rollup_host::mock_chain::{from_bytes, MockSeqCommitAccessor};
@@ -85,7 +86,7 @@ struct ProveResult {
     output: ProveOutput,
     block_prove_to: Hash,
     prev_state_hash: [u32; 8],
-    prev_seq_commitment: [u32; 8],
+    prev_lane_tip: [u32; 8],
     perm_redeem_script: Option<Vec<u8>>,
     perm_exit_data: Vec<(Vec<u8>, u64)>,
 }
@@ -161,13 +162,13 @@ fn tx_to_rpc(tx: Transaction) -> RpcTransaction {
 /// Converge on redeem script length (it encodes its own length, so iterate).
 fn converged_redeem_script(
     prev_state_hash: [u32; 8],
-    prev_seq_commitment: [u32; 8],
+    prev_lane_tip: [u32; 8],
     program_id: &[u8; 32],
     zk_tag: &ZkTag,
 ) -> Vec<u8> {
     let mut computed_len: i64 = 75;
     loop {
-        let script = build_redeem_script(prev_state_hash, prev_seq_commitment, computed_len, program_id, zk_tag);
+        let script = build_redeem_script(prev_state_hash, prev_lane_tip, computed_len, program_id, zk_tag);
         let new_len = script.len() as i64;
         if new_len == computed_len {
             return script;
@@ -180,9 +181,12 @@ fn build_sig_script(
     receipt: &risc0_zkvm::Receipt,
     proof_kind: ProofKind,
     block_prove_to: Hash,
+    new_lane_tip: &[u32; 8],
     new_state_hash: &[u32; 8],
     input_redeem: &[u8],
 ) -> Result<Vec<u8>> {
+    // Stack layout (bottom → top, after P2SH extracts redeem):
+    //   [proof_data..., new_lane_tip, new_state_hash, block_prove_to]
     match proof_kind {
         ProofKind::Succinct => {
             let succinct = receipt.inner.succinct().map_err(|e| anyhow::anyhow!("Not a succinct receipt: {e}"))?;
@@ -204,9 +208,11 @@ fn build_sig_script(
                 .unwrap()
                 .add_data(&control_digests_bytes)
                 .unwrap()
-                .add_data(block_prove_to.as_bytes().as_slice())
+                .add_data(bytemuck::bytes_of(new_lane_tip))
                 .unwrap()
                 .add_data(bytemuck::bytes_of(new_state_hash))
+                .unwrap()
+                .add_data(block_prove_to.as_bytes().as_slice())
                 .unwrap()
                 .add_data(input_redeem)
                 .unwrap()
@@ -218,9 +224,11 @@ fn build_sig_script(
             Ok(ScriptBuilder::new()
                 .add_data(&compressed_proof)
                 .unwrap()
-                .add_data(block_prove_to.as_bytes().as_slice())
+                .add_data(bytemuck::bytes_of(new_lane_tip))
                 .unwrap()
                 .add_data(bytemuck::bytes_of(new_state_hash))
+                .unwrap()
+                .add_data(block_prove_to.as_bytes().as_slice())
                 .unwrap()
                 .add_data(input_redeem)
                 .unwrap()
@@ -440,7 +448,7 @@ async fn sync_chain(node: &KaspaNode, prover: &mut RollupProver) -> Result<usize
         }
 
         // Capture seq commitment BEFORE this batch for independent re-computation.
-        let mut computed_seq: [u32; 8] = from_bytes(prover.seq_commitment.as_bytes());
+        let mut computed_lane_tip: [u32; 8] = from_bytes(prover.lane_tip.as_bytes());
 
         let result = prover.process_chain_response(&resp);
 
@@ -460,13 +468,15 @@ async fn sync_chain(node: &KaspaNode, prover: &mut RollupProver) -> Result<usize
                 );
             }
 
-            let mut builder = StreamingMerkleBuilder::new();
-            for zk_tx in block_zk_txs {
-                builder.add_leaf(seq_commitment_leaf(&zk_tx.tx_id(), zk_tx.version()));
+            let mut builder = ActivityDigestBuilder::new();
+            for (merge_idx, zk_tx) in block_zk_txs.iter().enumerate() {
+                let digest = seq_commit_tx_digest(&zk_tx.tx_id(), zk_tx.version());
+                builder.add_leaf(to_hash(&activity_leaf(&digest, merge_idx as u32)));
             }
-            let block_root = builder.finalize();
-            computed_seq = calc_accepted_id_merkle_root(&computed_seq, &block_root);
-            let computed_hash = Hash::from_bytes(bytemuck::cast(computed_seq));
+            let context_hash = [0u32; 8]; // TODO: read real context hash
+            let activity_digest = from_hash(builder.finalize());
+            computed_lane_tip = lane_tip_next(&computed_lane_tip, &ROLLUP_LANE_KEY, &activity_digest, &context_hash);
+            let computed_hash = Hash::from_bytes(bytemuck::cast(computed_lane_tip));
 
             let block_hash = resp.added_chain_block_hashes.get(i).copied().unwrap_or_default();
             match rpc_block.chain_block_header.accepted_id_merkle_root {
@@ -500,7 +510,7 @@ async fn sync_chain(node: &KaspaNode, prover: &mut RollupProver) -> Result<usize
     println!("  Synced: {} blocks, {} txs, {} actions", total_blocks, total_txs, total_actions);
     println!("  [ok] All {total_blocks} blocks verified: computed seq commitments match block headers");
     println!("  State root: {}", Hash::from_bytes(bytemuck::cast(prover.state_root)));
-    println!("  Seq commitment: {}", prover.seq_commitment);
+    println!("  Seq commitment: {}", prover.lane_tip);
     println!("  Accumulated blocks for proving: {}", prover.accumulated_blocks());
     Ok(total_actions)
 }
@@ -510,7 +520,7 @@ async fn run_prove(prover: &mut RollupProver, backend: ProverBackend, proof_kind
     let snapshot = prover.take_prove_snapshot().context("No blocks accumulated for proving")?;
 
     let prev_state_hash = snapshot.input.public_input.prev_state_hash;
-    let prev_seq_commitment = snapshot.input.public_input.prev_seq_commitment;
+    let prev_lane_tip = snapshot.input.public_input.prev_lane_tip;
     let perm_redeem_script = snapshot.perm_redeem_script;
     let perm_exit_data = snapshot.perm_exit_data;
     let input = snapshot.input;
@@ -518,7 +528,7 @@ async fn run_prove(prover: &mut RollupProver, backend: ProverBackend, proof_kind
     println!("  Proving {} block(s) with backend={:?}, kind={:?}", input.block_txs.len(), backend, proof_kind);
     println!("  block_prove_to: {block_prove_to}");
     println!("  prev_state_hash: {}", Hash::from_bytes(bytemuck::cast(prev_state_hash)));
-    println!("  prev_seq_commitment: {}", Hash::from_bytes(bytemuck::cast(prev_seq_commitment)));
+    println!("  prev_lane_tip: {}", Hash::from_bytes(bytemuck::cast(prev_lane_tip)));
     println!("  covenant_id: {}", Hash::from_bytes(bytemuck::cast(input.public_input.covenant_id)));
     if perm_redeem_script.is_some() {
         println!("  Permission tree: {} exit leaves", perm_exit_data.len());
@@ -533,7 +543,7 @@ async fn run_prove(prover: &mut RollupProver, backend: ProverBackend, proof_kind
     println!("  Stats: {} segments, {} cycles", output.stats.segments, output.stats.total_cycles);
     println!("  Journal length: {} bytes", output.receipt.journal.bytes.len());
 
-    Ok(ProveResult { output, block_prove_to, prev_state_hash, prev_seq_commitment, perm_redeem_script, perm_exit_data })
+    Ok(ProveResult { output, block_prove_to, prev_state_hash, prev_lane_tip, perm_redeem_script, perm_exit_data })
 }
 
 async fn build_and_submit_proof(
@@ -544,30 +554,35 @@ async fn build_and_submit_proof(
     keypair: &Keypair,
 ) -> Result<Hash> {
     let journal = &prove.output.receipt.journal.bytes;
-    if journal.len() < 160 {
-        bail!("Invalid journal length: {} (need >= 160)", journal.len());
+    // Journal layout (192 bytes base, 224 with permission):
+    //   prev_state(32) | prev_lane_tip(32) | new_state(32) | new_lane_tip(32)
+    //   | new_seq_commit(32) | covenant_id(32) [| permission_spk_hash(32)]
+    if journal.len() < 192 {
+        bail!("Invalid journal length: {} (need >= 192)", journal.len());
     }
 
     // Extract all journal fields
-    let journal_prev_seq: [u32; 8] = bytemuck::pod_read_unaligned(&journal[32..64]);
+    let journal_prev_lane_tip: [u32; 8] = bytemuck::pod_read_unaligned(&journal[32..64]);
     let new_state_hash: [u32; 8] = bytemuck::pod_read_unaligned(&journal[64..96]);
-    let new_seq_commitment: [u32; 8] = bytemuck::pod_read_unaligned(&journal[96..128]);
-    let journal_covenant_id: [u32; 8] = bytemuck::pod_read_unaligned(&journal[128..160]);
-    let new_seq_hash = Hash::from_bytes(bytemuck::cast(new_seq_commitment));
+    let new_lane_tip: [u32; 8] = bytemuck::pod_read_unaligned(&journal[96..128]);
+    let new_seq_commit: [u32; 8] = bytemuck::pod_read_unaligned(&journal[128..160]);
+    let journal_covenant_id: [u32; 8] = bytemuck::pod_read_unaligned(&journal[160..192]);
+    let new_seq_commit_hash = Hash::from_bytes(bytemuck::cast(new_seq_commit));
 
     println!("  New state root:      {}", Hash::from_bytes(bytemuck::cast(new_state_hash)));
-    println!("  New seq commitment:  {new_seq_hash}");
+    println!("  New lane tip:        {}", Hash::from_bytes(bytemuck::cast(new_lane_tip)));
+    println!("  New seq commitment:  {new_seq_commit_hash}");
 
     // ── Journal field verification ───────────────────────────────────────────
-    // 1. prev_seq_commitment must match what was passed to the prover
-    if journal_prev_seq != prove.prev_seq_commitment {
+    // 1. prev_lane_tip must match what was passed to the prover
+    if journal_prev_lane_tip != prove.prev_lane_tip {
         bail!(
-            "Journal prev_seq_commitment mismatch\n  journal:  {}\n  expected: {}",
-            Hash::from_bytes(bytemuck::cast(journal_prev_seq)),
-            Hash::from_bytes(bytemuck::cast(prove.prev_seq_commitment)),
+            "Journal prev_lane_tip mismatch\n  journal:  {}\n  expected: {}",
+            Hash::from_bytes(bytemuck::cast(journal_prev_lane_tip)),
+            Hash::from_bytes(bytemuck::cast(prove.prev_lane_tip)),
         );
     }
-    println!("  [ok] prev_seq_commitment matches");
+    println!("  [ok] prev_lane_tip matches");
 
     // 2. covenant_id in journal must match deploy
     let expected_cov_id: [u32; 8] = from_bytes(deploy.on_chain_covenant_id.as_bytes());
@@ -580,20 +595,20 @@ async fn build_and_submit_proof(
     }
     println!("  [ok] covenant_id matches");
 
-    // 3. new_seq_commitment must equal block_prove_to.accepted_id_merkle_root
-    //    (OpSeqCommit checks this exact equality on-chain)
+    // 3. new_seq_commit must equal block_prove_to.accepted_id_merkle_root
+    //    (OpChainblockSeqCommit checks this exact equality on-chain)
     let block_prove_block =
         node.get_block(prove.block_prove_to, false).await.context("get block_prove_to for seq verification failed")?;
     let block_air = block_prove_block.header.accepted_id_merkle_root;
-    if new_seq_hash != block_air {
+    if new_seq_commit_hash != block_air {
         bail!(
-            "Journal new_seq_commitment != block_prove_to.accepted_id_merkle_root\n  journal:        {}\n  block AIR:      {}\n  block_prove_to: {}",
-            new_seq_hash,
+            "Journal new_seq_commit != block_prove_to.accepted_id_merkle_root\n  journal:        {}\n  block AIR:      {}\n  block_prove_to: {}",
+            new_seq_commit_hash,
             block_air,
             prove.block_prove_to,
         );
     }
-    println!("  [ok] new_seq_commitment matches block_prove_to accepted_id_merkle_root");
+    println!("  [ok] new_seq_commit matches block_prove_to accepted_id_merkle_root");
 
     // ── On-chain journal preimage verification ──────────────────────────────
     // Reconstruct the preimage exactly as the on-chain script would build it
@@ -601,11 +616,12 @@ async fn build_and_submit_proof(
     // then compare with the guest's actual journal bytes.
     {
         let journal_prev_state: [u32; 8] = bytemuck::pod_read_unaligned(&journal[0..32]);
-        let mut onchain_preimage = Vec::with_capacity(192);
+        let mut onchain_preimage = Vec::with_capacity(224);
         onchain_preimage.extend_from_slice(bytemuck::bytes_of(&journal_prev_state)); // prev_state
-        onchain_preimage.extend_from_slice(bytemuck::bytes_of(&journal_prev_seq)); // prev_seq
+        onchain_preimage.extend_from_slice(bytemuck::bytes_of(&journal_prev_lane_tip)); // prev_lane_tip
         onchain_preimage.extend_from_slice(bytemuck::bytes_of(&new_state_hash)); // new_state
-        onchain_preimage.extend_from_slice(bytemuck::bytes_of(&new_seq_commitment)); // new_seq
+        onchain_preimage.extend_from_slice(bytemuck::bytes_of(&new_lane_tip)); // new_lane_tip
+        onchain_preimage.extend_from_slice(bytemuck::bytes_of(&new_seq_commit)); // new_seq_commit
         onchain_preimage.extend_from_slice(&deploy.on_chain_covenant_id.as_bytes()); // covenant_id
 
         if let Some(ref perm_redeem) = prove.perm_redeem_script {
@@ -615,18 +631,18 @@ async fn build_and_submit_proof(
             let perm_hash = &perm_spk.script()[2..34];
             onchain_preimage.extend_from_slice(perm_hash);
 
-            // Also check what the guest committed at journal[160..192]
-            if journal.len() >= 192 {
-                let journal_perm_hash = &journal[160..192];
+            // Also check what the guest committed at journal[192..224]
+            if journal.len() >= 224 {
+                let journal_perm_hash = &journal[192..224];
                 if perm_hash != journal_perm_hash {
                     println!("  [MISMATCH] permission_spk_hash:");
                     println!("    on-chain SPK[4..36]: {}", faster_hex::hex_string(perm_hash));
-                    println!("    journal[160..192]:   {}", faster_hex::hex_string(journal_perm_hash));
+                    println!("    journal[192..224]:   {}", faster_hex::hex_string(journal_perm_hash));
                 } else {
                     println!("  [ok] permission_spk_hash matches ({} bytes)", perm_hash.len());
                 }
             } else {
-                println!("  [MISMATCH] permission output present but journal only {} bytes (expected 192)", journal.len());
+                println!("  [MISMATCH] permission output present but journal only {} bytes (expected 224)", journal.len());
             }
         }
 
@@ -650,12 +666,12 @@ async fn build_and_submit_proof(
     let zk_tag = proof_kind_to_zk_tag(proof_kind);
 
     // Build input and output redeem scripts
-    let input_redeem = converged_redeem_script(prove.prev_state_hash, prove.prev_seq_commitment, &program_id, &zk_tag);
-    let output_redeem = converged_redeem_script(new_state_hash, new_seq_commitment, &program_id, &zk_tag);
+    let input_redeem = converged_redeem_script(prove.prev_state_hash, prove.prev_lane_tip, &program_id, &zk_tag);
+    let output_redeem = converged_redeem_script(new_state_hash, new_lane_tip, &program_id, &zk_tag);
     let output_spk = pay_to_script_hash_script(&output_redeem);
 
     // Build sig_script for the covenant input
-    let sig_script = build_sig_script(&prove.output.receipt, proof_kind, prove.block_prove_to, &new_state_hash, &input_redeem)?;
+    let sig_script = build_sig_script(&prove.output.receipt, proof_kind, prove.block_prove_to, &new_lane_tip, &new_state_hash, &input_redeem)?;
     println!("  sig_script length: {} bytes", sig_script.len());
 
     // Find a collateral UTXO from the deployer's address
@@ -735,7 +751,7 @@ async fn build_and_submit_proof(
     proof_tx.inputs[1].signature_script = collateral_sig;
 
     // ── Local script verification (same path as on-chain) ───────────────────
-    let accessor = MockSeqCommitAccessor(std::collections::HashMap::from([(prove.block_prove_to, new_seq_hash)]));
+    let accessor = MockSeqCommitAccessor(std::collections::HashMap::from([(prove.block_prove_to, new_seq_commit_hash)]));
     match try_verify_tx_input(&proof_tx, &[covenant_entry, collateral_entry], 0, &accessor) {
         Ok(()) => println!("  [ok] Local script verification passed"),
         Err(e) => bail!("Local script verification failed: {e}\n  (the on-chain script will also reject this tx)"),

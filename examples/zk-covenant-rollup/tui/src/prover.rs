@@ -7,7 +7,7 @@ use zk_covenant_rollup_core::permission_tree::required_depth;
 use zk_covenant_rollup_core::PublicInput;
 use zk_covenant_rollup_core::{
     action::{ActionHeader, EntryAction, ExitAction, TransferAction, OP_ENTRY, OP_EXIT, OP_TRANSFER},
-    bytes_to_words_ref, extract_pubkey_from_spk, is_action_tx_id, is_p2pk_spk, perm_leaf_hash,
+    bytes_to_words_ref, extract_pubkey_from_spk, is_p2pk_spk, perm_leaf_hash,
     permission_tree::StreamingPermTreeBuilder,
     smt::Smt,
     state::{AccountWitness, StateRoot},
@@ -25,7 +25,7 @@ struct RollbackState {
     accumulated_block_txs: Vec<Vec<ZkTransaction>>,
     accumulated_exit_data: Vec<(Vec<u8>, u64)>,
     prev_proved_state_root: StateRoot,
-    prev_proved_seq_commitment: Hash,
+    prev_proved_lane_tip: Hash,
 }
 
 /// Tracks L2 state and processes chain data for proving.
@@ -35,7 +35,7 @@ pub struct RollupProver {
     /// Current state root ([u32; 8]).
     pub state_root: StateRoot,
     /// Current sequence commitment (Hash).
-    pub seq_commitment: Hash,
+    pub lane_tip: Hash,
     /// Covenant ID as [u32; 8] (for host crate compatibility).
     pub covenant_id: [u32; 8],
     /// Covenant ID as bytes.
@@ -47,7 +47,7 @@ pub struct RollupProver {
     pub perm_builder: StreamingPermTreeBuilder,
     /// Persistent tx store: transactions whose outputs pay to known L2 accounts.
     /// Keyed by tx hash so process_transfer/process_exit can retrieve the actual prev_tx.
-    /// Temporary — will be removed when seq_commitment commits spk+amount of UTXO input.
+    /// Temporary — will be removed when lane_tip commits spk+amount of UTXO input.
     db: Arc<RollupDb>,
     /// All ZkTransactions from the last processing run (grouped by block).
     pub last_block_txs: Vec<Vec<ZkTransaction>>,
@@ -57,7 +57,7 @@ pub struct RollupProver {
     /// State root at the start of the current proving window.
     pub prev_proved_state_root: StateRoot,
     /// Sequence commitment at the start of the current proving window.
-    pub prev_proved_seq_commitment: Hash,
+    pub prev_proved_lane_tip: Hash,
     /// All block txs accumulated since the last proof.
     pub accumulated_block_txs: Vec<Vec<ZkTransaction>>,
     /// Permission tree builder for the current proving window (for exits).
@@ -85,14 +85,14 @@ pub struct ProcessResult {
     pub txs_processed: usize,
     pub actions_found: usize,
     pub new_state_root: StateRoot,
-    pub new_seq_commitment: Hash,
+    pub new_lane_tip: Hash,
 }
 
 impl RollupProver {
     pub fn new(
         covenant_id: Hash,
         initial_state_root: StateRoot,
-        initial_seq_commitment: Hash,
+        initial_lane_tip: Hash,
         starting_block: Hash,
         db: Arc<RollupDb>,
     ) -> Self {
@@ -100,7 +100,7 @@ impl RollupProver {
         Self {
             smt: Smt::new(),
             state_root: initial_state_root,
-            seq_commitment: initial_seq_commitment,
+            lane_tip: initial_lane_tip,
             covenant_id: covenant_id_words,
             covenant_id_bytes: covenant_id.as_bytes(),
             last_processed_block: starting_block,
@@ -108,7 +108,7 @@ impl RollupProver {
             db,
             last_block_txs: Vec::new(),
             prev_proved_state_root: initial_state_root,
-            prev_proved_seq_commitment: initial_seq_commitment,
+            prev_proved_lane_tip: initial_lane_tip,
             accumulated_block_txs: Vec::new(),
             accumulated_perm_builder: StreamingPermTreeBuilder::new(),
             accumulated_exit_data: Vec::new(),
@@ -138,12 +138,12 @@ impl RollupProver {
             accumulated_block_txs: self.accumulated_block_txs.clone(),
             accumulated_exit_data: self.accumulated_exit_data.clone(),
             prev_proved_state_root: self.prev_proved_state_root,
-            prev_proved_seq_commitment: self.prev_proved_seq_commitment,
+            prev_proved_lane_tip: self.prev_proved_lane_tip,
         });
 
         let public_input = PublicInput {
             prev_state_hash: self.prev_proved_state_root,
-            prev_seq_commitment: from_bytes(self.prev_proved_seq_commitment.as_bytes()),
+            prev_lane_tip: from_bytes(self.prev_proved_lane_tip.as_bytes()),
             covenant_id: self.covenant_id,
         };
 
@@ -176,7 +176,7 @@ impl RollupProver {
 
         // Advance the proving window start to current state
         self.prev_proved_state_root = self.state_root;
-        self.prev_proved_seq_commitment = self.seq_commitment;
+        self.prev_proved_lane_tip = self.lane_tip;
 
         Some(ProveSnapshot {
             input: ProveInput { public_input, block_txs, perm_redeem_script_len },
@@ -200,7 +200,7 @@ impl RollupProver {
         self.accumulated_block_txs = rb.accumulated_block_txs;
         self.accumulated_exit_data = rb.accumulated_exit_data.clone();
         self.prev_proved_state_root = rb.prev_proved_state_root;
-        self.prev_proved_seq_commitment = rb.prev_proved_seq_commitment;
+        self.prev_proved_lane_tip = rb.prev_proved_lane_tip;
 
         // Reconstruct both perm builders from the saved exit data.
         let mut acc = StreamingPermTreeBuilder::new();
@@ -215,7 +215,7 @@ impl RollupProver {
     }
 
     /// Process a VCC v2 response, converting RPC transactions to ZkTransactions
-    /// and updating the L2 state (SMT + seq_commitment).
+    /// and updating the L2 state (SMT + lane_tip).
     pub fn process_chain_response(&mut self, response: &GetVirtualChainFromBlockV2Response) -> ProcessResult {
         let mut blocks_processed = 0;
         let mut txs_processed = 0;
@@ -236,8 +236,8 @@ impl RollupProver {
                 let tx_id_words = bytes_to_words_ref(&tx.id().as_bytes());
                 let version = tx.version;
 
-                // Check if this is an action transaction (V1+ with action prefix)
-                let witness = if version >= 1 && is_action_tx_id(&tx_id_words) {
+                // All rollup lane txs are V1 and potential actions (payload-based detection)
+                let witness = if version == 1 {
                     actions_found += 1;
                     self.build_action_witness(&tx)
                 } else {
@@ -270,9 +270,9 @@ impl RollupProver {
                 txs_processed += 1;
             }
 
-            // Read seq_commitment from block header (no need to compute — OpSeqCommit reads it on-chain)
+            // Read lane_tip from block header (no need to compute — OpSeqCommit reads it on-chain)
             if let Some(air) = block.chain_block_header.accepted_id_merkle_root {
-                self.seq_commitment = air;
+                self.lane_tip = air;
             }
 
             // Update last processed block hash
@@ -293,7 +293,7 @@ impl RollupProver {
             txs_processed,
             actions_found,
             new_state_root: self.state_root,
-            new_seq_commitment: self.seq_commitment,
+            new_lane_tip: self.lane_tip,
         }
     }
 
@@ -359,7 +359,7 @@ impl RollupProver {
         let prev_output_index = first_input.previous_outpoint.index;
         let cov_hash = Hash::from_bytes(self.covenant_id_bytes);
         // TODO(covpp-mainnet): prev_tx lookup will be replaced by txindex or by a
-        // seq_commitment change that commits spk+amount per input. With the 2-byte
+        // lane_tip change that commits spk+amount per input. With the 2-byte
         // prefix (~1/65536 collision) and the SMT balance check above, a collision tx
         // reaching this point is extremely unlikely — panicking is acceptable for now.
         let prev_tx = self
@@ -457,7 +457,7 @@ impl RollupProver {
         let prev_output_index = first_input.previous_outpoint.index;
         let cov_hash = Hash::from_bytes(self.covenant_id_bytes);
         // TODO(covpp-mainnet): prev_tx lookup will be replaced by txindex or by a
-        // seq_commitment change that commits spk+amount per input. With the 2-byte
+        // lane_tip change that commits spk+amount per input. With the 2-byte
         // prefix (~1/65536 collision) and the SMT balance check above, a collision tx
         // reaching this point is extremely unlikely — panicking is acceptable for now.
         let prev_tx = self

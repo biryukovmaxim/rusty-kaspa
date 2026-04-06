@@ -65,6 +65,12 @@ pub struct ProveInput {
     pub public_input: PublicInput,
     /// All block transactions in the proving window, grouped by block.
     pub block_txs: Vec<Vec<ZkTransaction>>,
+    /// Per-block context hashes (host precomputes `mergeset_context_hash`).
+    pub block_context_hashes: Vec<[u32; 8]>,
+    /// Commitment witness header (Pod).
+    pub commitment_witness: zk_covenant_rollup_core::CommitmentWitness,
+    /// Serialized SMT proof for the rollup lane.
+    pub smt_proof_bytes: Vec<u8>,
     /// Converged permission redeem script length (only if exits occurred).
     pub perm_redeem_script_len: Option<i64>,
 }
@@ -157,12 +163,20 @@ fn build_env(input: &ProveInput) -> Result<ExecutorEnv<'_>, String> {
     let builder =
         binding.write_slice(core::slice::from_ref(&input.public_input)).write_slice(&(input.block_txs.len() as u32).to_le_bytes());
 
-    for txs in &input.block_txs {
+    for (i, txs) in input.block_txs.iter().enumerate() {
         builder.write_slice(&(txs.len() as u32).to_le_bytes());
-        for tx in txs {
-            tx.write_to_env(builder);
+        if !txs.is_empty() {
+            // Context hash only when the lane is active in this block
+            builder.write_slice(bytemuck::cast_slice::<u32, u8>(&input.block_context_hashes[i]));
+            for tx in txs {
+                tx.write_to_env(builder);
+            }
         }
     }
+
+    // Write commitment witness as Pod (single slice) + SMT proof (length-prefixed)
+    builder.write_slice(bytemuck::bytes_of(&input.commitment_witness));
+    crate::mock_tx::write_bytes(builder, &input.smt_proof_bytes);
 
     // Write permission redeem script length if exits occurred
     if let Some(len) = input.perm_redeem_script_len {

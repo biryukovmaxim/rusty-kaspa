@@ -11,15 +11,15 @@ use crate::covenant::RollupCovenant;
 /// Build the rollup redeem script with embedded state
 pub fn build_redeem_script(
     prev_state_hash: [u32; 8],
-    prev_seq_commitment: [u32; 8],
+    prev_lane_tip: [u32; 8],
     redeem_script_len: i64,
     program_id: &[u8],
     zk_tag: &ZkTag,
 ) -> Vec<u8> {
     let mut builder = ScriptBuilder::new();
 
-    // 66-byte data prefix: OpData32 || prev_seq_commitment || OpData32 || prev_state_hash
-    builder.add_data(bytemuck::bytes_of(&prev_seq_commitment)).unwrap();
+    // 66-byte data prefix: OpData32 || prev_lane_tip || OpData32 || prev_state_hash
+    builder.add_data(bytemuck::bytes_of(&prev_lane_tip)).unwrap();
     builder.add_data(bytemuck::bytes_of(&prev_state_hash)).unwrap();
 
     // Stash prev values to alt stack

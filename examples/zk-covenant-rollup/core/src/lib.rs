@@ -96,6 +96,10 @@ pub use prev_tx::{
     CovenantBinding, OutputData, PrevTxV0Witness, PrevTxV1Witness, PrevTxWitness, parse_first_input_outpoint, parse_output_at_index,
     verify_output_in_tx,
 };
+pub use seq_commit::{
+    ActivityDigestBuilder, CommitmentWitness, LaneId, activity_leaf, compute_seq_commit_for_lane, from_hash, lane_key, lane_tip_next,
+    seq_commit, seq_commit_tx_digest, seq_state_root, smt_leaf_hash, to_hash,
+};
 pub use smt::{SMT_DEPTH, SmtProof, branch_hash, empty_leaf_hash, key_to_index, leaf_hash};
 pub use state::{Account, AccountWitness, StateRoot, empty_tree_root};
 pub use streaming_merkle::{MerkleHashOps, StreamingMerkle};
@@ -138,7 +142,8 @@ pub fn words_to_bytes_ref(words: &[u32; 8]) -> &[u8; 32] {
 pub struct PublicInput {
     pub prev_state_hash: [u32; 8],
 
-    pub prev_seq_commitment: [u32; 8],
+    /// Previous lane tip hash (stored in the UTXO as part of rollup state).
+    pub prev_lane_tip: [u32; 8],
 
     pub covenant_id: [u32; 8],
 }
@@ -154,17 +159,13 @@ impl PublicInput {
     }
 }
 
-// ANCHOR: is_action_tx_id
-/// Two-byte prefix for action transaction IDs (0x41 0x43 = "AC").
-/// Using two bytes reduces accidental collisions from ~1/256 to ~1/65536.
-pub const ACTION_TX_ID_PREFIX: &[u8; 2] = b"AC";
+/// Subnetwork ID for the rollup lane (0x42 = first byte, rest zeros).
+pub const ROLLUP_SUBNETWORK_ID: [u8; 20] = [66, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
-/// Check if a tx_id represents an action transaction (first two bytes match prefix)
-#[inline]
-pub fn is_action_tx_id(tx_id: &[u32; 8]) -> bool {
-    tx_id[0].to_le_bytes()[..2] == *ACTION_TX_ID_PREFIX
-}
-// ANCHOR_END: is_action_tx_id
+/// Precomputed lane key: `H_lane_key(ROLLUP_SUBNETWORK_ID)`.
+/// Verified by `seq_commit::tests::precomputed_lane_key_matches`.
+pub const ROLLUP_LANE_KEY: [u32; 8] =
+    [2_183_999_308, 701_684_287, 4_142_800_354, 1_405_997_512, 825_319_397, 3_794_730_010, 1_447_840_166, 810_862_549];
 
 // ANCHOR: payload_digest
 pub fn payload_digest(payload: &[u32]) -> [u32; 8] {

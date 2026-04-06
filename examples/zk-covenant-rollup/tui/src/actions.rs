@@ -1,10 +1,11 @@
 use kaspa_addresses::{Address, Prefix, Version};
-use kaspa_consensus_core::subnets::SUBNETWORK_ID_NATIVE;
+use kaspa_consensus_core::subnets::SubnetworkId;
+use zk_covenant_rollup_core::ROLLUP_SUBNETWORK_ID;
 use kaspa_consensus_core::tx::{Transaction, TransactionInput, TransactionOutpoint, TransactionOutput};
 use kaspa_hashes::Hash;
 use kaspa_txscript::{pay_to_address_script, pay_to_script_hash_script};
 use zk_covenant_rollup_host::bridge::build_delegate_entry_script;
-use zk_covenant_rollup_host::mock_tx::{find_action_tx_nonce, find_entry_tx_nonce, find_exit_tx_nonce};
+use zk_covenant_rollup_host::mock_tx::{EntryPayload, ExitPayload, TransferPayload};
 
 use crate::balance::Utxo;
 use crate::db::Pubkey;
@@ -58,14 +59,14 @@ pub fn build_entry_tx(
 
     // Find nonce that produces entry-prefix tx_id
     let inputs = vec![TransactionInput::new(TransactionOutpoint::new(gas_utxo.tx_id, gas_utxo.index), vec![], 0, 0)];
-    let payload = find_entry_tx_nonce(dest, &inputs, &outputs);
+    let payload = EntryPayload::new(dest, 0);
 
     Ok(Transaction::new(
         1, // V1
         inputs,
         outputs,
         0,
-        SUBNETWORK_ID_NATIVE,
+        SubnetworkId::from_bytes(ROLLUP_SUBNETWORK_ID),
         0,
         payload.as_bytes(),
     ))
@@ -91,9 +92,9 @@ pub fn build_transfer_tx(
     let outputs = vec![TransactionOutput::new(output_value, pay_to_address_script(dest_address))];
     let inputs = vec![TransactionInput::new(TransactionOutpoint::new(gas_utxo.tx_id, gas_utxo.index), vec![], 0, 0)];
 
-    let payload = find_action_tx_nonce(source, dest, amount, &inputs, &outputs);
+    let payload = TransferPayload::new(source, dest, amount, 0);
 
-    Ok(Transaction::new(1, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, payload.as_bytes()))
+    Ok(Transaction::new(1, inputs, outputs, 0, SubnetworkId::from_bytes(ROLLUP_SUBNETWORK_ID), 0, payload.as_bytes()))
 }
 
 /// Build an unsigned V1 exit (withdrawal) transaction.
@@ -114,7 +115,7 @@ pub fn build_exit_tx(
     let outputs = vec![TransactionOutput::new(output_value, kaspa_consensus_core::tx::ScriptPublicKey::new(0, dest_spk_bytes.into()))];
     let inputs = vec![TransactionInput::new(TransactionOutpoint::new(gas_utxo.tx_id, gas_utxo.index), vec![], 0, 0)];
 
-    let payload = find_exit_tx_nonce(source, dest_spk_bytes, exit_amount, &inputs, &outputs);
+    let payload = ExitPayload::new(source, dest_spk_bytes, exit_amount, 0);
 
-    Ok(Transaction::new(1, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, payload.as_bytes()))
+    Ok(Transaction::new(1, inputs, outputs, 0, SubnetworkId::from_bytes(ROLLUP_SUBNETWORK_ID), 0, payload.as_bytes()))
 }

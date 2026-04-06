@@ -17,12 +17,14 @@ bytemuck = { workspace = true, features = ["derive"] }
 sha2 = { workspace = true, default-features = false }
 blake3 = { workspace = true }
 blake2b_simd = { workspace = true, default-features = false }
+kaspa-hashes = { workspace = true }
+kaspa-seq-commit = { workspace = true }
+kaspa-smt = { workspace = true }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 kaspa-addresses.workspace = true
-kaspa-hashes.workspace = true
 kaspa-merkle.workspace = true
 kaspa-txscript.workspace = true
