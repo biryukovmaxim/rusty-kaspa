@@ -9,7 +9,7 @@ use kaspa_consensus_core::{
     hashing::covenant_id::covenant_id,
     network::NetworkType,
     sign::sign,
-    subnets::SUBNETWORK_ID_NATIVE,
+    subnets::{SUBNETWORK_ID_NATIVE, SUBNETWORK_ID_SIZE, SubnetworkId},
     tx::{CovenantBinding, MutableTransaction, Transaction, TransactionInput, TransactionOutpoint, TransactionOutput, UtxoEntry},
 };
 use kaspa_core::{info, kaspad_env::version, time::unix_now, warn};
@@ -52,6 +52,7 @@ pub struct Args {
     pub enable_covenant_id: bool,
     pub randomize_tx_version: bool,
     pub network: NetworkType,
+    pub lps: u64,
 }
 
 impl Args {
@@ -74,6 +75,7 @@ impl Args {
             payload_size: m.get_one::<usize>("payload-size").cloned().unwrap_or(0),
             enable_covenant_id: m.get_one::<bool>("enable-covenant-id").cloned().unwrap_or_default(),
             randomize_tx_version: m.get_one::<bool>("randomize-tx-version").cloned().unwrap_or_default(),
+            lps: m.get_one::<u64>("lps").cloned().unwrap_or(0),
         }
     }
 }
@@ -162,6 +164,14 @@ pub fn cli() -> Command {
                 .default_value("false")
                 .help("Randomize transaction version between 0 and 1"),
         )
+        .arg(
+            Arg::new("lps")
+                .long("lps")
+                .value_name("lps")
+                .default_value("0")
+                .value_parser(clap::value_parser!(u64))
+                .help("Lanes (subnetworks) per second. Must be less than tps. 0 = all native subnetwork (default)"),
+        )
 }
 
 async fn new_rpc_client(subscription_context: &SubscriptionContext, address: &str) -> GrpcClient {
@@ -194,6 +204,7 @@ struct TxConfig {
     payload_size: usize,
     with_covenant_id: bool,
     randomize_tx_version: bool,
+    lps: u64,
 }
 
 #[tokio::main]
@@ -244,6 +255,7 @@ async fn main() {
     let kaspa_to_addr = args.addr.as_ref().map_or_else(|| kaspa_addr.clone(), |addr_str| Address::try_from(addr_str.clone()).unwrap());
 
     (args.payload_size <= 20000).then_some(()).expect("payload-size can be max 20000");
+    assert!(args.lps < args.tps || args.lps == 0, "lps ({}) must be less than tps ({})", args.lps, args.tps);
 
     let tx_config = TxConfig {
         priority_fee: args.priority_fee,
@@ -251,6 +263,7 @@ async fn main() {
         payload_size: args.payload_size,
         with_covenant_id: args.enable_covenant_id,
         randomize_tx_version: args.randomize_tx_version,
+        lps: args.lps,
     };
 
     rayon::ThreadPoolBuilder::new().num_threads(args.threads as usize).build_global().unwrap();
@@ -276,6 +289,9 @@ async fn main() {
     }
     if args.payload_size != 0 {
         log_message.push_str(&format!("\n\tpayload size: {} random bytes", tx_config.payload_size,));
+    }
+    if args.lps > 0 {
+        log_message.push_str(&format!("\n\tlanes per second: {} (random subnetworks)", args.lps));
     }
     info!("{}", log_message);
 
@@ -530,20 +546,31 @@ async fn maybe_send_tx(
         return false;
     }
 
+    // Generate a fresh set of random non-reserved subnetwork IDs for this batch
+    let subnetwork_pool: Vec<SubnetworkId> = if tx_config.lps > 0 {
+        let mut rng = thread_rng();
+        (0..tx_config.lps)
+            .map(|_| {
+                let mut bytes = [0u8; SUBNETWORK_ID_SIZE];
+                loop {
+                    rng.fill(&mut bytes[..]);
+                    // Reserved IDs have the form [x, 0, 0, ..., 0] (first byte + 19 zero bytes)
+                    if bytes[1..].iter().any(|&b| b != 0) {
+                        return SubnetworkId::from_bytes(bytes);
+                    }
+                }
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+
     let txs = selected_utxos_groups
         .into_par_iter()
         .map(|utxo_option| {
             if let Some((selected_utxos, selected_amount)) = utxo_option {
-                let tx = generate_tx(
-                    schnorr_key,
-                    &selected_utxos,
-                    selected_amount,
-                    num_outs,
-                    &kaspa_addr,
-                    tx_config.payload_size,
-                    tx_config.with_covenant_id,
-                    tx_config.randomize_tx_version,
-                );
+                let tx =
+                    generate_tx(schnorr_key, &selected_utxos, selected_amount, num_outs, &kaspa_addr, tx_config, &subnetwork_pool);
 
                 return Some((tx, selected_utxos.len(), selected_utxos.into_iter().map(|(_, entry)| entry.amount).sum::<u64>()));
             }
@@ -616,10 +643,12 @@ fn generate_tx(
     send_amount: u64,
     num_outs: u64,
     kaspa_addr: &Address,
-    payload_size: usize,
-    with_covenant_id: bool,
-    randomize_tx_version: bool,
+    tx_config: &TxConfig,
+    subnetwork_pool: &[SubnetworkId],
 ) -> Transaction {
+    let payload_size = tx_config.payload_size;
+    let with_covenant_id = tx_config.with_covenant_id;
+    let randomize_tx_version = tx_config.randomize_tx_version;
     let script_public_key = pay_to_address_script(kaspa_addr);
     let inputs = utxos
         .iter()
@@ -644,7 +673,12 @@ fn generate_tx(
     let mut data = vec![0u8; payload_size];
     rand::thread_rng().fill_bytes(&mut data);
 
-    let unsigned_tx = Transaction::new_non_finalized(tx_version, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, data);
+    let subnetwork_id = if subnetwork_pool.is_empty() {
+        SUBNETWORK_ID_NATIVE
+    } else {
+        subnetwork_pool[thread_rng().gen_range(0..subnetwork_pool.len())]
+    };
+    let unsigned_tx = Transaction::new_non_finalized(tx_version, inputs, outputs, 0, subnetwork_id, 0, data);
     let mut unsigned_tx = MutableTransaction::with_entries(unsigned_tx, utxos.iter().map(|(_, entry)| entry.clone()).collect_vec());
     if tx_version == TX_VERSION_POST_COV_HF {
         apply_random_covenant_binding_from_inputs(&mut unsigned_tx, with_covenant_id);
