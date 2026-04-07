@@ -4,13 +4,9 @@ Actions are the state-transition primitives of the rollup. Each action is encode
 
 ## Action identification
 
-A transaction is recognized as an action when its `tx_id` starts with the two-byte prefix `0x41 0x43` (`"AC"`):
+In the KIP-21 lane-based model, action detection is purely **payload-based**. All V1 transactions in the rollup lane (identified by `ROLLUP_SUBNETWORK_ID`) are potential actions. The guest parses each V1 transaction's payload and checks whether it contains a valid `ActionHeader` with a recognized version, known opcode, and sufficient data for that opcode.
 
-```rust
-{{#include ../../core/src/lib.rs:is_action_tx_id}}
-```
-
-The host mines a `nonce` in the `ActionHeader` until the resulting `tx_id` starts with this prefix. Using two bytes means roughly 1 in 65,536 nonces will match — still fast enough for testing, while reducing accidental collisions from random testnet transactions (compared to 1 in 256 with a single-byte prefix).
+No tx_id prefix matching is required — the lane partitioning by subnetwork ID already filters to rollup-relevant transactions. V0 and V2+ transactions in the lane still contribute to the activity digest (see [Chapter 6](ch06-sequence-commitment.md)) but are never parsed as actions.
 
 ## Action header
 

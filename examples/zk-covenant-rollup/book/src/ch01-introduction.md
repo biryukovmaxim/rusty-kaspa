@@ -17,7 +17,7 @@ The system has three core properties:
 ```mermaid
 flowchart LR
     subgraph L1["Kaspa L1"]
-        UTXO["Covenant UTXO<br/>(state root + seq commitment)"]
+        UTXO["Covenant UTXO<br/>(state root + lane tip)"]
         PERM["Permission UTXO<br/>(withdrawal claims)"]
     end
 

@@ -7,13 +7,13 @@ The state verification script is the on-chain redeem script that guards the cove
 The redeem script embeds the previous state directly in its bytecode:
 
 ```
-[OpData32, prev_seq(32B)] [OpData32, prev_state(32B)]
+[OpData32, prev_lane_tip(32B)] [OpData32, prev_state(32B)]
 [... verification logic ...]
 [OpTrue] [domain_suffix(2B)]
 ```
 
 The **66-byte prefix** contains:
-- 1 + 32 bytes: `OpData32 || prev_seq_commitment`
+- 1 + 32 bytes: `OpData32 || prev_lane_tip`
 - 1 + 32 bytes: `OpData32 || prev_state_hash`
 
 The 2-byte domain suffix `[OP_0(0x00), OP_DROP(0x75)]` at the end identifies this as a state verification script (see [Domain tagging](#domain-tagging) below).
@@ -35,16 +35,16 @@ This same pattern is used by the permission script (see [Chapter 9](ch09-permiss
 
 ```mermaid
 flowchart TD
-    PREFIX["Prefix: prev_seq, prev_state"]
+    PREFIX["Prefix: prev_lane_tip, prev_state"]
     STASH["Stash prev values to alt stack"]
-    SEQ["OpChainblockSeqCommit<br/>→ new_seq_commitment"]
-    BUILD_PREFIX["Build new 66-byte prefix<br/>(new_seq || new_state)"]
+    SEQ["OpChainblockSeqCommit<br/>→ new_seq_commit"]
+    BUILD_PREFIX["Build new 66-byte prefix<br/>(new_lane_tip || new_state)"]
     EXTRACT["Extract suffix from own sig_script"]
     CONCAT["Concat prefix + suffix<br/>→ new redeem script"]
     HASH["blake2b(new_redeem) → P2SH SPK"]
     VERIFY_OUT["Verify output 0 SPK matches"]
     JOURNAL["Build journal preimage"]
-    PERM["Verify CovOutCount (1 or 2)<br/>Optionally append perm hash"]
+    PERM["Verify CovOutputCount (1 or 2)<br/>Optionally append perm hash"]
     SHA["SHA256(journal)"]
     PROGRAM_ID["Push program_id"]
     ZK["ZK verify (Succinct or Groth16)"]
@@ -57,9 +57,9 @@ flowchart TD
 
 ### Sequence commitment verification
 
-The script uses `OpChainblockSeqCommit` — a Kaspa-specific opcode that computes the sequence commitment from consensus data. The guest's `new_seq_commitment` must match what the chain reports.
+The script uses `OpChainblockSeqCommit` — a Kaspa-specific opcode that computes the sequence commitment from consensus data. The guest's `new_seq_commit` must match what the chain reports.
 
-See `host/src/covenant.rs:77-83` for the `obtain_new_seq_commitment` implementation.
+See `host/src/covenant.rs` for the `obtain_new_seq_commitment` implementation.
 
 ### Output SPK verification
 
@@ -68,8 +68,8 @@ After building the new redeem script, the script hashes it to a P2SH SPK and ver
 ### Journal construction
 
 The script builds the journal preimage from:
-1. `prev_state` and `prev_seq` (from alt stack, originally embedded in prefix)
-2. `new_state` and `new_seq` (computed during execution)
+1. `prev_state` and `prev_lane_tip` (from alt stack, originally embedded in prefix)
+2. `new_state`, `new_lane_tip`, and `new_seq_commit` (computed during execution)
 3. `covenant_id` (via `OpInputCovenantId` introspection)
 4. Optionally: `permission_spk_hash` (if 2 covenant outputs exist)
 
@@ -79,11 +79,11 @@ See `host/src/covenant.rs:132-161` for the `build_and_hash_journal` implementati
 
 ```mermaid
 flowchart TD
-    CHECK["OpCovOutCount"]
+    CHECK["OpCovOutputCount"]
     ONE["count == 1<br/>No exits in this batch"]
     TWO["count == 2<br/>Exits occurred"]
-    BASE["160-byte journal<br/>(base only)"]
-    EXT["192-byte journal<br/>(base + perm hash)"]
+    BASE["192-byte journal<br/>(base only)"]
+    EXT["224-byte journal<br/>(base + perm hash)"]
     VERIFY_P2SH["Extract script hash from<br/>output 1 SPK (bytes 4..36)<br/>Verify P2SH format"]
 
     CHECK -->|"== 1"| ONE --> BASE
@@ -91,7 +91,7 @@ flowchart TD
 ```
 
 When exits occur, the guest includes a `permission_spk_hash` in the journal. The on-chain script:
-1. Reads `OpCovOutCount` — if 2, a permission output exists
+1. Reads `OpCovOutputCount` — if 2, a permission output exists
 2. Extracts the script hash from output 1's P2SH SPK (bytes 4..36 of `to_bytes()`)
 3. Verifies output 1 is actually P2SH format (reconstructs and compares)
 4. Appends the 32-byte script hash to the journal preimage

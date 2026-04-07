@@ -47,7 +47,7 @@ The host provides private inputs (witnesses) to the guest. Some are trusted hint
 | Previous tx preimage | First input outpoint (from current tx rest_preimage) | Host could claim false output SPKs |
 | Account SMT witnesses | Root hash chain + assert | Host could fabricate balances |
 | Permission redeem length | Assert in guest | Guest script wouldn't match on-chain hash |
-| Action ordering within block | Seq commitment leaf hash | Order inherited from L1 transaction order; host cannot reorder or skip actions |
+| Action ordering within block | Activity digest (`activity_leaf` ordering via `merge_idx`) | Order inherited from L1 transaction order; host cannot reorder or skip actions |
 
 ## Check catalogue
 
@@ -57,9 +57,8 @@ Checks are categorized as **assert** (host cheating — proof fails entirely) or
 
 | Check | Location | Response | Attack prevented |
 |-------|----------|----------|-----------------|
-| `is_action_tx_id(tx_id)` | `guest/src/block.rs` | gate | Non-action transactions processed as actions |
-| `tx_id[0..2] == "AC"` | `core/src/lib.rs` | gate | Random transactions misclassified (~1/65536 collision) |
-| Action version == `ACTION_VERSION` | `guest/src/tx.rs` | gate | Future/incompatible action formats |
+| Lane partitioning via `ROLLUP_SUBNETWORK_ID` | consensus/host | pre-filter | Non-rollup transactions processed |
+| Payload parses as valid action (header version, known opcode, sufficient data) | `guest/src/tx.rs` | gate | Non-action payloads processed as actions |
 | `rest_digest == hash(rest_preimage)` | `guest/src/tx.rs` | computed | Host cannot forge rest_digest (guest computes it) |
 | First input outpoint matches prev_tx witness | `guest/src/auth.rs` | **assert** | Host substitutes fake prev_tx |
 | Prev tx witness hashes to first input's tx_id | `guest/src/auth.rs` | **assert** | Host claims false output SPK/amounts |
@@ -153,7 +152,7 @@ Checks are categorized as **assert** (host cheating — proof fails entirely) or
 
 **Attack:** A valid ZK proof from a previous state transition is replayed to revert state.
 
-**Mitigation:** The journal includes `prev_state_hash` and `prev_seq_commitment`, both embedded in the redeem script prefix. The on-chain script verifies these match. Since the seq_commitment changes with every block, a replayed proof would fail the sequence check.
+**Mitigation:** The journal includes `prev_state_hash` and `prev_lane_tip`, both embedded in the redeem script prefix. The on-chain script verifies these match. Since the lane tip changes with every block that has lane activity, a replayed proof would fail the sequence check.
 
 ### Collateral input overcounting
 

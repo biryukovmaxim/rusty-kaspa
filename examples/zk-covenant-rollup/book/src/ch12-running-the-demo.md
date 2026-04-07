@@ -31,24 +31,10 @@ cargo run --release
 cargo run --release --features cuda
 ```
 
-### Adding non-activity blocks
-
-The `--non-activity-blocks=N` flag adds N blocks filled with 3000 non-action (V0) transactions each. This stress-tests the sequence commitment logic — the guest must iterate through all transactions to verify the seq commitment even though none of them are L2 actions.
-
-```bash
-cargo run --release -- --non-activity-blocks=5
-```
-
-Combined with CUDA:
-
-```bash
-cargo run --release --features cuda -- --non-activity-blocks=5
-```
-
 ## What the demo does
 
 1. Builds an initial empty SMT (sparse Merkle tree) state
-2. Constructs a mock chain with L2 action transactions (deposits, transfers, exits)
+2. Constructs a mock chain with L2 action transactions in the rollup lane (deposits, transfers, exits), using the KIP-21 lane-based seq-commit scheme
 3. Generates a **STARK (succinct) proof** via RISC Zero and verifies it
 4. Simulates on-chain verification of the STARK proof through the covenant script
 5. Generates a **Groth16 proof** and verifies it

@@ -12,8 +12,13 @@ Every hash in the system uses domain separation to prevent cross-protocol collis
 | `"PermLeaf"` | SHA-256 | No (prefix) | `core/src/permission_tree.rs` | Withdrawal leaf: `sha256("PermLeaf" \|\| spk \|\| amount)` |
 | `"PermEmpty"` | SHA-256 | No (prefix) | `core/src/permission_tree.rs` | Empty withdrawal slot: `sha256("PermEmpty")` |
 | `"PermBranch"` | SHA-256 | No (prefix) | `core/src/permission_tree.rs` | Permission tree node: `sha256("PermBranch" \|\| left \|\| right)` |
-| `"SeqCommitmentMerkleLeafHash"` | BLAKE3 | Yes (key) | `core/src/seq_commit.rs` | Seq commitment leaf: `blake3_keyed(key, tx_id \|\| version)` |
-| `"SeqCommitmentMerkleBranchHash"` | BLAKE3 | Yes (key) | `core/src/seq_commit.rs` | Seq commitment node: `blake3_keyed(key, left \|\| right)` |
+| `"SeqCommitTxDigest"` | BLAKE3 | Yes (key) | `kaspa-seq-commit` (via `core/src/seq_commit.rs`) | Per-tx digest: `blake3_keyed(key, tx_id \|\| le_u16(version))` |
+| `"SeqCommitActivityLeaf"` | BLAKE3 | Yes (key) | `kaspa-seq-commit` | Activity leaf: `blake3_keyed(key, tx_digest \|\| le_u32(merge_idx))` |
+| `"SeqCommitLaneKey"` | BLAKE3 | Yes (key) | `kaspa-seq-commit` | Lane key: `blake3_keyed(key, subnetwork_id)` |
+| `"SeqCommitLaneTip"` | BLAKE3 | Yes (key) | `kaspa-seq-commit` | Lane tip: `blake3_keyed(key, parent_ref \|\| lane_key \|\| activity_digest \|\| context_hash)` |
+| `"SeqCommitActiveLeaf"` | BLAKE3 | Yes (key) | `kaspa-seq-commit` | SMT leaf for active lane: `blake3_keyed(key, lane_key \|\| lane_tip \|\| le_u64(blue_score))` |
+| `"SeqCommitSeqStateRoot"` | BLAKE3 | Yes (key) | `kaspa-seq-commit` | Seq state root: `blake3_keyed(key, lanes_root \|\| payload_and_ctx_digest)` |
+| `"SeqCommitSeqCommit"` | BLAKE3 | Yes (key) | `kaspa-seq-commit` | Final seq commit: `blake3_keyed(key, parent_seq_commit \|\| state_root)` |
 | `"PayloadDigest"` | BLAKE3 | Yes (key) | `core/src/lib.rs` | V1 tx payload hash |
 | `"TransactionRest"` | BLAKE3 | Yes (key) | `core/src/lib.rs` | V1 tx rest-of-data hash |
 | `"TransactionV1Id"` | BLAKE3 | Yes (key) | `core/src/lib.rs` | V1 tx_id: `blake3_keyed(key, payload_digest \|\| rest_digest)` |
@@ -23,7 +28,8 @@ Every hash in the system uses domain separation to prevent cross-protocol collis
 
 | Tag | Value | Type | Module | Purpose |
 |-----|-------|------|--------|---------|
-| `ACTION_TX_ID_PREFIX` | `0x41` (`'A'`) | Byte prefix | `core/src/lib.rs` | First byte of tx_id identifies action transactions |
+| `ROLLUP_SUBNETWORK_ID` | `[0x42, 0, ..., 0]` (20 bytes) | Subnetwork ID | `core/src/lib.rs` | Identifies the rollup lane |
+| `ROLLUP_LANE_KEY` | precomputed `H_lane_key(ROLLUP_SUBNETWORK_ID)` | `[u32; 8]` | `core/src/lib.rs` | Precomputed lane key for the rollup |
 | State verification suffix | `[0x00, 0x75]` | Opcode pair | `host/src/bridge.rs` | `[OP_0, OP_DROP]` tags state verification scripts |
 | Permission suffix | `[0x51, 0x75]` | Opcode pair | `host/src/bridge.rs` | `[OP_1, OP_DROP]` tags permission scripts |
 
@@ -36,7 +42,7 @@ The system uses three hash functions, chosen to match Kaspa's protocol:
 **BLAKE3** — Used for transaction IDs and sequence commitments. Kaspa's V1 transaction ID scheme uses BLAKE3 with keyed hashing. The `domain_to_key()` function zero-pads a domain string into a 32-byte BLAKE3 key:
 
 ```rust
-{{#include ../../core/src/lib.rs:226-234}}
+{{#include ../../core/src/lib.rs:228-236}}
 ```
 
 **BLAKE2b-256** — Used for V0 transaction IDs (legacy) and P2SH script hashing. V0 tx_id uses keyed BLAKE2b; P2SH uses unkeyed BLAKE2b matching `kaspa_txscript::pay_to_script_hash_script`.

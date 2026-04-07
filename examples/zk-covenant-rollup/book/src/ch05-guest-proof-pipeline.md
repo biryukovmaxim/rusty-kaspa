@@ -1,46 +1,69 @@
 # Guest Proof Pipeline
 
-The guest program is the heart of the rollup. It runs inside the RISC Zero zkVM, reads blocks and witness data from the host, processes every transaction, updates the state root, and writes a journal that the on-chain script can verify.
+The guest program is the heart of the rollup. It runs inside the RISC Zero zkVM and executes three phases:
+
+1. **Phase 1 — Lane tip computation:** Process blocks, update state root, and chain lane tips via activity digests
+2. **Phase 2 — Seq-commit derivation:** Derive the full `seq_commit` from the lane tip using an SMT proof and commitment witness
+3. **Phase 3 — Permission tree:** Build withdrawal permission tree (if exits occurred)
+
+The output journal contains both `new_lane_tip` (UTXO state) and `new_seq_commit` (on-chain verification).
 
 ## Overview
 
 ```mermaid
 flowchart TD
-    INPUT["Read PublicInput<br/>(prev_state, prev_seq, covenant_id)"]
-    BLOCKS["For each block"]
-    TXS["For each transaction"]
-    CLASSIFY["Classify: V0 or V1?"]
-    V0["V0: read tx_id directly"]
-    V1["V1: read payload + rest_preimage<br/>compute tx_id"]
-    ACTION["Is action?<br/>(prefix + valid header)"]
-    DISPATCH["Dispatch by opcode"]
-    TRANSFER["Transfer"]
-    ENTRY["Entry"]
-    EXIT["Exit"]
-    MERKLE["Add seq_commitment_leaf<br/>to block merkle"]
-    BLOCK_ROOT["Finalize block merkle root"]
-    SEQ["Update seq_commitment"]
-    PERM["Build permission tree<br/>(if exits occurred)"]
-    JOURNAL["Write journal"]
+    INPUT["Read PublicInput<br/>(prev_state, prev_lane_tip, covenant_id)"]
 
-    INPUT --> BLOCKS
-    BLOCKS --> TXS
-    TXS --> CLASSIFY
-    CLASSIFY -->|V0| V0
-    CLASSIFY -->|V1| V1
-    V1 --> ACTION
-    ACTION -->|Yes| DISPATCH
-    ACTION -->|No| MERKLE
-    DISPATCH --> TRANSFER --> MERKLE
-    DISPATCH --> ENTRY --> MERKLE
-    DISPATCH --> EXIT --> MERKLE
-    V0 --> MERKLE
-    MERKLE --> TXS
-    TXS -->|block done| BLOCK_ROOT
-    BLOCK_ROOT --> SEQ
-    SEQ --> BLOCKS
-    BLOCKS -->|all done| PERM
-    PERM --> JOURNAL
+    subgraph P1["Phase 1: Lane tip computation"]
+        BLOCKS["For each block"]
+        TXCOUNT["Read tx_count"]
+        EMPTY{"tx_count == 0?"}
+        SKIP["Lane tip unchanged"]
+        CTX["Read context_hash"]
+        TXS["For each transaction (merge_idx)"]
+        CLASSIFY["Read version"]
+        V0["V0/V2+: read tx_id hash"]
+        V1["V1: read payload + rest_preimage<br/>compute tx_id, parse action"]
+        DISPATCH["Dispatch by opcode"]
+        TRANSFER["Transfer"]
+        ENTRY["Entry"]
+        EXIT["Exit"]
+        DIGEST["activity_leaf(tx_digest, merge_idx)<br/>→ ActivityDigestBuilder"]
+        TIP["lane_tip_next(prev_tip, key,<br/>activity_digest, context_hash)"]
+
+        BLOCKS --> TXCOUNT --> EMPTY
+        EMPTY -->|Yes| SKIP --> BLOCKS
+        EMPTY -->|No| CTX --> TXS
+        TXS --> CLASSIFY
+        CLASSIFY -->|V0/V2+| V0
+        CLASSIFY -->|V1| V1
+        V1 -->|valid action| DISPATCH
+        V1 -->|no action| DIGEST
+        DISPATCH --> TRANSFER --> DIGEST
+        DISPATCH --> ENTRY --> DIGEST
+        DISPATCH --> EXIT --> DIGEST
+        V0 --> DIGEST
+        DIGEST --> TXS
+        TXS -->|block done| TIP
+        TIP --> BLOCKS
+    end
+
+    subgraph P2["Phase 2: Seq-commit derivation"]
+        WITNESS["Read CommitmentWitness + SMT proof"]
+        SEQCOMMIT["compute_seq_commit_for_lane"]
+        WITNESS --> SEQCOMMIT
+    end
+
+    subgraph P3["Phase 3: Permission tree"]
+        PERM["Build permission tree<br/>(if exits occurred)"]
+    end
+
+    JOURNAL["Write journal<br/>(new_lane_tip + new_seq_commit)"]
+
+    INPUT --> P1
+    P1 -->|all blocks done| P2
+    P2 --> P3
+    P3 --> JOURNAL
 ```
 
 ## PublicInput
@@ -48,18 +71,18 @@ flowchart TD
 The guest begins by reading `PublicInput` — three 32-byte hashes that anchor the proof to the chain:
 
 - `prev_state_hash` — the SMT root before this batch
-- `prev_seq_commitment` — the sequence commitment before this batch
+- `prev_lane_tip` — the lane tip hash before this batch (stored in the UTXO)
 - `covenant_id` — identifies this specific covenant instance
 
 These values are written to the journal so the on-chain script can verify they match the previous UTXO.
 
-## Block processing
+## Block processing (Phase 1)
 
 ```rust
 {{#include ../../methods/guest/src/block.rs:process_block}}
 ```
 
-Each block contains a list of transactions. The guest processes them sequentially, building a streaming Merkle tree of `seq_commitment_leaf(tx_id, version)` values. The finalized block root is then combined with the running `seq_commitment` via `calc_accepted_id_merkle_root`.
+Each block starts with a `tx_count`. If zero, the lane was not active in this block and the lane tip is unchanged. Otherwise, the guest reads the block's `context_hash`, then processes each transaction sequentially. Every transaction (regardless of version) contributes to the block's activity digest via `seq_commit_tx_digest(tx_id, version)` and `activity_leaf(tx_digest, merge_idx)`. The finalized activity digest and context hash produce a new lane tip via `lane_tip_next`.
 
 ## Transaction classification
 
@@ -67,18 +90,19 @@ Each block contains a list of transactions. The guest processes them sequentiall
 {{#include ../../methods/guest/src/tx.rs:read_v1_tx_data}}
 ```
 
+Transactions are dispatched by version. V0 and V2+ transactions contribute only a pre-computed `tx_id` hash to the activity digest — no action processing occurs.
+
 For V1 transactions, the guest:
 
 1. Reads the payload bytes from stdin
 2. Reads the full `rest_preimage` (length-prefixed) and computes `rest_digest = hash(rest_preimage)` — the guest never trusts a host-provided digest
 3. Computes `payload_digest` from the raw payload bytes
 4. Computes `tx_id = blake3(payload_digest || rest_digest)`
-5. Checks if the `tx_id` starts with `ACTION_TX_ID_PREFIX` (`0x41`)
-6. If so, parses the payload as an action header + data
+5. Parses the payload as an action header + data (if 4-byte aligned)
 
 The `rest_preimage` is stored in `V1TxData` and passed to action handlers. For transfer/exit actions, it is used to extract the first input's outpoint (proving which UTXO the transaction actually spends). For entry actions, it is used to parse the deposit output.
 
-The action is only considered valid if the prefix matches **and** the header version and operation are recognized **and** the action-specific validity check passes (e.g., non-zero amount).
+Action detection is purely payload-based — all V1 transactions in the rollup lane are potential actions. An action is valid only when the header version and operation are recognized **and** the action-specific validity check passes (e.g., non-zero amount).
 
 ## Action parsing
 
@@ -166,7 +190,7 @@ The guest distinguishes between **host cheating** and **user error**:
 ## State updates
 
 ```rust
-{{#include ../../methods/guest/src/state.rs:process_exit_state}}
+{{#include ../../methods/guest/src/block.rs:process_exit}}
 ```
 
 ```rust
@@ -194,17 +218,33 @@ The journal is the proof's public output — the only data the on-chain script c
 | Offset | Size | Field |
 |--------|------|-------|
 | 0 | 32B | `prev_state_hash` |
-| 32 | 32B | `prev_seq_commitment` |
+| 32 | 32B | `prev_lane_tip` |
 | 64 | 32B | `new_state_root` |
-| 96 | 32B | `new_seq_commitment` |
-| 128 | 32B | `covenant_id` |
-| 160 | 32B | `permission_spk_hash` (optional) |
+| 96 | 32B | `new_lane_tip` |
+| 128 | 32B | `new_seq_commit` |
+| 160 | 32B | `covenant_id` |
+| 192 | 32B | `permission_spk_hash` (optional) |
 
-**Base journal:** 160 bytes (40 words) — always present.
+**Base journal:** 192 bytes (48 words) — always present.
 
-**Extended journal:** 192 bytes (48 words) — when exits occurred. The extra 32 bytes contain the blake2b hash of the permission redeem script's P2SH SPK.
+**Extended journal:** 224 bytes (56 words) — when exits occurred. The extra 32 bytes contain the blake2b hash of the permission redeem script's P2SH SPK.
 
-## Permission tree construction
+## Seq-commit derivation (Phase 2)
+
+After the block loop completes, the guest has the final `lane_tip` but still needs to derive `seq_commit` for on-chain verification. The host provides:
+
+1. A `CommitmentWitness` — a fixed-size POD struct containing `payload_and_ctx_digest`, `parent_seq_commit`, and `blue_score`
+2. An SMT proof for the rollup lane's key in the Active Lanes SMT
+
+The guest computes:
+1. `smt_leaf = smt_leaf_hash(lane_key, lane_tip, blue_score)`
+2. `lanes_root = proof.compute_root(lane_key, leaf)` — verifies the lane's membership in the global lanes SMT
+3. `state_root = seq_state_root(lanes_root, payload_and_ctx_digest)`
+4. `seq_commit = seq_commit(parent_seq_commit, state_root)`
+
+Both `new_lane_tip` and `new_seq_commit` are written to the journal. See [Chapter 6](ch06-sequence-commitment.md) for the full seq-commit derivation pipeline.
+
+## Permission tree construction (Phase 3)
 
 When exit actions occur, the guest builds a permission tree:
 

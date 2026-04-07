@@ -69,7 +69,7 @@ The core crate runs in **both** the RISC-V guest and on native. It is `no_std` w
 
 - **Data types** — `PublicInput`, `Account`, `AccountWitness`, `ActionHeader`, action payloads
 - **SMT** — 8-level Sparse Merkle Tree with SHA-256 domain-separated hashing
-- **Sequence commitment** — Blake3-based streaming Merkle tree for block chaining
+- **Sequence commitment** — Lane-based seq-commit ([KIP-21](https://github.com/michaelsutton/kips/blob/kip21/kip-0021.md)): per-lane activity digest and lane tip chaining
 - **Permission tree** — SHA-256 Merkle tree of withdrawal claims
 - **Permission script** — Byte-level redeem script construction (`no_std` compatible)
 - **P2SH / P2PK** — Script public key helpers
@@ -105,7 +105,7 @@ The host crate builds transactions and runs the demo. It uses `kaspa-txscript`'s
 | Host / operator | Off-chain | **No** | Guest + on-chain scripts |
 
 The host can:
-- Choose the range of L1 blocks to process (committed to seq commitment, verified against L1)
+- Choose the range of L1 blocks to process (committed to lane tip / seq commitment, verified against L1)
 - Filter which transactions within those blocks are L2 actions
 - Provide witness data (SMT proofs, prev tx preimages)
 
