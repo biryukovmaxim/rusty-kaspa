@@ -35,7 +35,7 @@ The script is 53 bytes:
 | 40-51 | 12B | Suffix check: extract last 2 bytes of input 0's sig_script, compare with `[0x51, 0x75]` |
 | 52 | 1B | `OpTrue` |
 
-See `core/src/p2sh.rs:103-156` for `build_delegate_entry_script_bytes`.
+See `core/src/p2sh.rs` for `build_delegate_entry_script_bytes`.
 
 ## Three verification steps
 

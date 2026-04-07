@@ -56,11 +56,14 @@ graph TD
     HOST --> CORE
     HOST --> METHODS
     HOST --> KASPA["kaspa-txscript"]
+    HOST --> KASPA_SMT["kaspa-smt"]
     METHODS --> GUEST
     CORE --> SHA2["sha2"]
     CORE --> BLAKE3["blake3"]
     CORE --> BLAKE2B["blake2b-simd"]
     CORE --> BYTEMUCK["bytemuck"]
+    CORE --> KASPA_HASHES["kaspa-hashes"]
+    CORE --> KASPA_SEQ["kaspa-seq-commit"]
 ```
 
 ### Core (`no_std`)

@@ -73,7 +73,7 @@ The script builds the journal preimage from:
 3. `covenant_id` (via `OpInputCovenantId` introspection)
 4. Optionally: `permission_spk_hash` (if 2 covenant outputs exist)
 
-See `host/src/covenant.rs:132-161` for the `build_and_hash_journal` implementation.
+See `host/src/covenant.rs` for the `build_and_hash_journal` implementation.
 
 ### Output branching (1 vs 2 covenant outputs)
 
@@ -96,7 +96,7 @@ When exits occur, the guest includes a `permission_spk_hash` in the journal. The
 3. Verifies output 1 is actually P2SH format (reconstructs and compares)
 4. Appends the 32-byte script hash to the journal preimage
 
-See `host/src/covenant.rs:163-206` for `verify_outputs_and_append_perm_hash`.
+See `host/src/covenant.rs` for `verify_outputs_and_append_perm_hash`.
 
 ### ZK proof verification
 

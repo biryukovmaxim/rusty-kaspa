@@ -146,4 +146,4 @@ The permission script has two implementations that produce identical bytecode:
 
 The guest uses the core implementation to build the script inside the ZK proof, then hashes it to produce the `permission_spk_hash` for the journal.
 
-See `core/src/permission_script.rs:139-209` for `build_permission_redeem_bytes` and the converging length loop.
+See `core/src/permission_script.rs` for `build_permission_redeem_bytes` and the converging length loop.

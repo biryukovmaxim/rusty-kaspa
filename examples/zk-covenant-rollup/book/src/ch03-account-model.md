@@ -90,7 +90,7 @@ The empty tree root is computed deterministically by hashing empty leaves upward
 
 ## State root type
 
-The state root is simply `[u32; 8]` — a 32-byte SHA-256 hash stored as 8 words for zkVM alignment efficiency. See `core/src/state.rs:93` for the type alias.
+The state root is simply `[u32; 8]` — a 32-byte SHA-256 hash stored as 8 words for zkVM alignment efficiency. See `core/src/state.rs` for the type alias.
 
 ## Design rationale
 
