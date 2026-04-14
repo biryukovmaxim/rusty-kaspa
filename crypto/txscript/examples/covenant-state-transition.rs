@@ -124,7 +124,7 @@ fn main() {
     let sig_cache = Cache::new(10_000);
     let tx = PopulatedTransaction::new(&tx, vec![utxo_entry.clone()]);
     let reused_values = SigHashReusedValuesUnsync::new();
-    let flags = EngineFlags { covenants_enabled: true };
+    let flags = EngineFlags { covenants_enabled: true, sigop_script_units: Default::default() };
 
     let ctx = EngineContext::new(&sig_cache).with_reused(&reused_values);
     let mut engine = TxScriptEngine::from_transaction_input(&tx, &tx.tx.inputs[0], 0, &utxo_entry, ctx, flags);

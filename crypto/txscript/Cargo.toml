@@ -31,6 +31,7 @@ ark-serialize.workspace = true
 ark-snark.workspace = true
 ark-relations.workspace = true
 blake2b_simd.workspace = true
+blake3.workspace = true
 borsh.workspace = true
 cfg-if.workspace = true
 faster-hex.workspace = true
@@ -71,6 +72,7 @@ criterion.workspace = true
 smallvec.workspace = true
 serde_json.workspace = true
 rayon.workspace = true
+kaspa-core.workspace = true
 
 [[bench]]
 name = "zk_precompiles"

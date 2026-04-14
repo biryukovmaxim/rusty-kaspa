@@ -2,25 +2,26 @@ use crate::common::{
     client::ListeningClient,
     client_notify::ChannelNotify,
     daemon::Daemon,
-    utils::{fetch_spendable_utxos, generate_tx, mine_block, required_fee, wait_for},
+    utils::{fetch_spendable_utxos, mine_block, required_fee, wait_for},
 };
 use kaspa_addresses::Address;
 use kaspa_alloc::init_allocator_with_default_settings;
 use kaspa_consensus::params::{Params, SIMNET_GENESIS, SIMNET_PARAMS};
 use kaspa_consensus_core::{
     config::params::OverrideParams,
-    constants::TX_VERSION,
+    constants::{TX_VERSION, TX_VERSION_POST_COV_HF},
     header::Header,
-    sign::sign,
-    subnets::SUBNETWORK_ID_NATIVE,
-    tx::{MutableTransaction, Transaction, TransactionInput, TransactionOutpoint, TransactionOutput},
+    mass::ComputeBudget,
+    sign::{sign, sign_with_multiple_v2},
+    subnets::{SUBNETWORK_ID_NATIVE, SubnetworkId},
+    tx::{MutableTransaction, Transaction, TransactionInput, TransactionOutpoint, TransactionOutput, UtxoEntry},
 };
 use kaspa_consensusmanager::ConsensusManager;
 use kaspa_core::{task::runtime::AsyncRuntime, trace};
 use kaspa_grpc_client::GrpcClient;
 use kaspa_hashes::Hash;
 use kaspa_notify::scope::{BlockAddedScope, UtxosChangedScope, VirtualDaaScoreChangedScope};
-use kaspa_rpc_core::{Notification, RpcTransactionId, api::rpc::RpcApi};
+use kaspa_rpc_core::{Notification, RpcTransaction, RpcTransactionId, api::rpc::RpcApi};
 use kaspa_txscript::{
     opcodes::codes, pay_to_address_script, pay_to_script_hash_script, pay_to_script_hash_signature_script,
     script_builder::ScriptBuilder,
@@ -215,7 +216,6 @@ async fn daemon_utxos_propagation_test() {
     let (miner_sk, miner_pk) = secp256k1::generate_keypair(&mut thread_rng());
     let miner_address =
         Address::new(kaspad1.network.into(), kaspa_addresses::Version::PubKey, &miner_pk.x_only_public_key().0.serialize());
-    let miner_schnorr_key = secp256k1::Keypair::from_secret_key(secp256k1::SECP256K1, &miner_sk);
     let miner_spk = pay_to_address_script(&miner_address);
 
     // User key and address
@@ -322,7 +322,33 @@ async fn daemon_utxos_propagation_test() {
     const NUMBER_INPUTS: u64 = 2;
     const NUMBER_OUTPUTS: u64 = 2;
     const TX_AMOUNT: u64 = SIMNET_PARAMS.pre_deflationary_phase_base_subsidy * (NUMBER_INPUTS * 5 - 1) / 5;
-    let transaction = generate_tx(miner_schnorr_key, &utxos[0..NUMBER_INPUTS as usize], TX_AMOUNT, NUMBER_OUTPUTS, &user_address);
+    let selected_utxos = &utxos[0..NUMBER_INPUTS as usize];
+    let tx_script_public_key = pay_to_address_script(&user_address);
+    let inputs = selected_utxos
+        .iter()
+        .map(|(op, _)| TransactionInput {
+            previous_outpoint: *op,
+            signature_script: vec![],
+            sequence: 0,
+            mass: ComputeBudget(0).into(),
+        })
+        .collect();
+    let outputs = (0..NUMBER_OUTPUTS)
+        .map(|_| TransactionOutput {
+            value: TX_AMOUNT / NUMBER_OUTPUTS,
+            script_public_key: tx_script_public_key.clone(),
+            covenant: None,
+        })
+        .collect();
+    let unsigned_tx = Transaction::new(TX_VERSION_POST_COV_HF, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+    let signed_tx = sign_with_multiple_v2(
+        MutableTransaction::with_entries(unsigned_tx, selected_utxos.iter().map(|(_, entry)| entry.clone()).collect()),
+        &[miner_sk.secret_bytes()],
+    )
+    .unwrap();
+    let mut transaction = signed_tx.tx;
+    let per_input_compute_budget_commitment: u16 = 300; // ~30k-gram per-input upper bound
+    transaction.inputs.iter_mut().for_each(|input| input.mass = ComputeBudget(per_input_compute_budget_commitment).into());
     rpc_client1.submit_transaction((&transaction).into(), false).await.unwrap();
 
     let check_client = rpc_client1.clone();
@@ -390,6 +416,307 @@ async fn daemon_utxos_propagation_test() {
         x.disconnect().await.unwrap();
         x.join().await.unwrap();
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn daemon_compute_budget_relay_test() {
+    init_allocator_with_default_settings();
+    kaspa_core::log::try_init_logger("INFO");
+
+    let compute_budget_relay_test_params =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/params/compute_budget_relay_test_params.json");
+
+    let args = Args {
+        testnet: true,
+        testnet_suffix: 12,
+        unsafe_rpc: true,
+        enable_unsynced_mining: true,
+        disable_upnp: true,
+        disable_dns_seeding: true,
+        utxoindex: true,
+        outbound_target: 0,
+        override_params_file: Some(compute_budget_relay_test_params.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+    let total_fd_limit = 10;
+
+    let coinbase_maturity = 0;
+    let mut kaspad1 = Daemon::new_random_with_args(args.clone(), total_fd_limit);
+    let mut kaspad2 = Daemon::new_random_with_args(args, total_fd_limit);
+    let rpc_client1 = kaspad1.start().await;
+    let rpc_client2 = kaspad2.start().await;
+
+    rpc_client2.add_peer(format!("127.0.0.1:{}", kaspad1.p2p_port).try_into().unwrap(), true).await.unwrap();
+    let check_client = rpc_client2.clone();
+    wait_for(
+        50,
+        40,
+        move || {
+            async fn peer_connected(client: GrpcClient) -> bool {
+                client.get_connected_peer_info().await.unwrap().peer_info.len() == 1
+            }
+            Box::pin(peer_connected(check_client.clone()))
+        },
+        "the nodes did not connect to each other",
+    )
+    .await;
+
+    let (miner_sk, miner_pk) = secp256k1::generate_keypair(&mut thread_rng());
+    let miner_address =
+        Address::new(kaspad1.network.into(), kaspa_addresses::Version::PubKey, &miner_pk.x_only_public_key().0.serialize());
+    let (_user_sk, user_pk) = secp256k1::generate_keypair(&mut thread_rng());
+    let user_address =
+        Address::new(kaspad1.network.into(), kaspa_addresses::Version::PubKey, &user_pk.x_only_public_key().0.serialize());
+
+    let mut last_block_hash = None;
+    for _ in 0..coinbase_maturity {
+        let template = rpc_client1.get_block_template(miner_address.clone(), vec![]).await.unwrap();
+        let header: Header = (&template.block.header).try_into().unwrap();
+        last_block_hash = Some(header.hash);
+        rpc_client1.submit_block(template.block, false).await.unwrap();
+    }
+
+    if let Some(expected_sink) = last_block_hash {
+        let check_client = rpc_client2.clone();
+        wait_for(
+            50,
+            40,
+            move || {
+                async fn node_synced(client: GrpcClient, expected_sink: Hash) -> bool {
+                    let info = client.get_block_dag_info().await.unwrap();
+                    info.sink == expected_sink
+                }
+                Box::pin(node_synced(check_client.clone(), expected_sink))
+            },
+            "node #2 did not sync to node #1 tip",
+        )
+        .await;
+    }
+
+    const EXTRA_BLOCKS: usize = 10;
+    for _ in 0..EXTRA_BLOCKS {
+        let template = rpc_client1.get_block_template(miner_address.clone(), vec![]).await.unwrap();
+        rpc_client1.submit_block(template.block, false).await.unwrap();
+    }
+
+    let expected_sink = rpc_client1.get_block_dag_info().await.unwrap().sink;
+    let check_client = rpc_client2.clone();
+    wait_for(
+        50,
+        200,
+        move || {
+            async fn node_synced(client: GrpcClient, expected_sink: Hash) -> bool {
+                client.get_block_dag_info().await.unwrap().sink == expected_sink
+            }
+            Box::pin(node_synced(check_client.clone(), expected_sink))
+        },
+        "node #2 did not catch up after extra blocks",
+    )
+    .await;
+
+    if rpc_client2.get_connected_peer_info().await.unwrap().peer_info.is_empty() {
+        rpc_client2.add_peer(format!("127.0.0.1:{}", kaspad1.p2p_port).try_into().unwrap(), true).await.unwrap();
+        let check_client = rpc_client2.clone();
+        wait_for(
+            50,
+            200,
+            move || {
+                async fn peer_connected(client: GrpcClient) -> bool {
+                    client.get_connected_peer_info().await.unwrap().peer_info.len() == 1
+                }
+                Box::pin(peer_connected(check_client.clone()))
+            },
+            "the nodes were disconnected before transaction submission",
+        )
+        .await;
+    }
+
+    let check_client1 = rpc_client1.clone();
+    let check_client2 = rpc_client2.clone();
+    wait_for(
+        50,
+        600,
+        move || {
+            async fn tips_aligned(client1: GrpcClient, client2: GrpcClient) -> bool {
+                let tip1 = client1.get_block_dag_info().await.unwrap().sink;
+                let tip2 = client2.get_block_dag_info().await.unwrap().sink;
+                tip1 == tip2
+            }
+            Box::pin(tips_aligned(check_client1.clone(), check_client2.clone()))
+        },
+        "the nodes did not align to the same tip before transaction submission",
+    )
+    .await;
+
+    let utxos = fetch_spendable_utxos(&rpc_client1, miner_address.clone(), coinbase_maturity).await;
+    const NUMBER_INPUTS: u64 = 2;
+    const NUMBER_OUTPUTS: u64 = 2;
+    const EXTRA_FEE: u64 = 10_000;
+    let oldest_utxos_start = utxos.len() - NUMBER_INPUTS as usize;
+    let selected_utxos = &utxos[oldest_utxos_start..];
+    let total_in = selected_utxos.iter().map(|x| x.1.amount).sum::<u64>();
+    let tx_fee = required_fee(selected_utxos.len(), NUMBER_OUTPUTS).saturating_add(EXTRA_FEE);
+    let tx_amount = total_in.checked_sub(tx_fee).expect("expected enough input value for test transaction fee");
+    let script_public_key = pay_to_address_script(&user_address);
+    let inputs = selected_utxos
+        .iter()
+        .map(|(op, _)| TransactionInput {
+            previous_outpoint: *op,
+            signature_script: vec![],
+            sequence: 0,
+            mass: ComputeBudget(0).into(),
+        })
+        .collect();
+    let outputs = (0..NUMBER_OUTPUTS)
+        .map(|_| TransactionOutput { value: tx_amount / NUMBER_OUTPUTS, script_public_key: script_public_key.clone(), covenant: None })
+        .collect();
+    let unsigned_tx = Transaction::new(TX_VERSION_POST_COV_HF, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+    let signed_tx = sign_with_multiple_v2(
+        MutableTransaction::with_entries(unsigned_tx, selected_utxos.iter().map(|(_, entry)| entry.clone()).collect()),
+        &[miner_sk.secret_bytes()],
+    )
+    .unwrap();
+    let mut transaction = signed_tx.tx;
+    transaction.inputs.iter_mut().for_each(|input| input.mass = ComputeBudget(30).into());
+    assert!(
+        transaction.inputs.iter().any(|input| input.mass.compute_budget().unwrap() > 0),
+        "expected non-zero compute_budget commitment for v1 transaction"
+    );
+    let transaction_id = transaction.id();
+    rpc_client1.submit_transaction((&transaction).into(), false).await.unwrap();
+
+    let check_client = rpc_client1.clone();
+    wait_for(
+        50,
+        200,
+        move || {
+            async fn transaction_in_mempool(client: GrpcClient, transaction_id: RpcTransactionId) -> bool {
+                client.get_mempool_entry(transaction_id, false, false).await.is_ok()
+            }
+            Box::pin(transaction_in_mempool(check_client.clone(), transaction_id))
+        },
+        "the transaction was not added to node #1 mempool",
+    )
+    .await;
+
+    let node1_entry = rpc_client1.get_mempool_entry(transaction_id, false, false).await.unwrap();
+    assert_eq!(node1_entry.transaction.version, TX_VERSION_POST_COV_HF);
+    let node1_compute_budget = node1_entry.transaction.inputs[0].compute_budget;
+    assert!(node1_compute_budget > 0, "expected non-zero compute_budget on node #1 mempool tx");
+
+    let template = rpc_client1.get_block_template(miner_address.clone(), vec![]).await.unwrap();
+    let mined_header: Header = (&template.block.header).try_into().unwrap();
+    let mined_block_hash = mined_header.hash;
+    rpc_client1.submit_block(template.block, false).await.unwrap();
+
+    let check_client = rpc_client2.clone();
+    wait_for(
+        50,
+        200,
+        move || {
+            async fn node_synced(client: GrpcClient, expected_sink: Hash) -> bool {
+                client.get_block_dag_info().await.unwrap().sink == expected_sink
+            }
+            Box::pin(node_synced(check_client.clone(), mined_block_hash))
+        },
+        "node #2 did not receive the mined block with the transaction",
+    )
+    .await;
+
+    let block2 = rpc_client2.get_block(mined_block_hash, true).await.unwrap();
+    let included_tx = block2
+        .transactions
+        .iter()
+        .find(|tx| tx.verbose_data.as_ref().is_some_and(|vd| vd.transaction_id == transaction_id))
+        .expect("node #2 block does not include the submitted transaction");
+
+    assert_eq!(included_tx.version, TX_VERSION_POST_COV_HF);
+    let included_compute_budget = included_tx.inputs[0].compute_budget;
+    assert!(included_compute_budget > 0, "expected non-zero compute_budget on propagated block tx");
+    assert_eq!(included_compute_budget, node1_compute_budget);
+
+    rpc_client1.disconnect().await.unwrap();
+    rpc_client2.disconnect().await.unwrap();
+    kaspad1.shutdown();
+    kaspad2.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn daemon_rejects_transactions_with_inconsistent_input_mass_and_version() {
+    init_allocator_with_default_settings();
+    kaspa_core::log::try_init_logger("INFO");
+
+    let compute_budget_relay_test_params =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/params/compute_budget_relay_test_params.json");
+    let args = Args {
+        testnet: true,
+        testnet_suffix: 12,
+        unsafe_rpc: true,
+        enable_unsynced_mining: true,
+        disable_upnp: true,
+        disable_dns_seeding: true,
+        utxoindex: true,
+        outbound_target: 0,
+        override_params_file: Some(compute_budget_relay_test_params.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+
+    let mut kaspad = Daemon::new_random_with_args(args, 10);
+    let rpc_client = kaspad.start().await;
+
+    let (miner_sk, miner_pk) = secp256k1::generate_keypair(&mut thread_rng());
+    let miner_address =
+        Address::new(kaspad.network.into(), kaspa_addresses::Version::PubKey, &miner_pk.x_only_public_key().0.serialize());
+    let pay_spk = pay_to_address_script(&miner_address);
+    let miner_schnorr_key = secp256k1::Keypair::from_secret_key(secp256k1::SECP256K1, &miner_sk);
+
+    for _ in 0..4 {
+        let template = rpc_client.get_block_template(miner_address.clone(), vec![]).await.unwrap();
+        rpc_client.submit_block(template.block, false).await.unwrap();
+    }
+
+    let utxos = fetch_spendable_utxos(&rpc_client, miner_address.clone(), 0).await;
+    assert!(utxos.len() >= 2, "expected enough spendable UTXOs for malformed transaction tests");
+
+    let build_single_input_tx = |version: u16, selected_utxo: &(TransactionOutpoint, UtxoEntry)| {
+        let fee = required_fee(1, 1);
+        let output_value = selected_utxo.1.amount.checked_sub(fee).expect("expected enough input value for test fee");
+        let mass = ComputeBudget(0).into(); // set correctly by sign below
+        let tx = Transaction::new(
+            version,
+            vec![TransactionInput { previous_outpoint: selected_utxo.0, signature_script: vec![], sequence: 0, mass }],
+            vec![TransactionOutput { value: output_value, script_public_key: pay_spk.clone(), covenant: None }],
+            0,
+            SUBNETWORK_ID_NATIVE,
+            0,
+            vec![],
+        );
+        sign(MutableTransaction::with_entries(tx, vec![selected_utxo.1.clone()]), miner_schnorr_key).tx
+    };
+
+    let v1_tx = build_single_input_tx(TX_VERSION_POST_COV_HF, &utxos[0]);
+    let valid_v1_rpc_tx: RpcTransaction = (&v1_tx).into();
+    let mut malformed_v1_rpc_tx = valid_v1_rpc_tx.clone();
+    malformed_v1_rpc_tx.inputs[0].sig_op_count = 1;
+    assert!(
+        rpc_client.submit_transaction(malformed_v1_rpc_tx, false).await.is_err(),
+        "expected v1 transaction with non-zero sig_op_count to be rejected at the daemon boundary"
+    );
+
+    let v0_tx = build_single_input_tx(TX_VERSION, &utxos[1]);
+    let valid_v0_rpc_tx: RpcTransaction = (&v0_tx).into();
+    let mut malformed_v0_rpc_tx: RpcTransaction = valid_v0_rpc_tx.clone();
+    malformed_v0_rpc_tx.inputs[0].compute_budget = 1;
+    assert!(
+        rpc_client.submit_transaction(malformed_v0_rpc_tx, false).await.is_err(),
+        "expected v0 transaction with non-zero compute_budget to be rejected at the daemon boundary"
+    );
+
+    rpc_client.submit_transaction(valid_v1_rpc_tx, false).await.expect("expected the valid v1 transaction to be accepted");
+    rpc_client.submit_transaction(valid_v0_rpc_tx, false).await.expect("expected the valid v0 transaction to be accepted");
+
+    rpc_client.disconnect().await.unwrap();
+    kaspad.shutdown();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -570,6 +897,185 @@ async fn daemon_pruning_seqcommit_sync_test() {
             Box::pin(async move { client.get_server_info().await.unwrap().virtual_daa_score >= final_score })
         },
         "syncee did not accept seqcommit block",
+    )
+    .await;
+
+    rpc_client1.disconnect().await.unwrap();
+    rpc_client2.disconnect().await.unwrap();
+    kaspad1.shutdown();
+    kaspad2.shutdown();
+}
+
+// IBD test focused on `sync_new_smt_state` (protocol/flows/src/ibd/flow.rs:635).
+// Produces a non-trivial active-lanes SMT by submitting one transaction per
+// distinct subnetwork_id — each distinct subnetwork_id creates a new lane (see
+// consensus/src/pipeline/virtual_processor/utxo_validation.rs:532). With the
+// `test-smt-small-chunks` feature active the stream uses SMT_CHUNK_SIZE=4 and
+// SMT_FLOW_CONTROL_WINDOW=2, so `SMT_LANE_COUNT = 10` forces 3 chunks and one
+// flow-control round-trip — exercising both chunked streaming and the
+// RequestNextPruningPointSmtChunk handshake end to end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn daemon_ibd_smt_state_sync_test() {
+    const SMT_LANE_COUNT: usize = 10;
+
+    init_allocator_with_default_settings();
+    kaspa_core::log::try_init_logger("INFO,kaspa_testing_integration=trace,kaspa_rpc_core=debug");
+
+    let override_params_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/params/seqcommit_sync_test_params.json");
+    let params = load_override_params(&override_params_path);
+
+    let args = Args {
+        simnet: true,
+        unsafe_rpc: true,
+        enable_unsynced_mining: true,
+        disable_upnp: true,
+        utxoindex: true,
+        override_params_file: Some(override_params_path.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+
+    let total_fd_limit = 10;
+    let mut kaspad1 = Daemon::new_random_with_args(args.clone(), total_fd_limit);
+    let rpc_client1 = kaspad1.start().await;
+
+    let (miner_sk, miner_pk) = secp256k1::generate_keypair(&mut thread_rng());
+    let miner_address =
+        Address::new(kaspad1.network.into(), kaspa_addresses::Version::PubKey, &miner_pk.x_only_public_key().0.serialize());
+    let miner_schnorr_key = secp256k1::Keypair::from_secret_key(secp256k1::SECP256K1, &miner_sk);
+
+    // Phase 1: mine enough blocks to mature SMT_LANE_COUNT coinbase outputs.
+    let coinbase_maturity = params.coinbase_maturity();
+    let initial_blocks = (coinbase_maturity as usize) + SMT_LANE_COUNT + 20;
+    for _ in 0..initial_blocks {
+        let template = rpc_client1.get_block_template(miner_address.clone(), vec![]).await.unwrap();
+        rpc_client1.submit_block(template.block, false).await.unwrap();
+    }
+
+    let mined_check = rpc_client1.clone();
+    wait_for(
+        50,
+        60,
+        move || {
+            let client = mined_check.clone();
+            Box::pin(async move { client.get_server_info().await.unwrap().virtual_daa_score >= initial_blocks as u64 })
+        },
+        "syncer did not reach the initial mining target",
+    )
+    .await;
+
+    // Phase 2: submit SMT_LANE_COUNT transactions, each on a distinct non-reserved
+    // subnetwork_id, so every one populates a fresh lane in the active-lanes SMT.
+    let utxos = fetch_spendable_utxos(&rpc_client1, miner_address.clone(), coinbase_maturity).await;
+    assert!(utxos.len() >= SMT_LANE_COUNT, "syncer produced {} spendable utxos, need {}", utxos.len(), SMT_LANE_COUNT);
+
+    let mut submitted_tx_ids: Vec<RpcTransactionId> = Vec::with_capacity(SMT_LANE_COUNT);
+    for (i, (outpoint, entry)) in utxos.iter().take(SMT_LANE_COUNT).enumerate() {
+        // `rest != ZEROES` is the post-HF non-reserved subnetwork rule
+        // (consensus/src/processes/transaction_validator/tx_validation_in_isolation.rs:165).
+        // Putting a distinct nonzero byte in position 19 satisfies it while keeping
+        // each lane_id unique.
+        let mut subnet_bytes = [0u8; 20];
+        subnet_bytes[19] = (i as u8) + 1;
+        let lane_subnet = SubnetworkId::from_bytes(subnet_bytes);
+
+        let fee = required_fee(1, 1);
+        assert!(entry.amount > fee, "coinbase utxo is too small to cover a tx fee");
+        let out_value = entry.amount - fee;
+        let unsigned_tx = Transaction::new(
+            TX_VERSION_POST_COV_HF,
+            vec![TransactionInput::new(*outpoint, vec![], 0, 1)],
+            vec![TransactionOutput { value: out_value, script_public_key: pay_to_address_script(&miner_address), covenant: None }],
+            0,
+            lane_subnet,
+            0,
+            vec![],
+        );
+        let signed_tx = sign(MutableTransaction::with_entries(unsigned_tx, vec![entry.clone()]), miner_schnorr_key);
+        let tx_id = signed_tx.tx.id();
+        rpc_client1.submit_transaction((&signed_tx.tx).into(), false).await.unwrap();
+        submitted_tx_ids.push(tx_id);
+    }
+
+    let mempool_check = rpc_client1.clone();
+    let expected_ids = submitted_tx_ids.clone();
+    wait_for(
+        50,
+        40,
+        move || {
+            let client = mempool_check.clone();
+            let ids = expected_ids.clone();
+            Box::pin(async move {
+                for id in &ids {
+                    if client.get_mempool_entry(*id, false, false).await.is_err() {
+                        return false;
+                    }
+                }
+                true
+            })
+        },
+        "lane transactions did not reach the mempool",
+    )
+    .await;
+
+    // Phase 3: mine enough additional blocks that the lane transactions land on
+    // chain and the pruning point then advances off genesis. `pruning_depth` + a
+    // comfortable margin guarantees the pruning point covers the lane txs.
+    let pruning_depth = params.pruning_depth();
+    let blocks_after_txs = pruning_depth as usize + 60;
+    for _ in 0..blocks_after_txs {
+        let template = rpc_client1.get_block_template(miner_address.clone(), vec![]).await.unwrap();
+        rpc_client1.submit_block(template.block, false).await.unwrap();
+    }
+
+    let mut dag_info = rpc_client1.get_block_dag_info().await.unwrap();
+    let mut extra_blocks = 0usize;
+    while dag_info.pruning_point_hash == SIMNET_GENESIS.hash && extra_blocks < 100 {
+        let template = rpc_client1.get_block_template(miner_address.clone(), vec![]).await.unwrap();
+        rpc_client1.submit_block(template.block, false).await.unwrap();
+        extra_blocks += 1;
+        dag_info = rpc_client1.get_block_dag_info().await.unwrap();
+    }
+    assert_ne!(dag_info.pruning_point_hash, SIMNET_GENESIS.hash, "syncer pruning point did not advance off genesis");
+
+    let target_daa_score = rpc_client1.get_server_info().await.unwrap().virtual_daa_score;
+    let target_pruning_point = dag_info.pruning_point_hash;
+
+    // Phase 4: bring up the syncee and connect it to the syncer.
+    let mut kaspad2 = Daemon::new_random_with_args(args, total_fd_limit);
+    let rpc_client2 = kaspad2.start().await;
+
+    rpc_client2.add_peer(format!("127.0.0.1:{}", kaspad1.p2p_port).try_into().unwrap(), true).await.unwrap();
+    let check_client = rpc_client2.clone();
+    wait_for(
+        50,
+        40,
+        move || {
+            let client = check_client.clone();
+            Box::pin(async move { client.get_connected_peer_info().await.unwrap().peer_info.len() == 1 })
+        },
+        "the nodes did not connect to each other",
+    )
+    .await;
+
+    // Phase 5: wait for IBD (including `sync_new_smt_state`) to complete. 60s is
+    // more than enough on a healthy path with only ~10 lanes — a deadlock in
+    // metadata exchange, chunk streaming, or the blocking-importer handshake
+    // trips the panic well before the timeout.
+    let sync_check = rpc_client2.clone();
+    wait_for(
+        100,
+        600,
+        move || {
+            let client = sync_check.clone();
+            Box::pin(async move {
+                let server_info = client.get_server_info().await.unwrap();
+                if server_info.virtual_daa_score < target_daa_score {
+                    return false;
+                }
+                client.get_block_dag_info().await.unwrap().pruning_point_hash == target_pruning_point
+            })
+        },
+        "syncee did not complete SMT-era IBD within timeout (suspected sync_new_smt_state stall)",
     )
     .await;
 

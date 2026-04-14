@@ -304,8 +304,12 @@ mod tests {
 
         let script = builder.compute_receipt_claim()?.add_data(&expected)?.add_op(OpEqual)?.drain();
 
-        let mut engine: TxScriptEngine<VerifiableTransactionMock, _> =
-            TxScriptEngine::from_script(&script, &reused_values, &sig_cache, EngineFlags { covenants_enabled: true });
+        let mut engine: TxScriptEngine<VerifiableTransactionMock, _> = TxScriptEngine::from_script(
+            &script,
+            &reused_values,
+            &sig_cache,
+            EngineFlags { covenants_enabled: true, sigop_script_units: Default::default() },
+        );
         engine.execute().unwrap();
         Ok(())
     }
@@ -327,8 +331,12 @@ mod tests {
             .add_op(OpEqual)?
             .drain();
 
-        let mut engine: TxScriptEngine<VerifiableTransactionMock, _> =
-            TxScriptEngine::from_script(&script, &reused_values, &sig_cache, EngineFlags { covenants_enabled: true });
+        let mut engine: TxScriptEngine<VerifiableTransactionMock, _> = TxScriptEngine::from_script(
+            &script,
+            &reused_values,
+            &sig_cache,
+            EngineFlags { covenants_enabled: true, sigop_script_units: Default::default() },
+        );
         engine.execute().unwrap();
         Ok(())
     }

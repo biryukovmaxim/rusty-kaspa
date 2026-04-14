@@ -32,6 +32,8 @@ pub enum TxScriptError {
     VerifyError,
     #[error("encountered invalid state while running script: {0}")]
     InvalidState(String),
+    #[error("pubkey invalid: {0}")]
+    InvalidPubkey(secp256k1::Error),
     #[error("signature invalid: {0}")]
     InvalidSignature(secp256k1::Error),
     #[error("invalid signature in sig cache")]
@@ -60,8 +62,6 @@ pub enum TxScriptError {
     InvalidSigHashType(u8),
     #[error("unsupported public key type")]
     PubKeyFormat,
-    #[error("invalid signature length {0}")]
-    SigLength(usize),
     #[error("no scripts to run")]
     NoScripts,
     #[error("signature script is not push only")]
@@ -78,6 +78,8 @@ pub enum TxScriptError {
     Serialization(#[from] SerializationError),
     #[error("sig op count exceeds passed limit of {0}")]
     ExceededSigOpLimit(u16),
+    #[error("script units exceeded the allowed amount: used={used}, limit={limit}")]
+    ExceededScriptUnitsLimit { used: u64, limit: u64 },
     #[error("ZK Integrity: {0}")]
     ZkIntegrity(String),
     #[error("substring [{0}:{1}] is out of bounds for string of length {2}")]
