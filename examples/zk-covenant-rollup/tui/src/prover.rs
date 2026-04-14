@@ -502,12 +502,19 @@ fn rpc_optional_to_transaction(rpc: &kaspa_rpc_core::RpcOptionalTransaction) -> 
             let outpoint = inp.previous_outpoint.as_ref()?;
             let tx_id = outpoint.transaction_id?;
             let index = outpoint.index?;
-            Some(TransactionInput::new(
-                TransactionOutpoint::new(tx_id, index),
-                inp.signature_script.clone().unwrap_or_default(),
-                inp.sequence.unwrap_or(0),
-                inp.sig_op_count.unwrap_or(0),
-            ))
+            let previous_outpoint = TransactionOutpoint::new(tx_id, index);
+            let signature_script = inp.signature_script.clone().unwrap_or_default();
+            let sequence = inp.sequence.unwrap_or(0);
+            Some(if kaspa_consensus_core::tx::TxInputMass::version_expects_compute_budget_field(version) {
+                TransactionInput::new_with_compute_budget(
+                    previous_outpoint,
+                    signature_script,
+                    sequence,
+                    inp.compute_budget.unwrap_or(0),
+                )
+            } else {
+                TransactionInput::new(previous_outpoint, signature_script, sequence, inp.sig_op_count.unwrap_or(0))
+            })
         })
         .collect();
 

@@ -168,7 +168,10 @@ fn make_mock_transaction(
     payload: Vec<u8>,
 ) -> (Transaction, TransactionInput, UtxoEntry) {
     let dummy_prev_out = TransactionOutpoint::new(kaspa_hashes::Hash::from_u64_word(1), 1);
-    let dummy_tx_input = TransactionInput::new(dummy_prev_out, vec![], 10, u8::MAX);
+    // v1 tx: commit an empty ComputeBudget. `verify_tx` below uses `from_transaction_input`
+    // without a script-units limit, so the value is not consulted by the engine — it only
+    // has to match the v1 `TxInputMass` variant.
+    let dummy_tx_input = TransactionInput::new_with_compute_budget(dummy_prev_out, vec![], 10, 0);
 
     let cov_id = Hash::from_bytes([0xFF; _]);
     let dummy_tx_out = TransactionOutput::with_covenant(

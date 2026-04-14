@@ -322,7 +322,7 @@ fn verify_onchain_succinct(
         .unwrap()
         .drain();
 
-    tx::verify_tx(&tx, &utxo, &chain.accessor);
+    tx::verify_tx(&mut tx, &utxo, &chain.accessor);
 }
 
 fn verify_onchain_groth16(
@@ -380,5 +380,5 @@ fn verify_onchain_groth16(
         .unwrap()
         .drain();
 
-    tx::verify_tx(&tx, &utxo, &chain.accessor);
+    tx::verify_tx(&mut tx, &utxo, &chain.accessor);
 }

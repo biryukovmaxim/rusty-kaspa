@@ -1726,10 +1726,21 @@ impl App {
             }
         };
 
-        // 2 inputs: covenant + collateral
-        let inputs = vec![
-            TransactionInput::new(TransactionOutpoint::new(covenant_utxo.0, covenant_utxo.1), sig_script, 0, 115),
-            TransactionInput::new(TransactionOutpoint::new(collateral.tx_id, collateral.index), vec![], 0, 1),
+        // 2 inputs: covenant + collateral. v1 inputs commit a ComputeBudget; we seed both at
+        // 0 and overwrite input[0] (the ZK proof) below via `measure_compute_budget_for_input`.
+        let mut inputs = vec![
+            TransactionInput::new_with_compute_budget(
+                TransactionOutpoint::new(covenant_utxo.0, covenant_utxo.1),
+                sig_script,
+                0,
+                0,
+            ),
+            TransactionInput::new_with_compute_budget(
+                TransactionOutpoint::new(collateral.tx_id, collateral.index),
+                vec![],
+                0,
+                0,
+            ),
         ];
 
         // Outputs: [0]=covenant (full value), [1]=permission if exists, [last]=change
@@ -1752,9 +1763,35 @@ impl App {
         // Change output (no covenant binding) — placeholder, adjusted after fee estimation
         outputs.push(TransactionOutput::new(collateral.amount, deployer_spk.clone()));
 
+        // Seed input[0] compute budget by running the ZK script once. calc_non_contextual_masses
+        // panics on v1 transactions whose inputs have not had a ComputeBudget committed.
+        {
+            let covenant_entry_draft = UtxoEntry::new(
+                covenant_value,
+                pay_to_script_hash_script(&input_redeem),
+                0,
+                true,
+                Some(covenant_id_hash),
+            );
+            let collateral_entry_draft = UtxoEntry::new(collateral.amount, deployer_spk.clone(), 0, false, None);
+            let seq_commit_hash = Hash::from_slice(bytemuck::bytes_of(&new_seq_commit));
+            let mut map = std::collections::HashMap::new();
+            map.insert(proof.block_prove_to, seq_commit_hash);
+            let accessor = zk_covenant_rollup_host::mock_chain::MockSeqCommitAccessor(map);
+            let draft_tx =
+                Transaction::new(TX_VERSION_POST_COV_HF, inputs.clone(), outputs.clone(), 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+            let covenant_compute_budget = zk_covenant_rollup_host::tx::measure_compute_budget_for_input(
+                &draft_tx,
+                &[covenant_entry_draft, collateral_entry_draft],
+                0,
+                &accessor,
+            );
+            inputs[0].mass = covenant_compute_budget.into();
+        }
+
         // Estimate fee from compute mass
         let tmp_tx = Transaction::new(TX_VERSION_POST_COV_HF, inputs.clone(), outputs.clone(), 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
-        let mass_calc = kaspa_consensus_core::mass::MassCalculator::new(1, 10, 1000, 0);
+        let mass_calc = kaspa_consensus_core::mass::MassCalculator::new(1, 10, 0);
         let mass = mass_calc.calc_non_contextual_masses(&tmp_tx).compute_mass;
         let priority_feerate = self.cached_fee_estimate.as_ref().map(|e| e.priority_bucket.feerate).unwrap_or(1.0);
         let estimated_fee = crate::actions::compute_fee(mass, priority_feerate);
@@ -2048,14 +2085,29 @@ impl App {
 
         let delegate_sig_script = ScriptBuilder::new().add_data(&delegate_script).unwrap().drain();
 
-        // Build inputs: permission (seq=0) + delegates (seq=0) + collateral (seq=1)
+        // Build inputs: permission + delegates + collateral. All scripts here fit in the
+        // per-input free compute allowance, so every v1 input commits ComputeBudget(0).
         let perm_utxo_ref = self.perm_utxo.as_ref().unwrap();
-        let mut inputs =
-            vec![TransactionInput::new(TransactionOutpoint::new(perm_utxo_ref.utxo.0, perm_utxo_ref.utxo.1), perm_sig_script, 0, 0)];
+        let mut inputs = vec![TransactionInput::new_with_compute_budget(
+            TransactionOutpoint::new(perm_utxo_ref.utxo.0, perm_utxo_ref.utxo.1),
+            perm_sig_script,
+            0,
+            0,
+        )];
         for utxo in &selected_delegates {
-            inputs.push(TransactionInput::new(TransactionOutpoint::new(utxo.tx_id, utxo.index), delegate_sig_script.clone(), 0, 0));
+            inputs.push(TransactionInput::new_with_compute_budget(
+                TransactionOutpoint::new(utxo.tx_id, utxo.index),
+                delegate_sig_script.clone(),
+                0,
+                0,
+            ));
         }
-        inputs.push(TransactionInput::new(TransactionOutpoint::new(collateral.tx_id, collateral.index), vec![], 0, 1));
+        inputs.push(TransactionInput::new_with_compute_budget(
+            TransactionOutpoint::new(collateral.tx_id, collateral.index),
+            vec![],
+            0,
+            0,
+        ));
 
         // Build outputs
         let dest_spk = ScriptPublicKey::new(0, spk.into());
@@ -2440,7 +2492,8 @@ impl App {
                             std::iter::once((0u32, &plain_output)),
                         );
 
-                        let inputs = vec![TransactionInput::new(deploy_outpoint, vec![], 0, 0)];
+                        // `sign()` later overwrites this mass to the v1 P2PK default.
+                        let inputs = vec![TransactionInput::new_with_compute_budget(deploy_outpoint, vec![], 0, 0)];
                         let utxo_entries = vec![UtxoEntry::new(first_utxo_amount, deployer_spk, 0, false, None)];
                         let outputs = vec![TransactionOutput::with_covenant(
                             covenant_value,
@@ -2538,7 +2591,7 @@ impl App {
                     }
                 };
 
-                let mass_calc = kaspa_consensus_core::mass::MassCalculator::new(1, 10, 1000, 0);
+                let mass_calc = kaspa_consensus_core::mass::MassCalculator::new(1, 10, 0);
                 let mass = mass_calc.calc_non_contextual_masses(&template).compute_mass;
                 if mass > 100_000 {
                     return Err(format!("Transaction mass {mass} exceeds max standard mass 100000"));
@@ -3805,17 +3858,24 @@ mod tests {
 
     // ── Step 1: Schnorr signing tests ──
 
-    #[test]
-    fn test_proof_tx_uses_115_sig_op_count() {
-        // The proof tx sig_op_count should be 115 (matching make_mock_transaction convention)
-        use kaspa_consensus_core::tx::TransactionInput;
-        let sig_script = vec![0u8; 8];
-        let outpoint = kaspa_consensus_core::tx::TransactionOutpoint::new(Hash::from_bytes([0u8; 32]), 0);
-        let input = TransactionInput::new(outpoint, sig_script, 0, 115);
-        assert_eq!(input.sig_op_count, 115, "proof tx must use sig_op_count=115");
-        // Ensure u8::MAX (255) is NOT the value
-        assert_ne!(input.sig_op_count, u8::MAX, "proof tx must not use u8::MAX");
-    }
+    // Obsolete after the v1 compute-budget migration: the proof tx used to commit a
+    // legacy sig_op_count=115 (the constant `make_mock_transaction` picked before the
+    // covenant hard fork). For v1 transactions the mass commitment is now a
+    // `ComputeBudget` derived dynamically from `vm.used_script_units()`, so this test's
+    // invariants no longer apply and `TransactionInput::sig_op_count` as a struct field
+    // is gone as well. Left commented (rather than deleted) as a historical marker.
+    //
+    // #[test]
+    // fn test_proof_tx_uses_115_sig_op_count() {
+    //     // The proof tx sig_op_count should be 115 (matching make_mock_transaction convention)
+    //     use kaspa_consensus_core::tx::TransactionInput;
+    //     let sig_script = vec![0u8; 8];
+    //     let outpoint = kaspa_consensus_core::tx::TransactionOutpoint::new(Hash::from_bytes([0u8; 32]), 0);
+    //     let input = TransactionInput::new(outpoint, sig_script, 0, 115);
+    //     assert_eq!(input.sig_op_count, 115, "proof tx must use sig_op_count=115");
+    //     // Ensure u8::MAX (255) is NOT the value
+    //     assert_ne!(input.sig_op_count, u8::MAX, "proof tx must not use u8::MAX");
+    // }
 
     // ── Step 3: ViewDetail popup tests ──
 

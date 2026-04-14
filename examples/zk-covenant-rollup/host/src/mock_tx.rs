@@ -370,7 +370,8 @@ pub fn create_exit_tx(
     prev_tx: Transaction,
     prev_output_index: u32,
 ) -> ZkTransaction {
-    let input = TransactionInput::new(TransactionOutpoint::new(prev_tx.id(), prev_output_index), vec![], 0, 0);
+    let input =
+        TransactionInput::new_with_compute_budget(TransactionOutpoint::new(prev_tx.id(), prev_output_index), vec![], 0, 0);
 
     let payload = ExitPayload::new(source, destination_spk, amount, 0);
 
@@ -427,7 +428,8 @@ pub fn create_transfer_tx(
     prev_tx: Transaction,
     prev_output_index: u32,
 ) -> ZkTransaction {
-    let input = TransactionInput::new(TransactionOutpoint::new(prev_tx.id(), prev_output_index), vec![], 0, 0);
+    let input =
+        TransactionInput::new_with_compute_budget(TransactionOutpoint::new(prev_tx.id(), prev_output_index), vec![], 0, 0);
 
     // Find nonce that makes tx_id an action (with the correct input)
     let payload = TransferPayload::new(source, destination, amount, 0);

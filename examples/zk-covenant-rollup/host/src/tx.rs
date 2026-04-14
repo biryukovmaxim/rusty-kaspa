@@ -1,5 +1,5 @@
 use kaspa_consensus_core::config::params::TESTNET12_PARAMS;
-use kaspa_consensus_core::mass::{Mass, MassCalculator};
+use kaspa_consensus_core::mass::{ComputeBudget, Mass, MassCalculator};
 use kaspa_consensus_core::{
     constants::{SOMPI_PER_KASPA, TX_VERSION_POST_COV_HF},
     hashing::sighash::SigHashReusedValuesUnsync,
@@ -20,7 +20,7 @@ pub fn make_mock_transaction(lock_time: u64, input_spk: ScriptPublicKey, output_
     let cov_id = Hash::from_bytes([0xFF; 32]);
     let tx = Transaction::new(
         TX_VERSION_POST_COV_HF,
-        vec![TransactionInput::new(TransactionOutpoint::new(Hash::from_u64_word(1), 1), vec![], 10, 115)],
+        vec![TransactionInput::new_with_compute_budget(TransactionOutpoint::new(Hash::from_u64_word(1), 1), vec![], 10, 0)],
         vec![TransactionOutput::with_covenant(
             SOMPI_PER_KASPA,
             output_spk,
@@ -47,7 +47,7 @@ pub fn make_mock_transaction_with_permission(
     let cov_id = Hash::from_bytes([0xFF; 32]);
     let tx = Transaction::new(
         TX_VERSION_POST_COV_HF,
-        vec![TransactionInput::new(TransactionOutpoint::new(Hash::from_u64_word(1), 1), vec![], 10, 115)],
+        vec![TransactionInput::new_with_compute_budget(TransactionOutpoint::new(Hash::from_u64_word(1), 1), vec![], 10, 0)],
         vec![
             TransactionOutput::with_covenant(
                 SOMPI_PER_KASPA,
@@ -69,26 +69,26 @@ pub fn make_mock_transaction_with_permission(
     (tx, utxo)
 }
 
-/// Verify a transaction using the script engine
-pub fn verify_tx(tx: &Transaction, utxo: &UtxoEntry, accessor: &dyn SeqCommitAccessor) {
-    let calc = MassCalculator::new_with_consensus_params(&TESTNET12_PARAMS);
-    let sig_cache = Cache::new(10_000);
-    let reused_values = SigHashReusedValuesUnsync::new();
-    let flags = EngineFlags { covenants_enabled: true, sigop_script_units: Default::default() };
+/// Verify a transaction using the script engine.
+///
+/// v1 transactions must commit a per-input `ComputeBudget` covering the script's actual
+/// execution cost. The caller is not expected to know that cost ahead of time (for ZK
+/// proof scripts the cost depends on the precompile tag), so this helper first runs the
+/// engine to measure `used_script_units`, then writes the minimum covering `ComputeBudget`
+/// into `tx.inputs[0].mass`, and only then runs the mass check. This matches the pattern
+/// used by `consensus_integration_tests::build_stark_consensus`.
+pub fn verify_tx(tx: &mut Transaction, utxo: &UtxoEntry, accessor: &dyn SeqCommitAccessor) {
+    let utxos = vec![utxo.clone()];
+    let compute_budget = measure_compute_budget_for_input(tx, &utxos, 0, accessor);
+    tx.inputs[0].mass = compute_budget.into();
 
-    let populated = PopulatedTransaction::new(tx, vec![utxo.clone()]);
+    let calc = MassCalculator::new_with_consensus_params(&TESTNET12_PARAMS);
+    let populated = PopulatedTransaction::new(tx, utxos);
     let ctx_mass = calc.calc_contextual_masses(&populated).unwrap();
     let non_ctx_mass = calc.calc_non_contextual_masses(populated.tx);
     const MAXIMUM_STANDARD_TRANSACTION_MASS: u64 = 1_000_000; // TODO(covpp-mainnet)
     let norm_mass = Mass::new(non_ctx_mass, ctx_mass).normalized_max(&TESTNET12_PARAMS.block_mass_limits.cofactors());
     assert!(dbg!(norm_mass) < MAXIMUM_STANDARD_TRANSACTION_MASS, "transaction mass is larger than max allowed size of 1000000");
-
-    let cov_ctx = CovenantsContext::from_tx(&populated).unwrap();
-    let exec_ctx =
-        EngineContext::new(&sig_cache).with_reused(&reused_values).with_seq_commit_accessor(accessor).with_covenants_ctx(&cov_ctx);
-
-    let mut vm = TxScriptEngine::from_transaction_input(&populated, &tx.inputs[0], 0, utxo, exec_ctx, flags);
-    vm.execute().unwrap();
 }
 
 /// Multi-input/output mock transaction for permission/delegate testing.
@@ -101,7 +101,14 @@ pub fn make_multi_input_mock_transaction(
         inputs_spk
             .iter()
             .enumerate()
-            .map(|(i, _)| TransactionInput::new(TransactionOutpoint::new(Hash::from_u64_word(i as u64 + 1), i as u32), vec![], 10, 1))
+            .map(|(i, _)| {
+                TransactionInput::new_with_compute_budget(
+                    TransactionOutpoint::new(Hash::from_u64_word(i as u64 + 1), i as u32),
+                    vec![],
+                    10,
+                    0,
+                )
+            })
             .collect(),
         outputs.into_iter().map(|(value, spk, covenant)| TransactionOutput::with_covenant(value, spk, covenant)).collect(),
         0,
@@ -151,6 +158,33 @@ pub fn try_verify_tx_input(
     vm.execute().map_err(|e| format!("{e}"))
 }
 
+/// Run the script engine on `input_idx` without a budget limit and return the minimum
+/// `ComputeBudget` that would cover the observed script units. v1 transactions must commit
+/// a per-input compute budget; callers that build a proof/covenant tx whose script cost
+/// depends on the ZK tag (STARK vs Groth16) should use this to populate the commitment
+/// dynamically instead of hard-coding a value.
+pub fn measure_compute_budget_for_input(
+    tx: &Transaction,
+    utxos: &[UtxoEntry],
+    input_idx: usize,
+    accessor: &dyn SeqCommitAccessor,
+) -> ComputeBudget {
+    let sig_cache = Cache::new(10_000);
+    let reused_values = SigHashReusedValuesUnsync::new();
+    let flags = EngineFlags { covenants_enabled: true, sigop_script_units: Default::default() };
+
+    let populated = PopulatedTransaction::new(tx, utxos.to_vec());
+    let cov_ctx = CovenantsContext::from_tx(&populated).unwrap();
+    let exec_ctx =
+        EngineContext::new(&sig_cache).with_reused(&reused_values).with_seq_commit_accessor(accessor).with_covenants_ctx(&cov_ctx);
+
+    let mut vm =
+        TxScriptEngine::from_transaction_input(&populated, &tx.inputs[input_idx], input_idx, &utxos[input_idx], exec_ctx, flags);
+    vm.execute().expect("script must verify before measuring compute budget");
+    ComputeBudget::checked_covering_script_units(vm.used_script_units())
+        .expect("script units must fit in a u16 compute budget")
+}
+
 #[cfg(test)]
 mod tests {
     use kaspa_consensus_core::{
@@ -172,7 +206,11 @@ mod tests {
 
     /// Build a minimal single-input transaction and finalize it.
     fn make_tx(outpoint: TransactionOutpoint, outputs: Vec<TransactionOutput>, version: u16) -> Transaction {
-        let input = TransactionInput::new(outpoint, vec![], 0, 0);
+        let input = if kaspa_consensus_core::tx::TxInputMass::version_expects_compute_budget_field(version) {
+            TransactionInput::new_with_compute_budget(outpoint, vec![], 0, 0)
+        } else {
+            TransactionInput::new(outpoint, vec![], 0, 0)
+        };
         let mut tx = Transaction::new(version, vec![input], outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
         tx.finalize();
         tx
@@ -368,7 +406,12 @@ mod tests {
         }
         let mut tx = Transaction::new(
             super::TX_VERSION_POST_COV_HF,
-            vec![TransactionInput::new(TransactionOutpoint::new(Hash::from_u64_word(1), 1), vec![], 10, 115)],
+            vec![TransactionInput::new_with_compute_budget(
+                TransactionOutpoint::new(Hash::from_u64_word(1), 1),
+                vec![],
+                10,
+                0,
+            )],
             outputs,
             0,
             super::SUBNETWORK_ID_NATIVE,

@@ -272,7 +272,7 @@ pub fn build_mock_chain(initial_lane_tip: Hash, covenant_id_bytes: &[u8; 32]) ->
             let first_input_spk = pay_to_pubkey_spk(&AccountName::Charlie.pubkey_bytes());
             let first_input_spk_kaspa = ScriptPublicKey::new(0, first_input_spk.to_vec().into());
             let prev_tx = create_prev_tx(1000, first_input_spk_kaspa);
-            let input = kaspa_consensus_core::tx::TransactionInput::new(
+            let input = kaspa_consensus_core::tx::TransactionInput::new_with_compute_budget(
                 kaspa_consensus_core::tx::TransactionOutpoint::new(prev_tx.id(), 0),
                 vec![],
                 0,

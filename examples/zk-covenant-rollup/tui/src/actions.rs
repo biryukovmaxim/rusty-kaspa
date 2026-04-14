@@ -58,7 +58,12 @@ pub fn build_entry_tx(
     }
 
     // Find nonce that produces entry-prefix tx_id
-    let inputs = vec![TransactionInput::new(TransactionOutpoint::new(gas_utxo.tx_id, gas_utxo.index), vec![], 0, 0)];
+    let inputs = vec![TransactionInput::new_with_compute_budget(
+        TransactionOutpoint::new(gas_utxo.tx_id, gas_utxo.index),
+        vec![],
+        0,
+        0,
+    )];
     let payload = EntryPayload::new(dest, 0);
 
     Ok(Transaction::new(
@@ -90,7 +95,12 @@ pub fn build_transfer_tx(
     let dest = hash_to_u32x8(dest_pk);
 
     let outputs = vec![TransactionOutput::new(output_value, pay_to_address_script(dest_address))];
-    let inputs = vec![TransactionInput::new(TransactionOutpoint::new(gas_utxo.tx_id, gas_utxo.index), vec![], 0, 0)];
+    let inputs = vec![TransactionInput::new_with_compute_budget(
+        TransactionOutpoint::new(gas_utxo.tx_id, gas_utxo.index),
+        vec![],
+        0,
+        0,
+    )];
 
     let payload = TransferPayload::new(source, dest, amount, 0);
 
@@ -113,7 +123,12 @@ pub fn build_exit_tx(
     let source = hash_to_u32x8(source_pk);
 
     let outputs = vec![TransactionOutput::new(output_value, kaspa_consensus_core::tx::ScriptPublicKey::new(0, dest_spk_bytes.into()))];
-    let inputs = vec![TransactionInput::new(TransactionOutpoint::new(gas_utxo.tx_id, gas_utxo.index), vec![], 0, 0)];
+    let inputs = vec![TransactionInput::new_with_compute_budget(
+        TransactionOutpoint::new(gas_utxo.tx_id, gas_utxo.index),
+        vec![],
+        0,
+        0,
+    )];
 
     let payload = ExitPayload::new(source, dest_spk_bytes, exit_amount, 0);
 
