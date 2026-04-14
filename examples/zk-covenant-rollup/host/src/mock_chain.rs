@@ -21,7 +21,7 @@ use crate::bridge::build_delegate_entry_script;
 
 use crate::mock_tx::{
     create_entry_tx, create_exit_tx, create_exit_tx_insufficient, create_prev_tx, create_transfer_tx, create_unknown_action_tx,
-    create_v1_non_action_tx, ZkTransaction,
+    create_unrelated_tx, create_v1_non_action_tx, rollup_lane_indices, ZkTransaction,
 };
 
 /// Mock implementation of SeqCommitAccessor for testing
@@ -116,7 +116,12 @@ impl Transfer {
 /// Result of building a mock chain
 pub struct MockChain {
     pub block_hashes: Vec<Hash>,
+    /// All transactions in each block (rollup-lane members + unrelated txs).
+    /// Guest-visible lane txs are identified by `block_lane_indices`.
     pub block_txs: Vec<Vec<ZkTransaction>>,
+    /// Real `merge_idx` of each lane tx in its block — the position inside
+    /// `block_txs[i]`. Sparse when the block contains non-lane txs.
+    pub block_lane_indices: Vec<Vec<u32>>,
     /// Per-block context hashes (host precomputes, guest reads as [u32; 8])
     pub block_context_hashes: Vec<[u32; 8]>,
     pub accessor: MockSeqCommitAccessor,
@@ -172,6 +177,7 @@ pub fn build_mock_chain(initial_lane_tip: Hash, covenant_id_bytes: &[u8; 32]) ->
 
     let mut block_hashes: Vec<Hash> = Vec::new();
     let mut block_txs: Vec<Vec<ZkTransaction>> = Vec::new();
+    let mut block_lane_indices: Vec<Vec<u32>> = Vec::new();
     let mut block_context_hashes: Vec<[u32; 8]> = Vec::new();
     let mut accessor_map = HashMap::new();
     let mut lane_tip = from_bytes(initial_lane_tip.as_bytes());
@@ -183,14 +189,18 @@ pub fn build_mock_chain(initial_lane_tip: Hash, covenant_id_bytes: &[u8; 32]) ->
 
         let mut txs = Vec::new();
 
-        // Block 1: Add a V1 non-action tx (should be ignored by guest action processing)
+        // Block 1: non_action (lane) then an unrelated native tx (filtered out of lane)
         if block_idx == 0 {
             println!("  Adding V1 non-action tx (should be ignored)");
             txs.push(create_v1_non_action_tx());
+            println!("  Adding unrelated native tx (not in rollup lane)");
+            txs.push(create_unrelated_tx(100));
         }
 
-        // Block 2: Add an unknown action tx (unknown op code — ignored)
+        // Block 2: unrelated tx first, then unknown action tx (lane)
         if block_idx == 1 {
+            println!("  Adding unrelated native tx (not in rollup lane)");
+            txs.push(create_unrelated_tx(200));
             println!("  Adding unknown action tx (should be ignored)");
             txs.push(create_unknown_action_tx());
         }
@@ -253,6 +263,13 @@ pub fn build_mock_chain(initial_lane_tip: Hash, covenant_id_bytes: &[u8; 32]) ->
             let eve_new_balance = eve_balance + deposit_amount;
             smt.upsert(eve_pk, eve_new_balance);
             balances.insert(AccountName::Eve, eve_new_balance);
+        }
+
+        // Block 3: Slot an unrelated native tx between the entries and the exits
+        // so the downstream lane indices become sparse.
+        if block_idx == 2 {
+            println!("  Adding unrelated native tx (not in rollup lane)");
+            txs.push(create_unrelated_tx(300));
         }
 
         // Block 3: Invalid exit — insufficient balance (Charlie has 25, tries to exit 1000)
@@ -366,6 +383,13 @@ pub fn build_mock_chain(initial_lane_tip: Hash, covenant_id_bytes: &[u8; 32]) ->
             perm_builder.add_leaf(perm_leaf_hash(&dave_dest_spk, exit_amount));
         }
 
+        // Block 3: another unrelated native tx before the transfers — keeps the
+        // final transfer's merge_idx offset from its "lane position".
+        if block_idx == 2 {
+            println!("  Adding unrelated native tx (not in rollup lane)");
+            txs.push(create_unrelated_tx(301));
+        }
+
         for transfer in transfers.iter() {
             let from_pk = transfer.from.pubkey();
             let to_pk = transfer.to.pubkey();
@@ -440,12 +464,17 @@ pub fn build_mock_chain(initial_lane_tip: Hash, covenant_id_bytes: &[u8; 32]) ->
             }
         }
 
-        // Compute activity digest for this block's lane transactions
+        // Filter the block into lane-only indices (real merge_idx values).
+        // Non-lane txs stay in `txs` but never enter the guest.
+        let lane_indices = rollup_lane_indices(&txs);
+
+        // Compute activity digest from the lane tx positions.
         let context_hash = [0u32; 8]; // mock: zero context hash
         let mut activity_builder = ActivityDigestBuilder::new();
-        for (merge_idx, tx) in txs.iter().enumerate() {
+        for &merge_idx in &lane_indices {
+            let tx = &txs[merge_idx as usize];
             let tx_digest = seq_commit_tx_digest(&tx.tx_id(), tx.version());
-            activity_builder.add_leaf(to_hash(&activity_leaf(&tx_digest, merge_idx as u32)));
+            activity_builder.add_leaf(to_hash(&activity_leaf(&tx_digest, merge_idx)));
         }
         let activity_digest = from_hash(activity_builder.finalize());
         lane_tip = lane_tip_next(&lane_tip, &ROLLUP_LANE_KEY, &activity_digest, &context_hash);
@@ -453,6 +482,7 @@ pub fn build_mock_chain(initial_lane_tip: Hash, covenant_id_bytes: &[u8; 32]) ->
 
         block_context_hashes.push(context_hash);
         block_txs.push(txs);
+        block_lane_indices.push(lane_indices);
     }
 
     // Non-activity blocks (zero lane txs) are not sent to the guest —
@@ -516,6 +546,7 @@ pub fn build_mock_chain(initial_lane_tip: Hash, covenant_id_bytes: &[u8; 32]) ->
     MockChain {
         block_hashes,
         block_txs,
+        block_lane_indices,
         block_context_hashes,
         accessor: MockSeqCommitAccessor(accessor_map),
         final_lane_tip: lane_tip,

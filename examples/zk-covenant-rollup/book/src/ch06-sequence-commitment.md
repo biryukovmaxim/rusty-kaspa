@@ -30,7 +30,7 @@ Within each active block, every lane transaction contributes to the block's **ac
 2. `leaf = activity_leaf(tx_digest, merge_idx)` — keyed BLAKE3, domain `SeqCommitActivityLeaf`
 3. Leaves are fed to an `ActivityDigestBuilder` (a streaming Merkle builder)
 
-The `merge_idx` is the transaction's position within the block's mergeset, which enforces ordering — the host cannot reorder transactions.
+The `merge_idx` is the transaction's real position within the block's full mergeset — including any non-lane transactions the host filtered out before sending. It is committed as data inside the leaf hash (not derived from leaf order), so the values can be sparse without breaking the digest. This anchors each lane tx to its consensus position: the host can choose which txs to send into the guest, but it cannot reorder them or fabricate a different position.
 
 If a block has zero lane transactions (`tx_count == 0`), the lane was not active. No activity digest or context hash is read, and the lane tip is unchanged.
 

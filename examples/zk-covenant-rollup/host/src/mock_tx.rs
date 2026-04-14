@@ -487,3 +487,35 @@ pub fn create_unknown_action_tx() -> ZkTransaction {
     let tx = Transaction::new(1, vec![], outputs, 0, rollup_subnet(), 0, payload_bytes);
     ZkTransaction::new(tx, None)
 }
+
+/// A transaction that is **not** part of any rollup lane.
+/// Uses `SUBNETWORK_ID_NATIVE` and a varying `lock_time` so each call yields
+/// a distinct tx_id. The mock chain inserts these alongside rollup txs to
+/// exercise sparse `merge_idx` values (host filters by subnetwork before
+/// sending lane txs to the guest).
+pub fn create_unrelated_tx(nonce: u64) -> ZkTransaction {
+    let tx = Transaction::new(
+        1,
+        vec![TransactionInput::new_with_compute_budget(
+            TransactionOutpoint::new(kaspa_hashes::Hash::from_u64_word(nonce), 0),
+            vec![],
+            0,
+            0,
+        )],
+        vec![TransactionOutput::new(1, ScriptPublicKey::new(0, vec![0u8; 34].into()))],
+        nonce,
+        SUBNETWORK_ID_NATIVE,
+        0,
+        vec![],
+    );
+    ZkTransaction::new(tx, None)
+}
+
+/// Return the indices of transactions that belong to the rollup lane
+/// (filtered by subnetwork id). The caller uses these as the real `merge_idx`
+/// values passed to the guest — non-lane txs never enter the zkVM, but their
+/// positions in the full block tx list are preserved by the surviving indices.
+pub fn rollup_lane_indices(txs: &[ZkTransaction]) -> Vec<u32> {
+    let rollup = rollup_subnet();
+    txs.iter().enumerate().filter_map(|(i, t)| (t.tx.subnetwork_id == rollup).then_some(i as u32)).collect()
+}

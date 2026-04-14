@@ -15,16 +15,20 @@ use crate::{auth, input, state, tx, witness::EntryWitness, witness::PrevTxV1Witn
 /// **new lane tip** (unchanged if the block has no lane transactions).
 ///
 /// Input format per block:
-///   `tx_count(u32) [context_hash([u32;8]) tx_data...]`
+///   `tx_count(u32) [context_hash([u32;8]) (merge_idx(u32) tx_data)*]`
 ///
 /// If `tx_count == 0` the lane was not active in this block — no context
 /// hash is read and `prev_tip` is returned as-is.  This matches consensus
 /// (`resolve_lane_updates` only touches lanes that have activity).
 ///
-/// When `tx_count > 0`, every transaction contributes an activity leaf
-/// via `seq_commit_tx_digest(tx_id, version)`.  Only V1 transactions
-/// are inspected for rollup actions; V0 and V2+ are committed to the
-/// digest but otherwise skipped.
+/// When `tx_count > 0`, each lane transaction is preceded by its real
+/// `merge_idx` — the tx's position in the full block's tx list, *including*
+/// any non-lane transactions the host filtered out before sending.  The
+/// guest uses this value in `activity_leaf(tx_digest, merge_idx)` so the
+/// activity digest matches consensus regardless of how many unrelated txs
+/// live alongside the lane in the real block.  Only V1 transactions are
+/// inspected for rollup actions; V0 and V2+ are committed to the digest
+/// but otherwise skipped.
 pub fn process_block(
     stdin: &mut impl WordRead,
     state_root: &mut [u32; 8],
@@ -44,7 +48,8 @@ pub fn process_block(
     let context_hash = input::read_hash(stdin);
 
     let mut activity_builder = ActivityDigestBuilder::new();
-    for merge_idx in 0..tx_count {
+    for _ in 0..tx_count {
+        let merge_idx = input::read_u32(stdin);
         let (tx_id, version) = process_transaction(stdin, state_root, covenant_id, perm_builder);
         let tx_digest = seq_commit_tx_digest(&tx_id, version);
         activity_builder.add_leaf(to_hash(&activity_leaf(&tx_digest, merge_idx)));

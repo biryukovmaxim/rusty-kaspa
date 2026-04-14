@@ -51,12 +51,14 @@ fn main() {
         let builder =
             binding.write_slice(core::slice::from_ref(&public_input)).write_slice(&(chain.block_txs.len() as u32).to_le_bytes());
 
-        for (i, txs) in chain.block_txs.iter().enumerate() {
-            builder.write_slice(&(txs.len() as u32).to_le_bytes());
-            if !txs.is_empty() {
+        for (i, lane_indices) in chain.block_lane_indices.iter().enumerate() {
+            let lane_count = lane_indices.len() as u32;
+            builder.write_slice(&lane_count.to_le_bytes());
+            if lane_count > 0 {
                 builder.write_slice(bytemuck::cast_slice::<u32, u8>(&chain.block_context_hashes[i]));
-                for tx in txs {
-                    tx.write_to_env(builder);
+                for &merge_idx in lane_indices {
+                    builder.write_slice(&merge_idx.to_le_bytes());
+                    chain.block_txs[i][merge_idx as usize].write_to_env(builder);
                 }
             }
         }

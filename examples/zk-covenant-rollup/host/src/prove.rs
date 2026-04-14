@@ -63,8 +63,12 @@ impl ProofKind {
 pub struct ProveInput {
     /// Public input committed to the proof (prev state, prev seq, covenant ID).
     pub public_input: PublicInput,
-    /// All block transactions in the proving window, grouped by block.
+    /// Every transaction in each block (lane members + unrelated txs).
+    /// Guest-visible lane txs are selected by `block_lane_indices`.
     pub block_txs: Vec<Vec<ZkTransaction>>,
+    /// Real `merge_idx` of each lane tx in its block. Non-lane txs are
+    /// filtered out here and never reach the guest.
+    pub block_lane_indices: Vec<Vec<u32>>,
     /// Per-block context hashes (host precomputes `mergeset_context_hash`).
     pub block_context_hashes: Vec<[u32; 8]>,
     /// Commitment witness header (Pod).
@@ -163,13 +167,15 @@ fn build_env(input: &ProveInput) -> Result<ExecutorEnv<'_>, String> {
     let builder =
         binding.write_slice(core::slice::from_ref(&input.public_input)).write_slice(&(input.block_txs.len() as u32).to_le_bytes());
 
-    for (i, txs) in input.block_txs.iter().enumerate() {
-        builder.write_slice(&(txs.len() as u32).to_le_bytes());
-        if !txs.is_empty() {
+    for (i, lane_indices) in input.block_lane_indices.iter().enumerate() {
+        let lane_count = lane_indices.len() as u32;
+        builder.write_slice(&lane_count.to_le_bytes());
+        if lane_count > 0 {
             // Context hash only when the lane is active in this block
             builder.write_slice(bytemuck::cast_slice::<u32, u8>(&input.block_context_hashes[i]));
-            for tx in txs {
-                tx.write_to_env(builder);
+            for &merge_idx in lane_indices {
+                builder.write_slice(&merge_idx.to_le_bytes());
+                input.block_txs[i][merge_idx as usize].write_to_env(builder);
             }
         }
     }

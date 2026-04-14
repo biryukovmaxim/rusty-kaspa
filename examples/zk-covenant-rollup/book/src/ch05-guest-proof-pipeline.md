@@ -16,11 +16,12 @@ flowchart TD
 
     subgraph P1["Phase 1: Lane tip computation"]
         BLOCKS["For each block"]
-        TXCOUNT["Read tx_count"]
+        TXCOUNT["Read tx_count<br/>(lane txs only)"]
         EMPTY{"tx_count == 0?"}
         SKIP["Lane tip unchanged"]
         CTX["Read context_hash"]
-        TXS["For each transaction (merge_idx)"]
+        TXS["For each lane tx"]
+        MIDX["Read merge_idx<br/>(position in full block)"]
         CLASSIFY["Read version"]
         V0["V0/V2+: read tx_id hash"]
         V1["V1: read payload + rest_preimage<br/>compute tx_id, parse action"]
@@ -34,7 +35,7 @@ flowchart TD
         BLOCKS --> TXCOUNT --> EMPTY
         EMPTY -->|Yes| SKIP --> BLOCKS
         EMPTY -->|No| CTX --> TXS
-        TXS --> CLASSIFY
+        TXS --> MIDX --> CLASSIFY
         CLASSIFY -->|V0/V2+| V0
         CLASSIFY -->|V1| V1
         V1 -->|valid action| DISPATCH
@@ -82,7 +83,7 @@ These values are written to the journal so the on-chain script can verify they m
 {{#include ../../methods/guest/src/block.rs:process_block}}
 ```
 
-Each block starts with a `tx_count`. If zero, the lane was not active in this block and the lane tip is unchanged. Otherwise, the guest reads the block's `context_hash`, then processes each transaction sequentially. Every transaction (regardless of version) contributes to the block's activity digest via `seq_commit_tx_digest(tx_id, version)` and `activity_leaf(tx_digest, merge_idx)`. The finalized activity digest and context hash produce a new lane tip via `lane_tip_next`.
+Each block starts with a `tx_count` — the number of *lane* transactions the host is sending into the guest. Non-lane transactions (different subnetwork) are filtered out by the host and never enter the zkVM. If `tx_count == 0`, the lane was not active in this block and the lane tip is unchanged. Otherwise, the guest reads the block's `context_hash` and then, for each lane transaction, reads its `merge_idx` (the tx's real position in the full block's mergeset) followed by the tx data. Every lane transaction (regardless of version) contributes to the block's activity digest via `seq_commit_tx_digest(tx_id, version)` and `activity_leaf(tx_digest, merge_idx)`. Because `merge_idx` is an explicit per-tx field rather than a sequential 0..N counter, the activity digest matches consensus even when non-lane transactions are interleaved with lane members in the original block. The finalized activity digest and context hash produce a new lane tip via `lane_tip_next`.
 
 ## Transaction classification
 
