@@ -193,7 +193,7 @@ fn make_mock_transaction(
 fn verify_tx(tx: &Transaction, utxo_entry: &UtxoEntry) {
     let sig_cache = Cache::new(10_000);
     let reused_values = SigHashReusedValuesUnsync::new();
-    let flags = EngineFlags { covenants_enabled: true };
+    let flags = EngineFlags { covenants_enabled: true, sigop_script_units: Default::default() };
 
     let populated = PopulatedTransaction::new(tx, vec![utxo_entry.clone()]);
     let covenant_ctx = CovenantsContext::from_tx(&populated).unwrap();

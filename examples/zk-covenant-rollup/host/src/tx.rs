@@ -74,7 +74,7 @@ pub fn verify_tx(tx: &Transaction, utxo: &UtxoEntry, accessor: &dyn SeqCommitAcc
     let calc = MassCalculator::new_with_consensus_params(&TESTNET12_PARAMS);
     let sig_cache = Cache::new(10_000);
     let reused_values = SigHashReusedValuesUnsync::new();
-    let flags = EngineFlags { covenants_enabled: true };
+    let flags = EngineFlags { covenants_enabled: true, sigop_script_units: Default::default() };
 
     let populated = PopulatedTransaction::new(tx, vec![utxo.clone()]);
     let ctx_mass = calc.calc_contextual_masses(&populated).unwrap();
@@ -118,7 +118,7 @@ pub fn make_multi_input_mock_transaction(
 pub fn verify_tx_input(tx: &Transaction, utxos: &[UtxoEntry], input_idx: usize, accessor: &dyn SeqCommitAccessor) {
     let sig_cache = Cache::new(10_000);
     let reused_values = SigHashReusedValuesUnsync::new();
-    let flags = EngineFlags { covenants_enabled: true };
+    let flags = EngineFlags { covenants_enabled: true, sigop_script_units: Default::default() };
 
     let populated = PopulatedTransaction::new(tx, utxos.to_vec());
     let cov_ctx = CovenantsContext::from_tx(&populated).unwrap();
@@ -139,7 +139,7 @@ pub fn try_verify_tx_input(
 ) -> Result<(), String> {
     let sig_cache = Cache::new(10_000);
     let reused_values = SigHashReusedValuesUnsync::new();
-    let flags = EngineFlags { covenants_enabled: true };
+    let flags = EngineFlags { covenants_enabled: true, sigop_script_units: Default::default() };
 
     let populated = PopulatedTransaction::new(tx, utxos.to_vec());
     let cov_ctx = CovenantsContext::from_tx(&populated).unwrap();

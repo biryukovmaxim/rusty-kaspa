@@ -2874,6 +2874,7 @@ dependencies = [
  "ark-serialize 0.5.0",
  "ark-snark",
  "blake2b_simd",
+ "blake3",
  "borsh",
  "bytemuck",
  "cc",
