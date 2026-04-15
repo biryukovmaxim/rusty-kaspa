@@ -13,6 +13,7 @@ use kaspa_smt::tree::{SparseMerkleTree, compute_root_update};
 use rocksdb::WriteBatch;
 
 use kaspa_consensus_core::api::ImportLane;
+use kaspa_smt_store::cache::BranchEntity;
 use kaspa_smt_store::processor::{SmtProcessor, SmtStores};
 use kaspa_smt_store::streaming_import::streaming_import;
 
@@ -210,7 +211,7 @@ fn processor_flush_writes_correct_data() {
     db.write(batch).unwrap();
 
     // Verify lane version was written
-    let lane_ver = stores.lane_version.get(key, 0, |bh| bh == block_hash).unwrap().unwrap();
+    let lane_ver = stores.get_lane(key, u64::MAX, 0, |bh| bh == block_hash).unwrap();
     assert_eq!(*lane_ver.data(), tip);
     assert_eq!(lane_ver.blue_score(), blue_score);
 
@@ -220,11 +221,19 @@ fn processor_flush_writes_correct_data() {
     assert_eq!(si_entry.data(), &vec![key]);
 
     // Verify root-level branch version was written
-    let root_branch = stores.branch_version.get(0, Hash::from_bytes([0; 32]), 0, |_| true).unwrap();
+    let root_branch = stores.get_node(BranchEntity { depth: 0, node_key: Hash::from_bytes([0; 32]) }, u64::MAX, 0, |_| true);
     assert!(root_branch.is_some());
 }
 
 /// Inactivity threshold — lane not touched within threshold -> treated as empty.
+///
+/// Downstream consequence worth naming for future readers: a caller that
+/// resolves lane tips or reads a base root through a wider window than the
+/// `VersionedBranchReader` used by `SmtProcessor::build` will cause the walk
+/// to silently rebuild a tree without the out-of-window lanes. The fix is
+/// always to align the caller on the reader's window (i.e. the current block's
+/// POV `[current - F, current]`), never to widen the reader. See KIP-21 §5:
+/// the active-lanes SMT is defined from the processing block's POV only.
 #[test]
 fn inactivity_threshold_hides_stale_branches() {
     let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
@@ -246,12 +255,13 @@ fn inactivity_threshold_hides_stale_branches() {
     db.write(batch).unwrap();
 
     // At blue_score=100: the root-level branch should be visible (min_blue_score=0)
-    let root_branch = stores.branch_version.get(0, Hash::from_bytes([0; 32]), 0, |_| true).unwrap();
+    let root_entity = BranchEntity { depth: 0, node_key: Hash::from_bytes([0; 32]) };
+    let root_branch = stores.get_node(root_entity, u64::MAX, 0, |_| true);
     assert!(root_branch.is_some(), "branch should be visible at same blue_score");
 
     // At blue_score=100 + THRESHOLD + 1: beyond inactivity window
     let far_future_min = (old_blue_score + TEST_THRESHOLD + 1).saturating_sub(TEST_THRESHOLD);
-    let root_branch_far = stores.branch_version.get(0, Hash::from_bytes([0; 32]), far_future_min, |_| true).unwrap();
+    let root_branch_far = stores.get_node(root_entity, u64::MAX, far_future_min, |_| true);
     assert!(root_branch_far.is_none(), "branch should be hidden beyond inactivity threshold");
 }
 
@@ -494,7 +504,7 @@ fn export_import_roundtrip() {
     let mut exported: Vec<([u8; 20], Hash, u64)> = Vec::new();
     for lid in &lane_ids {
         let lk = lane_key(lid);
-        if let Some(v) = stores.get_lane(lk, 0, |_| true) {
+        if let Some(v) = stores.get_lane(lk, u64::MAX, 0, |_| true) {
             exported.push((*lid, *v.data(), v.blue_score()));
         }
     }
@@ -520,7 +530,7 @@ fn export_import_roundtrip() {
     // Verify lanes are readable with correct blue_scores
     for (lid, tip, bs) in &exported {
         let lk = lane_key(lid);
-        let v = import_stores.get_lane(lk, 0, |bh| bh == ZERO_HASH);
+        let v = import_stores.get_lane(lk, u64::MAX, 0, |bh| bh == ZERO_HASH);
         assert!(v.is_some(), "lane {:02x} must be readable", lid[0]);
         assert_eq!(v.as_ref().unwrap().data(), tip);
         assert_eq!(v.unwrap().blue_score(), *bs);
@@ -563,7 +573,7 @@ fn zero_hash_block_hash_lanes_are_readable() {
     build.flush(&stores, &mut batch, bs, ZERO_HASH).unwrap();
     db.write(batch).unwrap();
 
-    let result = stores.get_lane(lk, 0, |bh| bh == kaspa_hashes::ZERO_HASH);
+    let result = stores.get_lane(lk, u64::MAX, 0, |bh| bh == kaspa_hashes::ZERO_HASH);
     assert!(result.is_some());
     assert_eq!(*result.unwrap().data(), tip);
 }
@@ -590,7 +600,8 @@ fn zero_hash_block_hash_branches_are_readable() {
     build.flush(&stores, &mut batch, bs, ZERO_HASH).unwrap();
     db.write(batch).unwrap();
 
-    let root_node = stores.branch_version.get(0, Hash::from_bytes([0; 32]), 0, |bh| bh == kaspa_hashes::ZERO_HASH).unwrap();
+    let root_node = stores
+        .get_node(BranchEntity { depth: 0, node_key: Hash::from_bytes([0; 32]) }, u64::MAX, 0, |bh| bh == kaspa_hashes::ZERO_HASH);
     assert!(root_node.is_some());
 
     // With SLO, a single lane produces a Collapsed node at the root
@@ -841,7 +852,7 @@ fn streaming_import_matches_export_roundtrip_root() {
     let mut exported = Vec::new();
     for lid in (1u8..=4).map(|i| [i; 20]) {
         let lk = lane_key(&lid);
-        if let Some(v) = stores.get_lane(lk, 0, |_| true) {
+        if let Some(v) = stores.get_lane(lk, u64::MAX, 0, |_| true) {
             exported.push(ImportLane { lane_key: lk, lane_tip: *v.data(), blue_score: v.blue_score(), proof: None });
         }
     }
