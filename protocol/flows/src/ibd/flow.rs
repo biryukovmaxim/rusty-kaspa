@@ -66,7 +66,7 @@ impl Flow for IbdFlow {
 }
 
 pub enum IbdType {
-    Sync { highest_known_syncer_chain_hash: Hash, is_utxo_stable: bool, is_pp_anticone_synced: bool },
+    Sync { highest_known_syncer_chain_hash: Hash, is_utxo_stable: bool, is_smt_stable: bool, is_pp_anticone_synced: bool },
     DownloadHeadersProof,
     PruningCatchUp { highest_known_syncer_chain_hash: Hash },
 }
@@ -121,7 +121,7 @@ impl IbdFlow {
             )
             .await?;
         match ibd_type {
-            IbdType::Sync { highest_known_syncer_chain_hash, is_utxo_stable, is_pp_anticone_synced } => {
+            IbdType::Sync { highest_known_syncer_chain_hash, is_utxo_stable, is_smt_stable, is_pp_anticone_synced } => {
                 let pruning_point = session.async_pruning_point().await;
 
                 info!("syncing ahead from current pruning point");
@@ -135,6 +135,21 @@ impl IbdFlow {
                 if !is_pp_anticone_synced {
                     self.sync_missing_trusted_bodies(&session).await?;
                 }
+                // SMT state and utxoset are gated independently so that a partial-progress state
+                // (e.g. SMT fully synced but utxoset sync interrupted mid-stream) can resume
+                // without re-downloading the SMT lanes. The invariant
+                //     is_utxo_stable => is_smt_stable
+                // is still maintained by set/clear ordering, so skipping SMT when it is already
+                // stable is always safe.
+                if !is_smt_stable {
+                    info!(
+                        "SMT state corresponding to the current pruning point {} is incomplete, attempting to download it from {}",
+                        pruning_point, self.router
+                    );
+                    self.sync_new_smt_state(&session, pruning_point).await?;
+                } else {
+                    info!("SMT state for pruning point {} is already stable, skipping SMT sync step", pruning_point);
+                }
                 if !is_utxo_stable
                 // Utxo might not be available even if the pruning point block data is.
                 // Utxo must be synced before all so the node could function
@@ -143,9 +158,9 @@ impl IbdFlow {
                         "utxoset corresponding to the current pruning point is incomplete, attempting to download it from {}",
                         self.router
                     );
-
-                    self.sync_new_smt_state(&session, pruning_point).await?;
                     self.sync_new_utxo_set(&session, pruning_point).await?;
+                } else {
+                    info!("utxoset for pruning point {} is already stable, skipping utxoset sync step", pruning_point);
                 }
                 // Once utxo is valid, simply sync missing headers
                 self.sync_headers(
@@ -263,13 +278,22 @@ impl IbdFlow {
 
                 let is_utxo_stable = consensus.async_is_pruning_utxoset_stable().await;
                 let is_pp_anticone_synced = consensus.async_is_pruning_point_anticone_fully_synced().await;
+                // The SMT stable flag is only meaningful once covenants are active at the current
+                // pruning point. Before activation, `sync_new_smt_state` is a no-op and the flag
+                // is never set, so we treat it as stable to preserve pre-activation IBD behavior.
+                let pp_header = consensus.async_get_header(pruning_point).await.unwrap();
+                let is_smt_stable = if self.ctx.config.covenants_activation.is_active(pp_header.daa_score) {
+                    consensus.async_is_pruning_smt_stable().await
+                } else {
+                    true
+                };
 
-                return match (syncer_skew, is_utxo_stable && is_pp_anticone_synced) {
+                return match (syncer_skew, is_utxo_stable && is_smt_stable && is_pp_anticone_synced) {
                     (SyncerSkew::Aligned, _) => {
-                        Ok(IbdType::Sync { highest_known_syncer_chain_hash, is_utxo_stable, is_pp_anticone_synced })
+                        Ok(IbdType::Sync { highest_known_syncer_chain_hash, is_utxo_stable, is_smt_stable, is_pp_anticone_synced })
                     }
                     (SyncerSkew::Lagging, true) => {
-                        Ok(IbdType::Sync { highest_known_syncer_chain_hash, is_utxo_stable, is_pp_anticone_synced })
+                        Ok(IbdType::Sync { highest_known_syncer_chain_hash, is_utxo_stable, is_smt_stable, is_pp_anticone_synced })
                     }
                     (SyncerSkew::Lagging, false) => Err(ProtocolError::Other(
                         "Local node is in a transitional state requiring external data to stabilize, but the syncer lags behind and is unable to provide said data",
@@ -278,7 +302,7 @@ impl IbdFlow {
                         if consensus.async_get_block_status(syncer_pruning_point).await.is_some_and(|b| b.has_block_body()) {
                             // While a leading syncer skew often indicates the need for catchup, in this case
                             // the node is just missing a segment in the future of its current pruning point, that is available to the syncer
-                            Ok(IbdType::Sync { highest_known_syncer_chain_hash, is_utxo_stable, is_pp_anticone_synced })
+                            Ok(IbdType::Sync { highest_known_syncer_chain_hash, is_utxo_stable, is_smt_stable, is_pp_anticone_synced })
                         } else {
                             Ok(IbdType::PruningCatchUp { highest_known_syncer_chain_hash })
                         }
@@ -649,26 +673,24 @@ impl IbdFlow {
         let payload_and_ctx_digest = md.payload_and_ctx_digest;
         let expected_count = md.active_lanes_count;
 
-        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        // Small queue of already-chunked batches: one in flight + one being processed
+        // by the importer is enough headroom; each chunk holds up to SMT_CHUNK_SIZE lanes.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<kaspa_consensus_core::api::ImportLane>>(2);
 
-        let builder_handle = consensus.clone().spawn_blocking(move |c| {
-            c.import_pruning_point_smt(pruning_point, lanes_root, payload_and_ctx_digest, expected_count, rx)
+        let consensus_for_import = consensus.clone();
+        let builder_handle = tokio::task::spawn_blocking(move || {
+            consensus_for_import.import_pruning_point_smt(pruning_point, lanes_root, payload_and_ctx_digest, expected_count, rx)
         });
 
-        let mut lane_count = 0u64;
-        while let Some(lane) = stream.next().await? {
-            tx.send(lane).await.map_err(|_| ProtocolError::Other("streaming SMT builder stopped unexpectedly"))?;
-            lane_count += 1;
-            if lane_count == expected_count {
-                break;
-            }
+        while let Some(chunk) = stream.next_chunk().await? {
+            tx.send(chunk).await.map_err(|_| ProtocolError::Other("streaming SMT builder stopped unexpectedly"))?;
         }
         drop(tx);
 
-        builder_handle.await?;
+        builder_handle.await.map_err(|e| ProtocolError::OtherOwned(format!("SMT builder task panicked: {e}")))??;
         consensus.async_set_pruning_smt_stable().await;
 
-        info!("SMT state synced: {} lanes", lane_count);
+        info!("SMT state synced: {} lanes", stream.lane_count());
         Ok(())
     }
 

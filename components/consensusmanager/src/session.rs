@@ -5,10 +5,11 @@
 use kaspa_consensus_core::{
     BlockHashSet, BlueWorkType, ChainPath, Hash,
     acceptance_data::{AcceptanceData, MergesetBlockAcceptanceData},
-    api::{BlockCount, BlockValidationFutures, ConsensusApi, ConsensusStats, DynConsensus},
+    api::{BlockCount, BlockValidationFutures, ConsensusApi, ConsensusStats, DynConsensus, ImportLane},
     block::Block,
     blockstatus::BlockStatus,
     daa_score_timestamp::DaaScoreTimestamp,
+    errors::pruning::PruningImportResult,
     errors::{consensus::ConsensusResult, tx::TxResult},
     header::Header,
     mass::{ContextualMasses, NonContextualMasses},
@@ -507,6 +508,19 @@ impl ConsensusSessionOwned {
     pub async fn async_set_pruning_smt_stable(&self) {
         self.clone().spawn_blocking(move |c| c.set_pruning_smt_stable_flag(true)).await
     }
+    /// Synchronous passthrough to [`ConsensusApi::import_pruning_point_smt`]. Intended to
+    /// be driven from `tokio::task::spawn_blocking` so the caller can interleave it with
+    /// async work that feeds `rx` — see `protocol/flows/src/ibd/flow.rs::sync_new_smt_state`.
+    pub fn import_pruning_point_smt(
+        &self,
+        new_pruning_point: Hash,
+        lanes_root: Hash,
+        payload_and_ctx_digest: Hash,
+        expected_lane_count: u64,
+        rx: tokio::sync::mpsc::Receiver<Vec<ImportLane>>,
+    ) -> PruningImportResult<()> {
+        self.consensus.import_pruning_point_smt(new_pruning_point, lanes_root, payload_and_ctx_digest, expected_lane_count, rx)
+    }
     pub async fn async_is_pruning_smt_stable(&self) -> bool {
         self.clone().spawn_blocking(move |c| c.is_pruning_smt_stable()).await
     }
@@ -517,15 +531,19 @@ impl ConsensusSessionOwned {
         self.clone().spawn_blocking(move |c| c.get_pruning_point_smt_metadata(expected_pp)).await
     }
 
-    /// Iterate canonical SMT lanes in a blocking context, calling `f` for each.
-    /// Stops if `f` returns false (e.g. channel closed).
-    /// Must be called from a blocking context (e.g. `spawn_blocking`).
-    pub fn blocking_iter_smt_lanes(
+    /// Fetch up to `limit` canonical SMT lanes for the pruning point, starting
+    /// strictly after `from_lane_key`. Each call releases its DB iterator
+    /// before returning — see [`ConsensusApi::get_pruning_point_smt_lanes_chunk`].
+    pub async fn async_get_pruning_point_smt_lanes_chunk(
         &self,
         expected_pp: Hash,
-        f: impl FnMut(kaspa_consensus_core::api::ImportLane) -> bool + Send + 'static,
-    ) {
-        self.consensus.as_ref().iter_pruning_point_smt_lanes(expected_pp, Box::new(f));
+        from_lane_key: Option<Hash>,
+        limit: usize,
+        starting_lane_idx: u64,
+    ) -> ConsensusResult<Vec<kaspa_consensus_core::api::ImportLane>> {
+        self.clone()
+            .spawn_blocking(move |c| c.get_pruning_point_smt_lanes_chunk(expected_pp, from_lane_key, limit, starting_lane_idx))
+            .await
     }
 }
 
