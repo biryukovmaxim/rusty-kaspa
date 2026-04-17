@@ -70,9 +70,27 @@ impl DbLaneVersionStore {
         lane_key: Hash,
         target_blue_score: u64,
         min_blue_score: u64,
+        is_canonical: impl FnMut(Hash) -> bool,
+    ) -> StoreResult<Option<Verified<LaneTipHash>>> {
+        self.get_at_canonical_from(lane_key, target_blue_score, Hash::from_bytes([0; 32]), min_blue_score, is_canonical)
+    }
+
+    /// Like [`Self::get_at_canonical`], but starts iteration inclusively at
+    /// `(start_blue_score, start_block_hash)`. Used by `SmtStores::get_lane`
+    /// to resume DB iteration after a cache miss, skipping DB rows the cache
+    /// already examined.
+    ///
+    /// `start_block_hash == [0; 32]` is a real possible block_hash (not a
+    /// sentinel); this method treats it as an inclusive start.
+    pub fn get_at_canonical_from(
+        &self,
+        lane_key: Hash,
+        start_blue_score: u64,
+        start_block_hash: Hash,
+        min_blue_score: u64,
         mut is_canonical: impl FnMut(Hash) -> bool,
     ) -> StoreResult<Option<Verified<LaneTipHash>>> {
-        for entry in self.get_at(lane_key, target_blue_score, min_blue_score) {
+        for entry in self.get_at_from(lane_key, start_blue_score, start_block_hash, min_blue_score) {
             let entry = entry?;
             if is_canonical(entry.block_hash()) {
                 return Ok(Some(entry.into_verified()));
@@ -103,7 +121,24 @@ impl DbLaneVersionStore {
         target_blue_score: u64,
         min_blue_score: u64,
     ) -> impl Iterator<Item = StoreResult<MaybeFork<LaneTipHash>>> + '_ {
-        let seek_key = LaneVersionKey::seek_key(self.prefix, lane_key, target_blue_score);
+        self.get_at_from(lane_key, target_blue_score, Hash::from_bytes([0; 32]), min_blue_score)
+    }
+
+    /// Iterate versions for `lane_key` starting inclusively at
+    /// `(start_blue_score, start_block_hash)` and descending by blue_score.
+    ///
+    /// Equivalent to [`Self::get_at`] when `start_block_hash == [0; 32]`. The
+    /// extra parameter lets callers resume iteration at a specific point in
+    /// the DB order — used by `SmtStores::get_lane` after exhausting the
+    /// cache, to avoid re-scanning DB rows the cache already visited.
+    pub fn get_at_from(
+        &self,
+        lane_key: Hash,
+        start_blue_score: u64,
+        start_block_hash: Hash,
+        min_blue_score: u64,
+    ) -> impl Iterator<Item = StoreResult<MaybeFork<LaneTipHash>>> + '_ {
+        let seek_key = LaneVersionKey::new(self.prefix, lane_key, start_blue_score, start_block_hash);
         let mut entity_prefix = [0u8; LaneVersionKey::ENTITY_PREFIX_LEN];
         entity_prefix.copy_from_slice(&seek_key.as_ref()[..LaneVersionKey::ENTITY_PREFIX_LEN]);
 
@@ -134,7 +169,7 @@ impl DbLaneVersionStore {
                 let key = LaneVersionKey::ref_from_bytes(key_bytes)
                     .map_err(|e| StoreError::DataInconsistency(format!("lane version key: {e}")))?;
                 let blue_score = key.rev_blue_score.blue_score();
-                debug_assert!(blue_score <= target_blue_score);
+                debug_assert!(blue_score <= start_blue_score);
 
                 if blue_score < min_blue_score {
                     return Ok(None);
@@ -454,6 +489,75 @@ mod tests {
 
         // No match at all
         assert!(store.get(lane_key, 0, |_| false).unwrap().is_none());
+    }
+
+    /// `get_at_from` starts iteration inclusively at `start_block_hash`, so
+    /// same-score entries with `bh < start_block_hash` are skipped while those
+    /// at `bh >= start_block_hash` are yielded in ascending-bh order.
+    #[test]
+    fn get_at_from_skips_entries_before_start_bh() {
+        let (_lt, store) = make_store();
+        let lane_key = hash(0x11);
+
+        for bh_byte in [0x10u8, 0x50, 0xA0] {
+            store.put(DirectDbWriter::new(&store.db), lane_key, 100, Hash::from_bytes([bh_byte; 32]), &hash(bh_byte)).unwrap();
+        }
+
+        let results: Vec<_> =
+            store.get_at_from(lane_key, 100, Hash::from_bytes([0x30; 32]), 0).collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].block_hash(), Hash::from_bytes([0x50; 32]));
+        assert_eq!(results[1].block_hash(), Hash::from_bytes([0xA0; 32]));
+    }
+
+    /// On `bh` overflow the caller rolls over to the next lower score at
+    /// `[0; 32]`. `get_at_from` must treat that as an inclusive start and
+    /// yield entries there.
+    #[test]
+    fn get_at_from_crosses_score_boundary_on_bh_overflow() {
+        let (_lt, store) = make_store();
+        let lane_key = hash(0x11);
+
+        store.put(DirectDbWriter::new(&store.db), lane_key, 100, Hash::from_bytes([0xA0; 32]), &hash(100)).unwrap();
+        store.put(DirectDbWriter::new(&store.db), lane_key, 50, Hash::from_bytes([0x10; 32]), &hash(50)).unwrap();
+
+        let results: Vec<_> = store.get_at_from(lane_key, 99, Hash::from_bytes([0; 32]), 0).collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].blue_score(), 50);
+        assert_eq!(results[0].block_hash(), Hash::from_bytes([0x10; 32]));
+    }
+
+    /// `block_hash == [0; 32]` is a real possible DB value. Starting
+    /// `get_at_from` at `(score, [0; 32])` must return the entry with
+    /// `block_hash == [0; 32]` if one exists.
+    #[test]
+    fn get_at_from_includes_entry_with_zero_block_hash() {
+        let (_lt, store) = make_store();
+        let lane_key = hash(0x11);
+
+        store.put(DirectDbWriter::new(&store.db), lane_key, 100, Hash::from_bytes([0; 32]), &hash(0xAA)).unwrap();
+
+        let results: Vec<_> = store.get_at_from(lane_key, 100, Hash::from_bytes([0; 32]), 0).collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].block_hash(), Hash::from_bytes([0; 32]));
+    }
+
+    /// `get_at_canonical_from` picks the first canonical entry at or after
+    /// the given start point — i.e. it behaves as a DB-continuation.
+    #[test]
+    fn get_at_canonical_from_picks_sibling_after_start_bh() {
+        let (_lt, store) = make_store();
+        let lane_key = hash(0x11);
+        let non_canonical_bh = Hash::from_bytes([0x10; 32]);
+        let canonical_bh = Hash::from_bytes([0x80; 32]);
+
+        store.put(DirectDbWriter::new(&store.db), lane_key, 100, non_canonical_bh, &hash(0xAA)).unwrap();
+        store.put(DirectDbWriter::new(&store.db), lane_key, 100, canonical_bh, &hash(0xCC)).unwrap();
+
+        let result =
+            store.get_at_canonical_from(lane_key, 100, Hash::from_bytes([0x20; 32]), 0, |bh| bh == canonical_bh).unwrap().unwrap();
+        assert_eq!(result.block_hash(), canonical_bh);
+        assert_eq!(result.blue_score(), 100);
     }
 
     #[test]

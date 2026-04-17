@@ -9,7 +9,7 @@
 //! branches. `flush()` persists to a `WriteBatch`; the caller commits atomically.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::RangeInclusive;
+use std::ops::{ControlFlow, RangeInclusive};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -36,6 +36,47 @@ struct VersionedBranchReader<'a, F: Fn(Hash) -> bool> {
     stores: &'a SmtStores,
     bounds: SmtReadBounds,
     is_canonical: F,
+}
+
+/// Given the cache's last-visited `(score, bh)`, return the smallest
+/// `(score', bh')` that sorts strictly after `(score, bh)` in the DB's
+/// descending-blue-score, ascending-block_hash key order: same-score with
+/// `bh+1`, or on `bh` overflow drop to `(score - 1, [0; 32])`.
+///
+/// Returns `None` when there is no "after" — the whole byte-increment
+/// overflows (i.e. last-visited was at `(0, [0xFF; 32])`).
+///
+/// The returned `bh` is an *inclusive* seek start: `[0; 32]` is a real
+/// possible block_hash in the DB (not a sentinel), and the DB store builds
+/// the seek key via `BranchVersionKey::new` / `LaneVersionKey::new` so the
+/// entry at exactly `(score', [0; 32])` is reachable.
+fn next_dbentry_after(score: u64, bh: Hash) -> Option<(u64, Hash)> {
+    let mut bytes = bh.as_bytes();
+    for byte in bytes.iter_mut().rev() {
+        if *byte < 0xFF {
+            *byte += 1;
+            return Some((score, Hash::from_bytes(bytes)));
+        }
+        *byte = 0;
+    }
+    // bh overflow: drop to the next lower score at bh = [0; 32] (inclusive).
+    score.checked_sub(1).map(|s| (s, Hash::from_bytes([0; 32])))
+}
+
+/// Translate the cache's last-visited cursor into a DB seek starting point.
+///
+/// - `None` last_visited → fresh start at `(target_blue_score, [0; 32])`
+///   (the pre-optimization behaviour).
+/// - `Some((s, bh))` → the smallest key strictly after `(s, bh)`, clamped to
+///   the window's `min_blue_score`. Returns `None` if the DB has nothing
+///   more to scan in the window (seek would fall below `min_blue_score` or
+///   underflow).
+fn resume_db_seek(last_visited: Option<(u64, Hash)>, bounds: SmtReadBounds) -> Option<(u64, Hash)> {
+    let (start_score, start_bh) = match last_visited {
+        None => (bounds.target_blue_score, Hash::from_bytes([0; 32])),
+        Some((s, bh)) => next_dbentry_after(s, bh)?,
+    };
+    (start_score >= bounds.min_blue_score).then_some((start_score, start_bh))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,19 +148,29 @@ impl SmtStores {
     /// blue-score-newest suffix of the versions written through the
     /// incremental `flush` path. See the module doc in [`crate::cache`] for
     /// the full argument and the interaction with the IBD cache-bypass path.
+    ///
+    /// On a cache miss, instead of re-scanning the DB from `target_blue_score`
+    /// (which would redo every row the cache already examined), this resumes
+    /// DB iteration strictly *after* the cache's last-visited `(score, bh)` —
+    /// see [`next_dbentry_after`].
     pub fn get_node(
         &self,
         entity: BranchEntity,
         bounds: SmtReadBounds,
         mut is_canonical: impl FnMut(Hash) -> bool,
     ) -> Option<Verified<Option<Node>>> {
-        if let Some((score, block_hash, value)) =
-            self.branch_cache.lock().get(entity, bounds.target_blue_score, bounds.min_blue_score, &mut is_canonical)
-        {
-            return Some(Verified::new(*value, score, block_hash));
-        }
+        let last_visited = match self.branch_cache.lock().get_or_last_visited(
+            entity,
+            bounds.target_blue_score,
+            bounds.min_blue_score,
+            &mut is_canonical,
+        ) {
+            ControlFlow::Break((score, block_hash, value)) => return Some(Verified::new(value, score, block_hash)),
+            ControlFlow::Continue(lv) => lv,
+        };
+        let (start_score, start_bh) = resume_db_seek(last_visited, bounds)?;
         self.branch_version
-            .get_at_canonical(entity.depth, entity.node_key, bounds.target_blue_score, bounds.min_blue_score, is_canonical)
+            .get_at_canonical_from(entity.depth, entity.node_key, start_score, start_bh, bounds.min_blue_score, is_canonical)
             .unwrap()
     }
 
@@ -128,19 +179,25 @@ impl SmtStores {
     ///
     /// A cache hit is authoritative for the same reason as [`Self::get_node`];
     /// see that method's doc and [`crate::cache`] for the newest-suffix
-    /// invariant.
+    /// invariant. On a cache miss, DB iteration resumes strictly after the
+    /// cache's last-visited `(score, bh)` — see [`next_dbentry_after`].
     pub fn get_lane(
         &self,
         lane_key: LaneKey,
         bounds: SmtReadBounds,
         mut is_canonical: impl FnMut(Hash) -> bool,
     ) -> Option<Verified<LaneTipHash>> {
-        if let Some((score, block_hash, value)) =
-            self.lane_cache.lock().get(lane_key, bounds.target_blue_score, bounds.min_blue_score, &mut is_canonical)
-        {
-            return Some(Verified::new(*value, score, block_hash));
-        }
-        self.lane_version.get_at_canonical(lane_key, bounds.target_blue_score, bounds.min_blue_score, is_canonical).unwrap()
+        let last_visited = match self.lane_cache.lock().get_or_last_visited(
+            lane_key,
+            bounds.target_blue_score,
+            bounds.min_blue_score,
+            &mut is_canonical,
+        ) {
+            ControlFlow::Break((score, block_hash, value)) => return Some(Verified::new(value, score, block_hash)),
+            ControlFlow::Continue(lv) => lv,
+        };
+        let (start_score, start_bh) = resume_db_seek(last_visited, bounds)?;
+        self.lane_version.get_at_canonical_from(lane_key, start_score, start_bh, bounds.min_blue_score, is_canonical).unwrap()
     }
 
     /// Read the lanes root hash from the branch store at depth=0.
@@ -436,5 +493,238 @@ impl SmtBuild {
         self.lane_changes.flush_score_index(stores, batch, block_hash)?;
 
         Ok(root)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kaspa_database::create_temp_db;
+    use kaspa_database::prelude::{ConnBuilder, DirectDbWriter};
+
+    fn hash(v: u8) -> Hash {
+        Hash::from_bytes([v; 32])
+    }
+
+    fn make_stores() -> (kaspa_database::utils::DbLifetime, Arc<DB>, SmtStores) {
+        let (lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
+        let stores = SmtStores::new(db.clone(), 16, 16);
+        (lifetime, db, stores)
+    }
+
+    fn bounds(target: u64, min: u64) -> SmtReadBounds {
+        SmtReadBounds::new(target, min)
+    }
+
+    fn internal(h: Hash) -> Option<Node> {
+        Some(Node::Internal(h))
+    }
+
+    fn entity() -> BranchEntity {
+        BranchEntity { depth: 7, node_key: hash(0xEE) }
+    }
+
+    // -------- get_node --------
+
+    /// Cache hit is authoritative — the cache value is returned even when the
+    /// DB has a different, older entry for the same entity. Verifies the
+    /// fast-path short-circuits without falling back to DB.
+    #[test]
+    fn get_node_cache_hit_short_circuits() {
+        let (_lt, db, stores) = make_stores();
+        let e = entity();
+        let cache_bh = hash(0xAA);
+        let cache_node = internal(hash(0xCC));
+        let db_bh = hash(0xBB);
+        let db_node = internal(hash(0xDD));
+
+        // Cache entry at score 100. A different DB-only entry at score 50 must
+        // not be returned when the cache already has a canonical match.
+        stores.branch_cache.lock().insert(e, 100, cache_bh, cache_node);
+        stores.branch_version.put(DirectDbWriter::new(&db), e.depth, e.node_key, 50, db_bh, db_node).unwrap();
+
+        let got = stores.get_node(e, bounds(200, 0), |_| true).unwrap();
+        assert_eq!(got.blue_score(), 100);
+        assert_eq!(got.block_hash(), cache_bh);
+        assert_eq!(*got.data(), cache_node);
+    }
+
+    /// Correctness-critical: cache holds a non-canonical same-score sibling,
+    /// DB holds the canonical same-score sibling that was evicted from cache.
+    /// The optimization resumes DB iteration strictly after the cache's
+    /// last-visited `(score, bh)` and must still find the canonical entry.
+    #[test]
+    fn get_node_cache_miss_continues_db_at_same_score() {
+        let (_lt, db, stores) = make_stores();
+        let e = entity();
+        let non_canonical = hash(0x10);
+        let canonical = hash(0x80);
+
+        // Non-canonical at (100, 0x10) in cache only.
+        stores.branch_cache.lock().insert(e, 100, non_canonical, internal(hash(0xAA)));
+        // Canonical at (100, 0x80) in DB only.
+        stores.branch_version.put(DirectDbWriter::new(&db), e.depth, e.node_key, 100, canonical, internal(hash(0xCC))).unwrap();
+
+        let got = stores.get_node(e, bounds(200, 0), |bh| bh == canonical).unwrap();
+        assert_eq!(got.blue_score(), 100);
+        assert_eq!(got.block_hash(), canonical);
+        assert_eq!(*got.data(), internal(hash(0xCC)));
+    }
+
+    /// Cache exhausts without a canonical match at score 100; DB continuation
+    /// drops to the next lower score and finds the canonical entry there.
+    #[test]
+    fn get_node_cache_miss_continues_db_at_lower_score() {
+        let (_lt, db, stores) = make_stores();
+        let e = entity();
+        let non_canonical = hash(0x10);
+        let canonical = hash(0x55);
+
+        stores.branch_cache.lock().insert(e, 100, non_canonical, internal(hash(0xAA)));
+        stores.branch_version.put(DirectDbWriter::new(&db), e.depth, e.node_key, 50, canonical, internal(hash(0xDD))).unwrap();
+
+        let got = stores.get_node(e, bounds(200, 0), |bh| bh == canonical).unwrap();
+        assert_eq!(got.blue_score(), 50);
+        assert_eq!(got.block_hash(), canonical);
+    }
+
+    /// Empty cache → DB-only lookup, same behaviour as before the
+    /// optimization (seeks from `target_blue_score` at `[0; 32]`).
+    #[test]
+    fn get_node_empty_cache_falls_back_to_db() {
+        let (_lt, db, stores) = make_stores();
+        let e = entity();
+        let canonical = hash(0x55);
+
+        stores.branch_version.put(DirectDbWriter::new(&db), e.depth, e.node_key, 100, canonical, internal(hash(0xDD))).unwrap();
+
+        let got = stores.get_node(e, bounds(200, 0), |bh| bh == canonical).unwrap();
+        assert_eq!(got.blue_score(), 100);
+        assert_eq!(got.block_hash(), canonical);
+    }
+
+    #[test]
+    fn get_node_all_non_canonical_returns_none() {
+        let (_lt, db, stores) = make_stores();
+        let e = entity();
+
+        stores.branch_cache.lock().insert(e, 100, hash(0x10), internal(hash(0xAA)));
+        stores.branch_version.put(DirectDbWriter::new(&db), e.depth, e.node_key, 50, hash(0x20), internal(hash(0xBB))).unwrap();
+
+        assert!(stores.get_node(e, bounds(200, 0), |_| false).is_none());
+    }
+
+    // -------- get_lane (same scenarios) --------
+
+    fn lk() -> LaneKey {
+        hash(0xEE)
+    }
+
+    #[test]
+    fn get_lane_cache_hit_short_circuits() {
+        let (_lt, db, stores) = make_stores();
+        let cache_bh = hash(0xAA);
+        let cache_tip = hash(0xCC);
+        let db_bh = hash(0xBB);
+        let db_tip = hash(0xDD);
+
+        stores.lane_cache.lock().insert(lk(), 100, cache_bh, cache_tip);
+        stores.lane_version.put(DirectDbWriter::new(&db), lk(), 50, db_bh, &db_tip).unwrap();
+
+        let got = stores.get_lane(lk(), bounds(200, 0), |_| true).unwrap();
+        assert_eq!(got.blue_score(), 100);
+        assert_eq!(got.block_hash(), cache_bh);
+        assert_eq!(*got.data(), cache_tip);
+    }
+
+    #[test]
+    fn get_lane_cache_miss_continues_db_at_same_score() {
+        let (_lt, db, stores) = make_stores();
+        let non_canonical = hash(0x10);
+        let canonical = hash(0x80);
+
+        stores.lane_cache.lock().insert(lk(), 100, non_canonical, hash(0xAA));
+        stores.lane_version.put(DirectDbWriter::new(&db), lk(), 100, canonical, &hash(0xCC)).unwrap();
+
+        let got = stores.get_lane(lk(), bounds(200, 0), |bh| bh == canonical).unwrap();
+        assert_eq!(got.blue_score(), 100);
+        assert_eq!(got.block_hash(), canonical);
+        assert_eq!(*got.data(), hash(0xCC));
+    }
+
+    #[test]
+    fn get_lane_cache_miss_continues_db_at_lower_score() {
+        let (_lt, db, stores) = make_stores();
+        let non_canonical = hash(0x10);
+        let canonical = hash(0x55);
+
+        stores.lane_cache.lock().insert(lk(), 100, non_canonical, hash(0xAA));
+        stores.lane_version.put(DirectDbWriter::new(&db), lk(), 50, canonical, &hash(0xDD)).unwrap();
+
+        let got = stores.get_lane(lk(), bounds(200, 0), |bh| bh == canonical).unwrap();
+        assert_eq!(got.blue_score(), 50);
+        assert_eq!(got.block_hash(), canonical);
+    }
+
+    #[test]
+    fn get_lane_empty_cache_falls_back_to_db() {
+        let (_lt, db, stores) = make_stores();
+        let canonical = hash(0x55);
+
+        stores.lane_version.put(DirectDbWriter::new(&db), lk(), 100, canonical, &hash(0xDD)).unwrap();
+
+        let got = stores.get_lane(lk(), bounds(200, 0), |bh| bh == canonical).unwrap();
+        assert_eq!(got.blue_score(), 100);
+        assert_eq!(got.block_hash(), canonical);
+    }
+
+    #[test]
+    fn get_lane_all_non_canonical_returns_none() {
+        let (_lt, db, stores) = make_stores();
+
+        stores.lane_cache.lock().insert(lk(), 100, hash(0x10), hash(0xAA));
+        stores.lane_version.put(DirectDbWriter::new(&db), lk(), 50, hash(0x20), &hash(0xBB)).unwrap();
+
+        assert!(stores.get_lane(lk(), bounds(200, 0), |_| false).is_none());
+    }
+
+    // -------- next_dbentry_after / resume_db_seek --------
+
+    #[test]
+    fn next_dbentry_after_same_score_increments_bh() {
+        let (score, bh) = next_dbentry_after(100, Hash::from_bytes([0x10; 32])).unwrap();
+        assert_eq!(score, 100);
+        let mut expected = [0x10u8; 32];
+        expected[31] = 0x11;
+        assert_eq!(bh, Hash::from_bytes(expected));
+    }
+
+    #[test]
+    fn next_dbentry_after_bh_overflow_drops_score() {
+        let (score, bh) = next_dbentry_after(100, Hash::from_bytes([0xFF; 32])).unwrap();
+        assert_eq!(score, 99);
+        assert_eq!(bh, Hash::from_bytes([0; 32]));
+    }
+
+    #[test]
+    fn next_dbentry_after_score_underflow_returns_none() {
+        // bh overflow AND score == 0 → nothing left to scan.
+        assert!(next_dbentry_after(0, Hash::from_bytes([0xFF; 32])).is_none());
+    }
+
+    #[test]
+    fn resume_db_seek_empty_cache_starts_fresh() {
+        let b = bounds(200, 0);
+        let (score, bh) = resume_db_seek(None, b).unwrap();
+        assert_eq!(score, 200);
+        assert_eq!(bh, Hash::from_bytes([0; 32]));
+    }
+
+    #[test]
+    fn resume_db_seek_respects_min_blue_score() {
+        // last_visited at (10, [0xFF; 32]) overflows to (9, [0; 32]); but
+        // min=50 pushes that below the window, so no more scanning.
+        let b = bounds(100, 50);
+        assert!(resume_db_seek(Some((10, Hash::from_bytes([0xFF; 32]))), b).is_none());
     }
 }

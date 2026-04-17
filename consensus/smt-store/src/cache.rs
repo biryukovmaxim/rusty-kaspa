@@ -45,6 +45,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
+use std::ops::ControlFlow;
 
 use kaspa_hashes::Hash;
 
@@ -205,6 +206,42 @@ impl<E: EntityKey, V: Copy> VersionedCache<E, V> {
         mut is_canonical: impl FnMut(Hash) -> bool,
     ) -> Option<(u64, Hash, &V)> {
         self.iter_entity(entity, target_score, min_score).find(|(_, bh, _)| is_canonical(*bh))
+    }
+
+    /// Like [`Self::get`] but also reports the last-visited `(score, bh)` on
+    /// miss, so a DB-backed caller can resume iteration strictly after that
+    /// point rather than re-scanning from `target_score`.
+    ///
+    /// Return values, modelled via [`ControlFlow`] (both branches are normal
+    /// outcomes — no success/failure asymmetry):
+    /// - [`ControlFlow::Break`]`((score, block_hash, value))` — canonical hit,
+    ///   no further scanning needed.
+    /// - [`ControlFlow::Continue`]`(None)` — cache had no entries for this
+    ///   entity in the window; the caller must start a fresh DB scan at
+    ///   `target_score`.
+    /// - [`ControlFlow::Continue`]`(Some((score, bh)))` — cache exhausted with
+    ///   no canonical match; the caller should resume DB iteration strictly
+    ///   after `(score, bh)` in the DB's key order.
+    ///
+    /// Correctness of "resume strictly after" rests on the newest-suffix
+    /// invariant: every version strictly newer than the oldest cached version
+    /// for the entity is also in the cache, so the DB has nothing to offer in
+    /// that range.
+    pub fn get_or_last_visited(
+        &self,
+        entity: E,
+        target_score: u64,
+        min_score: u64,
+        mut is_canonical: impl FnMut(Hash) -> bool,
+    ) -> ControlFlow<(u64, Hash, V), Option<(u64, Hash)>> {
+        let mut last_visited: Option<(u64, Hash)> = None;
+        for (score, bh, value) in self.iter_entity(entity, target_score, min_score) {
+            if is_canonical(bh) {
+                return ControlFlow::Break((score, bh, *value));
+            }
+            last_visited = Some((score, bh));
+        }
+        ControlFlow::Continue(last_visited)
     }
 }
 

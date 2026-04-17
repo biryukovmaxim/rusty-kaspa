@@ -60,9 +60,30 @@ impl DbBranchVersionStore {
         node_key: Hash,
         target_blue_score: u64,
         min_blue_score: u64,
+        is_canonical: impl FnMut(Hash) -> bool,
+    ) -> StoreResult<Option<Verified<Option<Node>>>> {
+        self.get_at_canonical_from(depth, node_key, target_blue_score, Hash::from_bytes([0; 32]), min_blue_score, is_canonical)
+    }
+
+    /// Like [`Self::get_at_canonical`], but starts iteration inclusively at
+    /// `(start_blue_score, start_block_hash)` instead of at the first entry
+    /// of `start_blue_score`. Used by `SmtStores::get_node` to resume DB
+    /// iteration after a cache miss, skipping DB rows the cache already
+    /// examined.
+    ///
+    /// `start_block_hash == [0; 32]` is a real possible block_hash (not a
+    /// sentinel), and this method treats it as an inclusive start — an entry
+    /// at exactly `(start_blue_score, [0; 32])` is returned by this iterator.
+    pub fn get_at_canonical_from(
+        &self,
+        depth: u8,
+        node_key: Hash,
+        start_blue_score: u64,
+        start_block_hash: Hash,
+        min_blue_score: u64,
         mut is_canonical: impl FnMut(Hash) -> bool,
     ) -> StoreResult<Option<Verified<Option<Node>>>> {
-        for entry in self.get_at(depth, node_key, target_blue_score, min_blue_score) {
+        for entry in self.get_at_from(depth, node_key, start_blue_score, start_block_hash, min_blue_score) {
             let entry = entry?;
             if is_canonical(entry.block_hash()) {
                 return Ok(Some(entry.into_verified()));
@@ -95,7 +116,25 @@ impl DbBranchVersionStore {
         target_blue_score: u64,
         min_blue_score: u64,
     ) -> impl Iterator<Item = StoreResult<MaybeFork<Option<Node>>>> + '_ {
-        let seek_key = BranchVersionKey::seek_key(self.prefix, depth, node_key, target_blue_score);
+        self.get_at_from(depth, node_key, target_blue_score, Hash::from_bytes([0; 32]), min_blue_score)
+    }
+
+    /// Iterate versions for `(depth, node_key)` starting inclusively at
+    /// `(start_blue_score, start_block_hash)` and descending by blue_score.
+    ///
+    /// Equivalent to [`Self::get_at`] when `start_block_hash == [0; 32]`. The
+    /// extra parameter lets callers resume iteration at a specific point in
+    /// the DB order — used by `SmtStores::get_node` after exhausting the
+    /// cache, to avoid re-scanning DB rows the cache already visited.
+    pub fn get_at_from(
+        &self,
+        depth: u8,
+        node_key: Hash,
+        start_blue_score: u64,
+        start_block_hash: Hash,
+        min_blue_score: u64,
+    ) -> impl Iterator<Item = StoreResult<MaybeFork<Option<Node>>>> + '_ {
+        let seek_key = BranchVersionKey::new(self.prefix, depth, node_key, start_blue_score, start_block_hash);
         let mut entity_prefix = [0u8; BranchVersionKey::ENTITY_PREFIX_LEN];
         entity_prefix.copy_from_slice(&seek_key.as_ref()[..BranchVersionKey::ENTITY_PREFIX_LEN]);
 
@@ -126,7 +165,7 @@ impl DbBranchVersionStore {
                 let key = BranchVersionKey::ref_from_bytes(key_bytes)
                     .map_err(|e| StoreError::DataInconsistency(format!("branch version key: {e}")))?;
                 let blue_score = key.rev_blue_score.blue_score();
-                debug_assert!(blue_score <= target_blue_score);
+                debug_assert!(blue_score <= start_blue_score);
 
                 if blue_score < min_blue_score {
                     return Ok(None);
@@ -269,6 +308,83 @@ mod tests {
 
         // No canonical match at all
         assert!(store.get(7, node_key, 0, |_| false).unwrap().is_none());
+    }
+
+    /// `get_at_from` starts iteration inclusively at `start_block_hash`, so
+    /// same-score entries with `bh < start_block_hash` are skipped while those
+    /// at `bh >= start_block_hash` are yielded in ascending-bh order.
+    #[test]
+    fn get_at_from_skips_entries_before_start_bh() {
+        let (_lt, store) = make_store();
+        let node_key = hash(0x11);
+
+        for bh_byte in [0x10u8, 0x50, 0xA0] {
+            store
+                .put(DirectDbWriter::new(&store.db), 7, node_key, 100, Hash::from_bytes([bh_byte; 32]), internal(hash(bh_byte)))
+                .unwrap();
+        }
+
+        let results: Vec<_> =
+            store.get_at_from(7, node_key, 100, Hash::from_bytes([0x30; 32]), 0).collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].block_hash(), Hash::from_bytes([0x50; 32]));
+        assert_eq!(results[1].block_hash(), Hash::from_bytes([0xA0; 32]));
+    }
+
+    /// On `bh` overflow the caller is expected to roll over to the next
+    /// lower score at `[0; 32]`. `get_at_from` must treat that as an
+    /// inclusive start and yield entries there.
+    #[test]
+    fn get_at_from_crosses_score_boundary_on_bh_overflow() {
+        let (_lt, store) = make_store();
+        let node_key = hash(0x11);
+
+        store.put(DirectDbWriter::new(&store.db), 7, node_key, 100, Hash::from_bytes([0xA0; 32]), internal(hash(100))).unwrap();
+        store.put(DirectDbWriter::new(&store.db), 7, node_key, 50, Hash::from_bytes([0x10; 32]), internal(hash(50))).unwrap();
+
+        // Seek from (99, 0) — nothing at 99, must fall through to (50, 0x10).
+        let results: Vec<_> = store.get_at_from(7, node_key, 99, Hash::from_bytes([0; 32]), 0).collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].blue_score(), 50);
+        assert_eq!(results[0].block_hash(), Hash::from_bytes([0x10; 32]));
+    }
+
+    /// `block_hash == [0; 32]` is a real possible DB value, not a sentinel.
+    /// Starting `get_at_from` at `(score, [0; 32])` must return the entry
+    /// with `block_hash == [0; 32]` if one exists — the inclusive-start
+    /// invariant that the cache→DB resume logic depends on.
+    #[test]
+    fn get_at_from_includes_entry_with_zero_block_hash() {
+        let (_lt, store) = make_store();
+        let node_key = hash(0x11);
+
+        store.put(DirectDbWriter::new(&store.db), 7, node_key, 100, Hash::from_bytes([0; 32]), internal(hash(0xAA))).unwrap();
+
+        let results: Vec<_> =
+            store.get_at_from(7, node_key, 100, Hash::from_bytes([0; 32]), 0).collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].block_hash(), Hash::from_bytes([0; 32]));
+    }
+
+    /// `get_at_canonical_from` picks the first canonical entry that sorts
+    /// at or after the given start point — i.e. it behaves as a
+    /// DB-continuation of an already-started iteration.
+    #[test]
+    fn get_at_canonical_from_picks_sibling_after_start_bh() {
+        let (_lt, store) = make_store();
+        let node_key = hash(0x11);
+        let non_canonical_bh = Hash::from_bytes([0x10; 32]);
+        let canonical_bh = Hash::from_bytes([0x80; 32]);
+
+        store.put(DirectDbWriter::new(&store.db), 7, node_key, 100, non_canonical_bh, internal(hash(0xAA))).unwrap();
+        store.put(DirectDbWriter::new(&store.db), 7, node_key, 100, canonical_bh, internal(hash(0xCC))).unwrap();
+
+        // Start from (100, 0x20) — past the non-canonical one — and pick
+        // the canonical sibling.
+        let result =
+            store.get_at_canonical_from(7, node_key, 100, Hash::from_bytes([0x20; 32]), 0, |bh| bh == canonical_bh).unwrap().unwrap();
+        assert_eq!(result.block_hash(), canonical_bh);
+        assert_eq!(result.blue_score(), 100);
     }
 
     #[test]
