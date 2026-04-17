@@ -12,8 +12,11 @@
 //! written through the incremental `flush` path is also in the cache.
 //!
 //! This is the invariant [`SmtStores::get_node`] and [`SmtStores::get_lane`]
-//! rely on to treat a cache hit as authoritative, without falling back to DB.
-//! It rests on the following properties:
+//! rely on to treat a cache hit as authoritative, without falling back to DB,
+//! **and** to resume DB iteration strictly after the cache's last-visited
+//! `(score, block_hash)` on a miss (via
+//! [`VersionedCache::get_or_last_visited`]) instead of re-scanning from
+//! `target_blue_score`. Both guarantees rest on the following properties:
 //!
 //! 1. **Write-through on the incremental path.** Every `flush` that writes a
 //!    branch/lane version to DB also inserts the same version into the cache
@@ -25,26 +28,49 @@
 //!    given entity, the evicted versions are always a prefix of that entity's
 //!    history by score, and what remains is a suffix. This preserves the
 //!    "newest relevant suffix" needed for authoritative cache hits.
-//! 3. **Canonical lookup within a score bucket.** Within a single
+//! 3. **Within-score eviction retains lowest block_hash.** Within a single
 //!    `blue_score` bucket, eviction may drop some same-score siblings and
 //!    keep others. The eviction tie-break reverses `block_hash` (see
-//!    [`ScoreEntityKey`]), so the entry evicted first at a given score is
-//!    the one [`VersionedCache::iter_entity`] would yield *last* —
-//!    preserving the lowest-block_hash entries, exactly the first
-//!    canonical-candidate on a `get` lookup. Correctness doesn't depend on
-//!    this (at most one version at a given blue_score is canonical on any
-//!    given chain, and DB fallback covers the rest) — the tie-break just
-//!    aligns cache retention with the cache's own iteration order for a
-//!    better hit rate.
+//!    [`ScoreEntityKey`]), so `pop_first` removes the *highest* block_hash
+//!    first — preserving the lowest-block_hash entries, which are exactly
+//!    the ones [`VersionedCache::iter_entity`] would yield first at that
+//!    score.
+//!
+//!    This tie-break is **load-bearing for DB-continuation correctness**,
+//!    not just hit-rate. When the cache exhausts at `(score, bh_last)`
+//!    without a canonical match, the DB may still hold same-score siblings
+//!    that were evicted from cache. For "seek strictly after `(score,
+//!    bh_last)`" to pick them up, every such sibling must have
+//!    `bh > bh_last` — which is exactly what this tie-break guarantees
+//!    (evicted siblings at `score` all had higher `block_hash` than
+//!    anything retained; in particular higher than `bh_last`, the largest
+//!    cached bh at that score).
 //! 4. **IBD bypass + cold start.** The IBD streaming-import path bypasses the
 //!    caches (see `streaming_import` and `db_sink`). This is safe because IBD
 //!    runs after [`SmtStores::clear_all`] has emptied both the DB and the
 //!    caches. There are no stale cached entries to contradict the imported
 //!    state. After IBD, the caches stay cold until incremental writes
 //!    repopulate them.
+//!
+//! # Cache → DB resume on miss
+//!
+//! On a cache miss, [`SmtStores::get_node`] / [`SmtStores::get_lane`]
+//! continue iteration in the DB starting **strictly after** the cache's
+//! last-visited `(score, bh)` rather than re-seeking at `target_blue_score`.
+//! Correctness follows directly from the properties above:
+//!
+//! - For scores strictly greater than `bh_last`'s score, property (1)+(2)
+//!   guarantee the cache has every written version — the DB has nothing new
+//!   to offer there, so skipping that range is safe.
+//! - At the same score as `bh_last`, property (3) guarantees every DB entry
+//!   that might still be there (but missing from cache) has
+//!   `bh > bh_last`, so a seek strictly after `(score_last, bh_last)`
+//!   reaches all of them.
+//! - At strictly lower scores, the DB iterator naturally descends.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
+use std::ops::ControlFlow;
 
 use kaspa_hashes::Hash;
 
@@ -84,6 +110,11 @@ struct EntityVersionKey<E: EntityKey> {
 /// score first, then lowest block_hash first), keeping the lowest-block_hash
 /// entries — exactly the first canonical-candidate on a `get` — cached for
 /// longer.
+///
+/// This tie-break is load-bearing for the DB-continuation optimization in
+/// [`SmtStores::get_node`] / [`SmtStores::get_lane`]: see the module doc's
+/// "Newest-suffix invariant" section (property 3) and "Cache → DB resume on
+/// miss".
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ScoreEntityKey<E: EntityKey> {
     score: u64,
@@ -205,6 +236,42 @@ impl<E: EntityKey, V: Copy> VersionedCache<E, V> {
         mut is_canonical: impl FnMut(Hash) -> bool,
     ) -> Option<(u64, Hash, &V)> {
         self.iter_entity(entity, target_score, min_score).find(|(_, bh, _)| is_canonical(*bh))
+    }
+
+    /// Like [`Self::get`] but also reports the last-visited `(score, bh)` on
+    /// miss, so a DB-backed caller can resume iteration strictly after that
+    /// point rather than re-scanning from `target_score`.
+    ///
+    /// Return values, modelled via [`ControlFlow`] (both branches are normal
+    /// outcomes — no success/failure asymmetry):
+    /// - [`ControlFlow::Break`]`((score, block_hash, value))` — canonical hit,
+    ///   no further scanning needed.
+    /// - [`ControlFlow::Continue`]`(None)` — cache had no entries for this
+    ///   entity in the window; the caller must start a fresh DB scan at
+    ///   `target_score`.
+    /// - [`ControlFlow::Continue`]`(Some((score, bh)))` — cache exhausted with
+    ///   no canonical match; the caller should resume DB iteration strictly
+    ///   after `(score, bh)` in the DB's key order.
+    ///
+    /// Correctness of "resume strictly after" rests on the newest-suffix
+    /// invariant: every version strictly newer than the oldest cached version
+    /// for the entity is also in the cache, so the DB has nothing to offer in
+    /// that range.
+    pub fn get_or_last_visited(
+        &self,
+        entity: E,
+        target_score: u64,
+        min_score: u64,
+        mut is_canonical: impl FnMut(Hash) -> bool,
+    ) -> ControlFlow<(u64, Hash, V), Option<(u64, Hash)>> {
+        let mut last_visited: Option<(u64, Hash)> = None;
+        for (score, bh, value) in self.iter_entity(entity, target_score, min_score) {
+            if is_canonical(bh) {
+                return ControlFlow::Break((score, bh, *value));
+            }
+            last_visited = Some((score, bh));
+        }
+        ControlFlow::Continue(last_visited)
     }
 }
 
