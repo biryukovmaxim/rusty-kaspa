@@ -79,8 +79,10 @@ use kaspa_database::prelude::{StoreError, StoreResultExt, StoreResultUnitExt};
 use kaspa_hashes::{Hash, ZERO_HASH};
 use kaspa_muhash::MuHash;
 use kaspa_notify::{events::EventType, notifier::Notify};
+use kaspa_smt_store::processor::SmtReadBounds;
 use once_cell::unsync::Lazy;
 
+use super::bounds::SeqCommitBounds;
 use super::errors::{PruningImportError, PruningImportResult};
 use crossbeam_channel::{Receiver as CrossbeamReceiver, Sender as CrossbeamSender};
 use itertools::Itertools;
@@ -618,9 +620,15 @@ impl VirtualStateProcessor {
 
         let parent_seq_commit = parent_header.accepted_id_merkle_root;
         let data = self.collect_mergeset_seq_data(ctx);
-        let lane_updates =
-            self.resolve_lane_updates(&data, &context_hash, parent_header.blue_score, selected_parent, parent_seq_commit);
-        let (parent_lanes_root, parent_active_lanes) = self.get_parent_smt_metadata(selected_parent);
+        let lane_updates = self.resolve_lane_updates(
+            &data,
+            &context_hash,
+            current_blue_score,
+            parent_header.blue_score,
+            selected_parent,
+            parent_seq_commit,
+        );
+        let (parent_lanes_root, parent_active_lanes) = self.get_parent_smt_metadata(selected_parent, parent_header.blue_score);
 
         let (commit, _build) = self.build_seq_commit(
             parent_seq_commit,
@@ -657,8 +665,9 @@ impl VirtualStateProcessor {
         let pp_header = self.headers_store.get_header(pp).unwrap();
         let parent_seq_commit = self.headers_store.get_header(pp_header.direct_parents()[0]).unwrap().accepted_id_merkle_root;
 
-        let min_score = pp_header.blue_score.saturating_sub(self.finality_depth);
-        let lanes_root = self.smt_stores.get_lanes_root(min_score, |bh| self.is_smt_canonical(bh, pp));
+        let lanes_root = self
+            .smt_stores
+            .get_lanes_root(SmtReadBounds::for_pov(pp_header.blue_score, self.finality_depth), |bh| self.is_smt_canonical(bh, pp));
 
         Ok(SmtExportMetadata {
             lanes_root,
@@ -682,9 +691,11 @@ impl VirtualStateProcessor {
 
     /// Get the parent's lanes_root and active_lanes_count.
     /// lanes_root comes from the branch version store; active_lanes_count from metadata.
-    pub(super) fn get_parent_smt_metadata(&self, selected_parent: Hash) -> (Hash, u64) {
+    pub(super) fn get_parent_smt_metadata(&self, selected_parent: Hash, parent_blue_score: u64) -> (Hash, u64) {
         let active_lanes_count = self.smt_metadata_store.get(selected_parent).map(|meta| meta.active_lanes_count).unwrap_or(0);
-        let lanes_root = self.smt_stores.get_lanes_root(0, |bh| self.is_smt_canonical(bh, selected_parent));
+        let lanes_root = self.smt_stores.get_lanes_root(SmtReadBounds::for_pov(parent_blue_score, self.finality_depth), |bh| {
+            self.is_smt_canonical(bh, selected_parent)
+        });
         (lanes_root, active_lanes_count)
     }
 
@@ -693,28 +704,26 @@ impl VirtualStateProcessor {
     pub(super) fn expire_stale_lanes(
         &self,
         proc: &mut kaspa_smt_store::processor::SmtProcessor,
-        parent_blue_score: u64,
-        current_blue_score: u64,
+        bounds: SeqCommitBounds,
         selected_parent: Hash,
     ) -> u64 {
-        let prev_min = parent_blue_score.saturating_sub(self.finality_depth);
-        let curr_min = current_blue_score.saturating_sub(self.finality_depth);
-
-        if curr_min <= prev_min {
+        let read_bounds = bounds.selected_parent_read_bounds();
+        let Some(expired_range) = bounds.newly_expired_range() else {
             return 0;
-        }
+        };
 
         let mut expired = 0u64;
-        // Iterate score_index entries in [prev_min, curr_min) to find lanes that might expire
-        for entry in self.smt_stores.score_index.get_leaf_updates(curr_min.saturating_sub(1), prev_min) {
+        // Iterate score_index entries in [expired_min, expired_max] to find lanes that might expire
+        for entry in self.smt_stores.score_index.get_leaf_updates(expired_range) {
             let entry = entry.unwrap();
             // Only process canonical entries
             if !self.is_smt_canonical(entry.block_hash(), selected_parent) {
                 continue;
             }
             for lk in entry.data().iter() {
-                // Check if this lane has a newer canonical version (within the active window)
-                let has_newer = self.smt_stores.get_lane(*lk, curr_min, |bh| self.is_smt_canonical(bh, selected_parent)).is_some();
+                // Check if this lane has a newer canonical version within [curr_min, parent].
+                // target=parent filters anticone entries at (parent, current] at the seek level.
+                let has_newer = self.smt_stores.get_lane(*lk, read_bounds, |bh| self.is_smt_canonical(bh, selected_parent)).is_some();
 
                 if !has_newer {
                     proc.expire_lane(*lk);
