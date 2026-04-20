@@ -2760,7 +2760,6 @@ dependencies = [
  "serde_json",
  "smallvec",
  "thiserror 2.0.18",
- "tokio",
  "wasm-bindgen",
  "workflow-core",
  "workflow-log",
@@ -2866,7 +2865,6 @@ dependencies = [
  "blake2b_simd",
  "blake3",
  "borsh",
- "bytemuck",
  "cc",
  "cfg-if",
  "faster-hex 0.9.0",
@@ -2878,15 +2876,12 @@ dependencies = [
  "kaspa-hashes",
  "kaspa-txscript-errors",
  "kaspa-utils",
- "kaspa-wasm-core",
  "log",
- "once_cell",
  "parking_lot",
  "rand 0.8.5",
  "risc0-binfmt",
  "risc0-circuit-recursion",
  "risc0-core",
- "risc0-groth16",
  "risc0-zkp",
  "secp256k1",
  "serde",
@@ -2929,17 +2924,6 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid 1.19.0",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "kaspa-wasm-core"
-version = "1.1.0"
-dependencies = [
- "faster-hex 0.9.0",
- "hexplay",
- "js-sys",
- "wasm-bindgen",
- "workflow-wasm",
 ]
 
 [[package]]

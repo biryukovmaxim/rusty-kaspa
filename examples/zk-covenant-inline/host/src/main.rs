@@ -8,8 +8,9 @@ use kaspa_consensus_core::{
 };
 use kaspa_hashes::Hash;
 use kaspa_txscript::{
-    caches::Cache, covenants::CovenantsContext, opcodes::codes::OpTrue, pay_to_script_hash_script, script_builder::ScriptBuilder,
-    zk_precompiles::tags::ZkTag, EngineCtx, EngineFlags, TxScriptEngine,
+    caches::Cache, covenants::CovenantsContext,
+    opcodes::codes::{Op2Swap, OpTrue},
+    pay_to_script_hash_script, script_builder::ScriptBuilder, zk_precompiles::tags::ZkTag, EngineCtx, EngineFlags, TxScriptEngine,
 };
 use risc0_zkvm::{default_prover, sha::Digestible, ExecutorEnv, Prover, ProverOpts, SuccinctReceipt};
 use std::time::Instant;
@@ -142,17 +143,22 @@ fn build_succinct_signature_script(
     let hashfn_byte: Vec<u8> = vec![hashfn_str_to_id(&receipt.hashfn).expect("invalid hashfn")];
     let control_index_bytes: Vec<u8> = receipt.control_inclusion_proof.index.to_le_bytes().to_vec();
     let control_digests_bytes: Vec<u8> = receipt.control_inclusion_proof.digests.iter().flat_map(|d| d.as_bytes()).copied().collect();
+    let control_id_bytes: Vec<u8> = receipt.control_id.as_bytes().to_vec();
 
+    // PR #957 push order (bottom → top):
+    //   [claim, control_index, control_digests, seal, control_id, hashfn, new_state_hash, redeem]
     ScriptBuilder::new()
-        .add_data(&seal_bytes)
-        .unwrap()
         .add_data(&claim_bytes)
-        .unwrap()
-        .add_data(&hashfn_byte)
         .unwrap()
         .add_data(&control_index_bytes)
         .unwrap()
         .add_data(&control_digests_bytes)
+        .unwrap()
+        .add_data(&seal_bytes)
+        .unwrap()
+        .add_data(&control_id_bytes)
+        .unwrap()
+        .add_data(&hashfn_byte)
         .unwrap()
         .add_data(new_state_hash)
         .unwrap()
@@ -236,6 +242,13 @@ fn build_redeem_script(old_state_hash: [u32; 8], redeem_script_len: i64, program
 
     match zk_tag {
         ZkTag::R0Succinct => {
+            // PR #957: the R0Succinct precompile expects
+            // [..., journal, image_id, control_id, hashfn] at the top. The sig_script
+            // pushes `control_id, hashfn` right after `seal`, so after journal_hash
+            // and program_id (image_id) are pushed the top is
+            // [..., control_id, hashfn, journal_hash, image_id]. Op2Swap reorders
+            // into the required layout.
+            builder.add_op(Op2Swap).unwrap();
             builder.verify_risc0_succinct().unwrap();
             // Stack: []
         }

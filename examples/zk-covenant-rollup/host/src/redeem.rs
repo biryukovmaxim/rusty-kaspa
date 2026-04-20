@@ -1,5 +1,5 @@
 use kaspa_txscript::{
-    opcodes::codes::{Op0, OpDrop, OpTrue},
+    opcodes::codes::{Op0, Op2Swap, OpDrop, OpTrue},
     script_builder::ScriptBuilder,
     zk_precompiles::tags::ZkTag,
 };
@@ -41,12 +41,20 @@ pub fn build_redeem_script(
     // Build journal preimage and hash
     builder.build_and_hash_journal().unwrap();
 
-    // Push program_id
+    // Push program_id (image_id)
     builder.add_data(program_id).unwrap();
 
     // ZK verify based on proof type
     match *zk_tag {
         ZkTag::R0Succinct => {
+            // PR #957: the R0Succinct precompile now pops 8 items in order
+            // (top→bottom) [hashfn, control_id, image_id, journal, seal, control_digests,
+            // control_index, claim]. The sig_script pushes `control_id, hashfn` right
+            // after `seal`, so after the redeem adds `journal_hash, image_id` the top of
+            // the stack is [..., control_id, hashfn, journal_hash, image_id]. Op2Swap
+            // reshapes to [..., journal_hash, image_id, control_id, hashfn] — the layout
+            // the precompile expects.
+            builder.add_op(Op2Swap).unwrap();
             builder.verify_risc0_succinct().unwrap();
         }
         ZkTag::Groth16 => {

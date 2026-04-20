@@ -1908,19 +1908,24 @@ impl App {
         let control_index_bytes: Vec<u8> = succinct.control_inclusion_proof.index.to_le_bytes().to_vec();
         let control_digests_bytes: Vec<u8> =
             succinct.control_inclusion_proof.digests.iter().flat_map(|d| d.as_bytes()).copied().collect();
+        let control_id_bytes: Vec<u8> = succinct.control_id.as_bytes().to_vec();
 
         // Stack layout (bottom → top, after P2SH extracts redeem):
-        //   [seal, claim, hashfn, ctrl_idx, ctrl_digests, new_lane_tip, new_state_hash, block_prove_to]
+        //   [claim, ctrl_idx, ctrl_digests, seal, control_id, hashfn,
+        //    new_lane_tip, new_state_hash, block_prove_to]
+        // Matches the new R0Succinct precompile pop order from PR #957.
         Ok(ScriptBuilder::new()
-            .add_data(&seal_bytes)
-            .unwrap()
             .add_data(&claim_bytes)
-            .unwrap()
-            .add_data(&hashfn_byte)
             .unwrap()
             .add_data(&control_index_bytes)
             .unwrap()
             .add_data(&control_digests_bytes)
+            .unwrap()
+            .add_data(&seal_bytes)
+            .unwrap()
+            .add_data(&control_id_bytes)
+            .unwrap()
+            .add_data(&hashfn_byte)
             .unwrap()
             .add_data(bytemuck::bytes_of(new_lane_tip))
             .unwrap()

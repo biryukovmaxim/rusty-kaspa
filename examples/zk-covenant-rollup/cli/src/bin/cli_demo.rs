@@ -187,6 +187,12 @@ fn build_sig_script(
 ) -> Result<Vec<u8>> {
     // Stack layout (bottom → top, after P2SH extracts redeem):
     //   [proof_data..., new_lane_tip, new_state_hash, block_prove_to]
+    //
+    // For Succinct, `proof_data...` is [claim, control_index, control_digests,
+    // seal, control_id, hashfn] — the order PR #957 requires from the new
+    // R0Succinct precompile. The redeem script appends `journal, image_id`
+    // and then `Op2Swap` reshapes the stack top into the precompile's
+    // expected [..., journal, image_id, control_id, hashfn] layout.
     match proof_kind {
         ProofKind::Succinct => {
             let succinct = receipt.inner.succinct().map_err(|e| anyhow::anyhow!("Not a succinct receipt: {e}"))?;
@@ -197,16 +203,19 @@ fn build_sig_script(
             let control_index_bytes: Vec<u8> = succinct.control_inclusion_proof.index.to_le_bytes().to_vec();
             let control_digests_bytes: Vec<u8> =
                 succinct.control_inclusion_proof.digests.iter().flat_map(|d| d.as_bytes()).copied().collect();
+            let control_id_bytes: Vec<u8> = succinct.control_id.as_bytes().to_vec();
             Ok(ScriptBuilder::new()
-                .add_data(&seal_bytes)
-                .unwrap()
                 .add_data(&claim_bytes)
-                .unwrap()
-                .add_data(&hashfn_byte)
                 .unwrap()
                 .add_data(&control_index_bytes)
                 .unwrap()
                 .add_data(&control_digests_bytes)
+                .unwrap()
+                .add_data(&seal_bytes)
+                .unwrap()
+                .add_data(&control_id_bytes)
+                .unwrap()
+                .add_data(&hashfn_byte)
                 .unwrap()
                 .add_data(bytemuck::bytes_of(new_lane_tip))
                 .unwrap()

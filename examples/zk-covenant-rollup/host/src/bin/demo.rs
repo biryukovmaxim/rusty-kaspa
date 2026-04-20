@@ -296,23 +296,26 @@ fn verify_onchain_succinct(
 
     // Build sig_script: push proof components, then redeem script (P2SH).
     // Stack layout (bottom to top):
-    //   [seal, claim, hashfn, control_index, control_digests,
+    //   [claim, control_index, control_digests, seal, control_id, hashfn,
     //    new_lane_tip, new_state_hash, block_prove_to, redeem]
     let seal_bytes: Vec<u8> = receipt.seal.iter().flat_map(|w| w.to_le_bytes()).collect();
     let claim_bytes: Vec<u8> = receipt.claim.digest().as_bytes().to_vec();
     let hashfn_byte: Vec<u8> = vec![hashfn_str_to_id(&receipt.hashfn).expect("invalid hashfn")];
     let control_index_bytes: Vec<u8> = receipt.control_inclusion_proof.index.to_le_bytes().to_vec();
     let control_digests_bytes: Vec<u8> = receipt.control_inclusion_proof.digests.iter().flat_map(|d| d.as_bytes()).copied().collect();
+    let control_id_bytes: Vec<u8> = receipt.control_id.as_bytes().to_vec();
     tx.inputs[0].signature_script = ScriptBuilder::new()
-        .add_data(&seal_bytes)
-        .unwrap()
         .add_data(&claim_bytes)
-        .unwrap()
-        .add_data(&hashfn_byte)
         .unwrap()
         .add_data(&control_index_bytes)
         .unwrap()
         .add_data(&control_digests_bytes)
+        .unwrap()
+        .add_data(&seal_bytes)
+        .unwrap()
+        .add_data(&control_id_bytes)
+        .unwrap()
+        .add_data(&hashfn_byte)
         .unwrap()
         .add_data(bytemuck::bytes_of(new_lane_tip))
         .unwrap()

@@ -331,6 +331,8 @@ mod tests {
         const CLAIM_HEX: &str = "66d77a344274c7bf7215936058f4620be4d477003f6d01bf86b843c034358ced";
         const HASHFN: &str = "poseidon2";
         const CONTROL_INDEX: u32 = 10;
+        // TODO: regenerate with `capture_succinct_proof_data` to capture control_id (PR #957).
+        const CONTROL_ID_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
         const CONTROL_DIGESTS_HEX: &str = "fd84d83092a1e1244d423a26d89c892ab098b467c6d82229912deb26e37d2562dafe25646d370c28fe472176911d2c541ba6e243b1d9150fd67d6a055116f1690bb1e41c4f4912522725016e09358171398a9a6d44fe5d5c648eb8226e46ed50c64e2b5c7ffa46692f5939054290d36dd4b84477dbb78a3d3aaba251d43caf24977f9e2868d664458077ac35fa9050290c7db016c2750620c362da3c275cab67f765ab6e0cf5dc55c11d65688af0fe1428afc359c08b1656bbc4ba6b54c9746cc6b87a237165c549ef7ac614d762ec1ce4b97441c9bfef6fd8ac90378170d8162be97040fd0b390959c33114712a436382b2cd419665ee2fe801c158a9bbb155";
         const BLOCK_PROVE_TO_HEX: &str = "0000000000000000000000000000000000000000000000000300000000000000";
         const NEW_STATE_HEX: &str = "47345fa0e4e721619cdd7328fdfde5dd2d5a66a6a1a9d93d997d5f5637bda86e";
@@ -355,6 +357,7 @@ mod tests {
         let hashfn_byte: Vec<u8> = vec![zk_covenant_common::hashfn_str_to_id(HASHFN).expect("invalid hashfn")];
         let control_index_bytes: Vec<u8> = CONTROL_INDEX.to_le_bytes().to_vec();
         let control_digests_bytes = hex(CONTROL_DIGESTS_HEX);
+        let control_id_bytes = hex(CONTROL_ID_HEX);
         let block_prove_to_bytes = hex(BLOCK_PROVE_TO_HEX);
         let new_state_bytes = hex(NEW_STATE_HEX);
         let new_lane_tip_bytes = hex(NEW_LANE_TIP_HEX);
@@ -422,16 +425,20 @@ mod tests {
         let utxos = vec![UtxoEntry::new(input_value, pay_to_script_hash_script(&input_redeem), 0, false, Some(covenant_id))];
 
         // ── Assemble sig_script from hardcoded proof components ──
+        // PR #957 push order (bottom → top): claim, control_index, control_digests,
+        // seal, control_id, hashfn, new_lane_tip, new_state_hash, block_prove_to, redeem.
         tx.inputs[0].signature_script = ScriptBuilder::new()
-            .add_data(seal_bytes)
-            .unwrap()
             .add_data(&claim_bytes)
-            .unwrap()
-            .add_data(&hashfn_byte)
             .unwrap()
             .add_data(&control_index_bytes)
             .unwrap()
             .add_data(&control_digests_bytes)
+            .unwrap()
+            .add_data(seal_bytes)
+            .unwrap()
+            .add_data(&control_id_bytes)
+            .unwrap()
+            .add_data(&hashfn_byte)
             .unwrap()
             .add_data(bytemuck::bytes_of(&new_lane_tip))
             .unwrap()
@@ -532,6 +539,7 @@ mod tests {
         let control_digests_hex = faster_hex::hex_string(
             &succinct.control_inclusion_proof.digests.iter().flat_map(|d| d.as_bytes().iter().copied()).collect::<Vec<u8>>(),
         );
+        let control_id_hex = faster_hex::hex_string(succinct.control_id.as_bytes());
         let block_prove_to_hex = faster_hex::hex_string(block_prove_to.as_bytes().as_slice());
         let new_state_hex = faster_hex::hex_string(bytemuck::bytes_of(&new_state_hash));
         let new_lane_tip_hex = faster_hex::hex_string(bytemuck::bytes_of(&new_lane_tip));
@@ -544,6 +552,7 @@ mod tests {
         eprintln!("CLAIM_HEX: \"{}\"", claim_hex);
         eprintln!("HASHFN: \"{}\"", succinct.hashfn);
         eprintln!("CONTROL_INDEX: {}", control_index);
+        eprintln!("CONTROL_ID_HEX: \"{}\"", control_id_hex);
         eprintln!("CONTROL_DIGESTS_HEX: \"{}\"", control_digests_hex);
         eprintln!("BLOCK_PROVE_TO_HEX: \"{}\"", block_prove_to_hex);
         eprintln!("NEW_STATE_HEX: \"{}\"", new_state_hex);

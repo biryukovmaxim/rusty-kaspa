@@ -17,24 +17,25 @@ pub trait Risc0SuccinctVerify {
     /// Verifies a RISC0 Succinct (STARK) proof.
     ///
     /// Expects on stack (bottom to top):
-    ///   [seal, claim, hashfn, control_index, control_digests, journal_hash, image_id]
+    ///   [claim, control_index, control_digests, seal, journal_hash, image_id, control_id, hashfn]
     ///
     /// Where:
-    ///   - seal: STARK proof data (Vec<u32> as LE bytes)
     ///   - claim: Receipt claim digest (32 bytes)
-    ///   - hashfn: Hash function ID (1 byte: 0=Blake2b, 1=Poseidon2, 2=Sha256)
     ///   - control_index: Merkle proof leaf index (u32 LE, 4 bytes)
     ///   - control_digests: Merkle proof path digests (N × 32 bytes)
+    ///   - seal: STARK proof data (Vec<u32> as LE bytes)
     ///   - journal_hash: SHA256 hash of journal (32 bytes)
     ///   - image_id: Program ID (32 bytes)
+    ///   - control_id: Recursion control ID digest (32 bytes) — added by PR #957
+    ///   - hashfn: Hash function ID (1 byte: 0=Blake2b, 1=Poseidon2, 2=Sha256)
     fn verify_risc0_succinct(&mut self) -> ScriptBuilderResult<&mut ScriptBuilder>;
 }
 
 impl Risc0SuccinctVerify for ScriptBuilder {
     fn verify_risc0_succinct(&mut self) -> ScriptBuilderResult<&mut ScriptBuilder> {
-        // Stack: [seal, claim, hashfn, control_index, control_digests, journal_hash, image_id]
+        // Stack: [claim, control_index, control_digests, seal, journal_hash, image_id, control_id, hashfn]
         self.add_data(&[ZkTag::R0Succinct as u8])?; // R0Succinct tag
-                                                    // Stack: [seal, claim, hashfn, control_index, control_digests, journal_hash, image_id, 0x21]
+                                                    // Stack: [..., hashfn, 0x21]
         self.add_op(OpZkPrecompile)?;
         // Stack: [true]
         self.add_op(OpVerify)
