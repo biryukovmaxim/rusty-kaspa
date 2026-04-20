@@ -11,8 +11,8 @@ use crate::input;
 /// Read a non-V1 transaction — host sends just the pre-computed tx_id hash.
 ///
 /// Used for V0 and V2+ transactions in the lane.  These still contribute
-/// to the activity digest via `seq_commit_tx_digest(tx_id, version)`, but
-/// no action processing occurs.
+/// to the activity digest via `activity_leaf(tx_id, version, merge_idx)`,
+/// but no action processing occurs.
 pub fn read_non_v1_tx(stdin: &mut impl WordRead) -> [u32; 8] {
     input::read_hash(stdin)
 }

@@ -8,11 +8,13 @@ The rollup uses the lane-based sequencing commitment defined by [KIP-21](https:/
 
 ## Lane partitioning
 
-The rollup lane is identified by a fixed subnetwork ID:
+The rollup lane is identified by a fixed subnetwork ID with the user-lane shape `[namespace (4 bytes), 0×16]` defined by KIP-21 — a non-zero 4-byte namespace followed by 16 zero bytes:
 
 ```
-ROLLUP_SUBNETWORK_ID = [0x42, 0, 0, ..., 0]  (20 bytes)
+ROLLUP_SUBNETWORK_ID = [0x42, 0x42, 0x42, 0x42, 0×16]  (20 bytes)
 ```
+
+Consensus rejects any other shape: `[x, 0×19]` is reserved for system IDs (native/coinbase), and only IDs whose last 16 bytes are zero qualify as user lanes.
 
 The lane key is precomputed at compile time:
 
@@ -26,9 +28,8 @@ Only transactions with matching subnetwork ID appear in the rollup lane. The hos
 
 Within each active block, every lane transaction contributes to the block's **activity digest**:
 
-1. `tx_digest = seq_commit_tx_digest(tx_id, version)` — keyed BLAKE3, domain `SeqCommitTxDigest`
-2. `leaf = activity_leaf(tx_digest, merge_idx)` — keyed BLAKE3, domain `SeqCommitActivityLeaf`
-3. Leaves are fed to an `ActivityDigestBuilder` (a streaming Merkle builder)
+1. `leaf = activity_leaf(tx_id, version, merge_idx)` — keyed BLAKE3, domain `SeqCommitActivityLeaf`, with `tx_id || le_u16(version) || le_u32(merge_idx)` as preimage
+2. Leaves are fed to an `ActivityDigestBuilder` (a streaming Merkle builder)
 
 The `merge_idx` is the transaction's real position within the block's full mergeset — including any non-lane transactions the host filtered out before sending. It is committed as data inside the leaf hash (not derived from leaf order), so the values can be sparse without breaking the digest. This anchors each lane tx to its consensus position: the host can choose which txs to send into the guest, but it cannot reorder them or fabricate a different position.
 
@@ -85,7 +86,7 @@ flowchart TD
     TIP["new_lane_tip"]
     KEY["ROLLUP_LANE_KEY"]
     BS["blue_score"]
-    LEAF["smt_leaf_hash(lane_key, lane_tip, blue_score)"]
+    LEAF["smt_leaf_hash(lane_tip, blue_score)"]
     PROOF["SMT proof"]
     ROOT["lanes_root = proof.compute_root(lane_key, leaf)"]
     PCD["payload_and_ctx_digest"]
@@ -94,9 +95,9 @@ flowchart TD
     SC["seq_commit(parent_seq_commit, state_root)"]
 
     TIP --> LEAF
-    KEY --> LEAF
     BS --> LEAF
     LEAF --> ROOT
+    KEY --> ROOT
     PROOF --> ROOT
     ROOT --> SR
     PCD --> SR

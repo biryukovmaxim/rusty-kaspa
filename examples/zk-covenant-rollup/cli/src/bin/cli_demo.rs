@@ -17,7 +17,7 @@ use kaspa_txscript::{pay_to_address_script, pay_to_script_hash_script};
 use kaspa_wrpc_client::prelude::{NetworkId, NetworkType, Notification};
 use risc0_zkvm::sha::Digestible;
 use zk_covenant_rollup_core::permission_tree::{perm_empty_leaf_hash, PermissionTree};
-use zk_covenant_rollup_core::seq_commit::{ActivityDigestBuilder, activity_leaf, from_hash, lane_tip_next, seq_commit_tx_digest, to_hash};
+use zk_covenant_rollup_core::seq_commit::{ActivityDigestBuilder, activity_leaf, from_hash, lane_tip_next, to_hash};
 use zk_covenant_rollup_core::ROLLUP_LANE_KEY;
 use zk_covenant_rollup_core::state::empty_tree_root;
 use zk_covenant_rollup_host::bridge::{build_delegate_entry_script, build_permission_redeem_converged, build_permission_sig_script};
@@ -473,8 +473,7 @@ async fn sync_chain(node: &KaspaNode, prover: &mut RollupProver) -> Result<usize
 
             let mut builder = ActivityDigestBuilder::new();
             for (merge_idx, zk_tx) in block_zk_txs.iter().enumerate() {
-                let digest = seq_commit_tx_digest(&zk_tx.tx_id(), zk_tx.version());
-                builder.add_leaf(to_hash(&activity_leaf(&digest, merge_idx as u32)));
+                builder.add_leaf(to_hash(&activity_leaf(&zk_tx.tx_id(), zk_tx.version(), merge_idx as u32)));
             }
             let context_hash = [0u32; 8]; // TODO: read real context hash
             let activity_digest = from_hash(builder.finalize());

@@ -41,7 +41,6 @@ use kaspa_muhash::MuHash;
 use kaspa_utils::refs::Refs;
 
 use crate::model::services::seq_commit_accessor::SeqCommitAccessor;
-use kaspa_consensus_core::hashing::tx::seq_commit_tx_digest;
 use kaspa_consensus_core::tx::TransactionId;
 use rayon::prelude::*;
 use smallvec::{SmallVec, smallvec};
@@ -518,11 +517,10 @@ impl VirtualStateProcessor {
             let merged_header = self.headers_store.get_header(merged_block).unwrap();
             let block_txs = self.block_transactions_store.get(merged_block).unwrap();
 
-            let blue_work_bytes = merged_header.blue_work.to_le_bytes();
             let coinbase_payload = &block_txs[0].payload;
-            let mpl = miner_payload_leaf(&MinerPayloadLeafInput {
+            let mpl = miner_payload_leaf(MinerPayloadLeafInput {
                 block_hash: &merged_block,
-                blue_work_bytes: &blue_work_bytes,
+                blue_work_be_bytes: &merged_header.blue_work.to_be_bytes(),
                 payload: coinbase_payload,
             });
             miner_payload_leaves.push(mpl);
@@ -530,8 +528,7 @@ impl VirtualStateProcessor {
             for accepted_tx in block_acceptance.accepted_transactions.iter() {
                 let tx = &block_txs[accepted_tx.index_within_block as usize];
                 let lane_id: [u8; 20] = *tx.subnetwork_id.as_bytes();
-                let tx_digest = seq_commit_tx_digest(accepted_tx.transaction_id, tx.version);
-                let al = activity_leaf(&tx_digest, global_merge_idx);
+                let al = activity_leaf(&accepted_tx.transaction_id, tx.version, global_merge_idx);
                 lane_activities.entry(lane_id).or_default().push(al);
                 global_merge_idx += 1;
             }

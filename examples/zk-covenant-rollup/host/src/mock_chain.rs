@@ -11,7 +11,7 @@ use zk_covenant_rollup_core::{
     p2sh::blake2b_script_hash,
     pad_to_depth, pay_to_pubkey_spk, perm_leaf_hash,
     permission_tree::{required_depth, StreamingPermTreeBuilder},
-    seq_commit::{self, activity_leaf, from_hash, lane_tip_next, seq_commit_tx_digest, smt_leaf_hash, to_hash, ActivityDigestBuilder},
+    seq_commit::{self, activity_leaf, from_hash, lane_tip_next, smt_leaf_hash, to_hash, ActivityDigestBuilder},
     smt::Smt,
     state::{AccountWitness, StateRoot},
     CommitmentWitness, MAX_DELEGATE_INPUTS, ROLLUP_LANE_KEY,
@@ -473,8 +473,7 @@ pub fn build_mock_chain(initial_lane_tip: Hash, covenant_id_bytes: &[u8; 32]) ->
         let mut activity_builder = ActivityDigestBuilder::new();
         for &merge_idx in &lane_indices {
             let tx = &txs[merge_idx as usize];
-            let tx_digest = seq_commit_tx_digest(&tx.tx_id(), tx.version());
-            activity_builder.add_leaf(to_hash(&activity_leaf(&tx_digest, merge_idx)));
+            activity_builder.add_leaf(to_hash(&activity_leaf(&tx.tx_id(), tx.version(), merge_idx)));
         }
         let activity_digest = from_hash(activity_builder.finalize());
         lane_tip = lane_tip_next(&lane_tip, &ROLLUP_LANE_KEY, &activity_digest, &context_hash);
@@ -523,7 +522,7 @@ pub fn build_mock_chain(initial_lane_tip: Hash, covenant_id_bytes: &[u8; 32]) ->
 
     // Insert rollup lane leaf into the active-lanes SMT
     let lane_key_hash = to_hash(&ROLLUP_LANE_KEY);
-    let leaf_hash = to_hash(&smt_leaf_hash(&ROLLUP_LANE_KEY, &lane_tip, blue_score));
+    let leaf_hash = to_hash(&smt_leaf_hash(&lane_tip, blue_score));
     let mut lanes_smt = SparseMerkleTree::<SeqCommitActiveNode>::new();
     lanes_smt.insert(lane_key_hash, leaf_hash);
 

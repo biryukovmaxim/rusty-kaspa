@@ -98,7 +98,7 @@ pub use prev_tx::{
 };
 pub use seq_commit::{
     ActivityDigestBuilder, CommitmentWitness, LaneId, activity_leaf, compute_seq_commit_for_lane, from_hash, lane_key, lane_tip_next,
-    seq_commit, seq_commit_tx_digest, seq_state_root, smt_leaf_hash, to_hash,
+    seq_commit, seq_state_root, smt_leaf_hash, to_hash,
 };
 pub use smt::{SMT_DEPTH, SmtProof, branch_hash, empty_leaf_hash, key_to_index, leaf_hash};
 pub use state::{Account, AccountWitness, StateRoot, empty_tree_root};
@@ -159,13 +159,15 @@ impl PublicInput {
     }
 }
 
-/// Subnetwork ID for the rollup lane (0x42 = first byte, rest zeros).
-pub const ROLLUP_SUBNETWORK_ID: [u8; 20] = [66, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+/// Subnetwork ID for the rollup lane. Shape `[namespace (4 bytes), 0×16]`
+/// per KIP-21 user-lane validation: the 4-byte namespace identifies the
+/// rollup (`0x42424242`) and the trailing 16 bytes are zero.
+pub const ROLLUP_SUBNETWORK_ID: [u8; 20] = [0x42, 0x42, 0x42, 0x42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 /// Precomputed lane key: `H_lane_key(ROLLUP_SUBNETWORK_ID)`.
 /// Verified by `seq_commit::tests::precomputed_lane_key_matches`.
 pub const ROLLUP_LANE_KEY: [u32; 8] =
-    [2_183_999_308, 701_684_287, 4_142_800_354, 1_405_997_512, 825_319_397, 3_794_730_010, 1_447_840_166, 810_862_549];
+    [39_404_298, 4_100_123_841, 3_806_345_111, 3_366_110_059, 3_358_129_909, 3_519_910_718, 3_705_316_637, 1_463_228_965];
 
 // ANCHOR: payload_digest
 pub fn payload_digest(payload: &[u32]) -> [u32; 8] {

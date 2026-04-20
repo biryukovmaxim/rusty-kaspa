@@ -28,7 +28,7 @@ Every hash in the system uses domain separation to prevent cross-protocol collis
 
 | Tag | Value | Type | Module | Purpose |
 |-----|-------|------|--------|---------|
-| `ROLLUP_SUBNETWORK_ID` | `[0x42, 0, ..., 0]` (20 bytes) | Subnetwork ID | `core/src/lib.rs` | Identifies the rollup lane |
+| `ROLLUP_SUBNETWORK_ID` | `[0x42, 0x42, 0x42, 0x42, 0×16]` (20 bytes, KIP-21 `[namespace (4), 0×16]` user-lane shape) | Subnetwork ID | `core/src/lib.rs` | Identifies the rollup lane |
 | `ROLLUP_LANE_KEY` | precomputed `H_lane_key(ROLLUP_SUBNETWORK_ID)` | `[u32; 8]` | `core/src/lib.rs` | Precomputed lane key for the rollup |
 | State verification suffix | `[0x00, 0x75]` | Opcode pair | `host/src/bridge.rs` | `[OP_0, OP_DROP]` tags state verification scripts |
 | Permission suffix | `[0x51, 0x75]` | Opcode pair | `host/src/bridge.rs` | `[OP_1, OP_DROP]` tags permission scripts |

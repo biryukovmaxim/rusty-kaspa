@@ -5,7 +5,7 @@ use zk_covenant_rollup_core::{
     bytes_to_words_ref, perm_leaf_hash,
     permission_tree::StreamingPermTreeBuilder,
     prev_tx::parse_first_input_outpoint,
-    seq_commit::{ActivityDigestBuilder, activity_leaf, from_hash, lane_tip_next, seq_commit_tx_digest, to_hash},
+    seq_commit::{ActivityDigestBuilder, activity_leaf, from_hash, lane_tip_next, to_hash},
 };
 
 use crate::{auth, input, state, tx, witness::EntryWitness, witness::PrevTxV1WitnessData};
@@ -24,9 +24,9 @@ use crate::{auth, input, state, tx, witness::EntryWitness, witness::PrevTxV1Witn
 /// When `tx_count > 0`, each lane transaction is preceded by its real
 /// `merge_idx` — the tx's position in the full block's tx list, *including*
 /// any non-lane transactions the host filtered out before sending.  The
-/// guest uses this value in `activity_leaf(tx_digest, merge_idx)` so the
-/// activity digest matches consensus regardless of how many unrelated txs
-/// live alongside the lane in the real block.  Only V1 transactions are
+/// guest uses this value in `activity_leaf(tx_id, version, merge_idx)` so
+/// the activity digest matches consensus regardless of how many unrelated
+/// txs live alongside the lane in the real block.  Only V1 transactions are
 /// inspected for rollup actions; V0 and V2+ are committed to the digest
 /// but otherwise skipped.
 pub fn process_block(
@@ -51,8 +51,7 @@ pub fn process_block(
     for _ in 0..tx_count {
         let merge_idx = input::read_u32(stdin);
         let (tx_id, version) = process_transaction(stdin, state_root, covenant_id, perm_builder);
-        let tx_digest = seq_commit_tx_digest(&tx_id, version);
-        activity_builder.add_leaf(to_hash(&activity_leaf(&tx_digest, merge_idx)));
+        activity_builder.add_leaf(to_hash(&activity_leaf(&tx_id, version, merge_idx)));
     }
 
     let activity_digest = from_hash(activity_builder.finalize());

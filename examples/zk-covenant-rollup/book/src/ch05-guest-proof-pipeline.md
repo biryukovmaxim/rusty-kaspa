@@ -29,7 +29,7 @@ flowchart TD
         TRANSFER["Transfer"]
         ENTRY["Entry"]
         EXIT["Exit"]
-        DIGEST["activity_leaf(tx_digest, merge_idx)<br/>→ ActivityDigestBuilder"]
+        DIGEST["activity_leaf(tx_id, version, merge_idx)<br/>→ ActivityDigestBuilder"]
         TIP["lane_tip_next(prev_tip, key,<br/>activity_digest, context_hash)"]
 
         BLOCKS --> TXCOUNT --> EMPTY
@@ -238,7 +238,7 @@ After the block loop completes, the guest has the final `lane_tip` but still nee
 2. An SMT proof for the rollup lane's key in the Active Lanes SMT
 
 The guest computes:
-1. `smt_leaf = smt_leaf_hash(lane_key, lane_tip, blue_score)`
+1. `smt_leaf = smt_leaf_hash(lane_tip, blue_score)` — `lane_key` is already committed via the SMT path and via `H_lane_tip`, so it is not re-included in the leaf
 2. `lanes_root = proof.compute_root(lane_key, leaf)` — verifies the lane's membership in the global lanes SMT
 3. `state_root = seq_state_root(lanes_root, payload_and_ctx_digest)`
 4. `seq_commit = seq_commit(parent_seq_commit, state_root)`

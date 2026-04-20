@@ -101,8 +101,7 @@ pub fn streaming_import(
         chunk
             .par_iter()
             .map(|lane: &ImportLane| {
-                let leaf_hash =
-                    smt_leaf_hash(&SmtLeafInput { lane_key: &lane.lane_key, lane_tip: &lane.lane_tip, blue_score: lane.blue_score });
+                let leaf_hash = smt_leaf_hash(&SmtLeafInput { lane_tip: &lane.lane_tip, blue_score: lane.blue_score });
                 (lane.lane_key, leaf_hash)
             })
             .collect_into_vec(&mut leaf_hashes);
@@ -181,6 +180,14 @@ fn write_lane_versions(
     lane_batch: &mut WriteBatch,
     lane_batch_count: &mut usize,
 ) -> Result<(), StreamError<StoreError>> {
+    // Writes go directly to the DB lane-version store and intentionally skip
+    // the in-memory lane cache. `SmtStores::get_lane` treats a cache hit as
+    // authoritative (see the newest-suffix invariant in `crate::cache`), so
+    // bypassing the cache is safe only because IBD SMT import runs after
+    // `SmtStores::clear_all()` has emptied both the DB stores and the caches.
+    // Thus there can be no stale cached lane versions disagreeing with the
+    // imported DB state. After import the caches remain cold, and reads fall
+    // back to DB until later incremental writes repopulate them.
     for lane in chunk {
         stores
             .lane_version

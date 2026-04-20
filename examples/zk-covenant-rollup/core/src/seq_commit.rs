@@ -22,16 +22,10 @@ pub fn from_hash(h: Hash) -> [u32; 8] {
 
 // ── Hash functions ([u32;8] interface) ───────────────────────────────
 
-/// `H_tx_digest(tx_id || le_u16(version))`
+/// `H_activity_leaf(tx_id || le_u16(version) || le_u32(merge_idx))`
 #[inline]
-pub fn seq_commit_tx_digest(tx_id: &[u32; 8], version: u16) -> [u32; 8] {
-    from_hash(kaspa_seq_commit::hashing::seq_commit_tx_digest(&to_hash(tx_id), version))
-}
-
-/// `H_activity_leaf(tx_digest || le_u32(merge_idx))`
-#[inline]
-pub fn activity_leaf(tx_digest: &[u32; 8], merge_idx: u32) -> [u32; 8] {
-    from_hash(kaspa_seq_commit::hashing::activity_leaf(&to_hash(tx_digest), merge_idx))
+pub fn activity_leaf(tx_id: &[u32; 8], version: u16, merge_idx: u32) -> [u32; 8] {
+    from_hash(kaspa_seq_commit::hashing::activity_leaf(&to_hash(tx_id), version, merge_idx))
 }
 
 /// `H_lane_key(lane_id)`
@@ -51,11 +45,14 @@ pub fn lane_tip_next(parent_ref: &[u32; 8], lane_key: &[u32; 8], activity_digest
     }))
 }
 
-/// `H_active_leaf(lane_key || lane_tip || le_u64(blue_score))`
+/// `H_active_leaf(lane_tip || le_u64(blue_score))`
+///
+/// `lane_tip` already commits to `lane_key` via `H_lane_tip`, and the SMT
+/// key path commits to `lane_key` as well, so including `lane_key` here
+/// would be redundant.
 #[inline]
-pub fn smt_leaf_hash(lane_key: &[u32; 8], lane_tip: &[u32; 8], blue_score: u64) -> [u32; 8] {
+pub fn smt_leaf_hash(lane_tip: &[u32; 8], blue_score: u64) -> [u32; 8] {
     from_hash(kaspa_seq_commit::hashing::smt_leaf_hash(&kaspa_seq_commit::types::SmtLeafInput {
-        lane_key: &to_hash(lane_key),
         lane_tip: &to_hash(lane_tip),
         blue_score,
     }))
@@ -103,7 +100,7 @@ pub fn compute_seq_commit_for_lane(
     smt_proof_bytes: &[u8],
 ) -> [u32; 8] {
     let proof = OwnedSmtProof::from_bytes(smt_proof_bytes).expect("invalid SMT proof");
-    let leaf = to_hash(&smt_leaf_hash(lane_key, lane_tip, witness.blue_score));
+    let leaf = to_hash(&smt_leaf_hash(lane_tip, witness.blue_score));
     let lanes_root = proof.compute_root::<SeqCommitActiveNode>(&to_hash(lane_key), Some(leaf)).expect("SMT proof compute_root failed");
     let sr = seq_state_root(&from_hash(lanes_root), &witness.payload_and_ctx_digest);
     seq_commit(&witness.parent_seq_commit, &sr)
