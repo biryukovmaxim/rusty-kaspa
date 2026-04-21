@@ -23,7 +23,6 @@ kaspa-database.workspace = true
 kaspa-grpc-client.workspace = true
 kaspa-grpc-core.workspace = true
 kaspa-grpc-server.workspace = true
-kaspa-hashes = { workspace = true, default-features = true }
 kaspa-index-processor.workspace = true
 kaspa-math.workspace = true
 kaspa-merkle.workspace = true
@@ -33,8 +32,8 @@ kaspa-pow.workspace = true
 kaspa-rpc-core.workspace = true
 kaspa-rpc-service.workspace = true
 kaspa-seq-commit.workspace = true
+kaspa-smt.workspace = true
 kaspa-txscript.workspace = true
-kaspa-utils = { workspace = true, default-features = true }
 kaspa-utxoindex.workspace = true
 kaspa-wrpc-client.workspace = true
 kaspa-wrpc-server.workspace = true
@@ -46,7 +45,6 @@ bincode.workspace = true
 clap.workspace = true
 chrono.workspace = true
 crossbeam-channel.workspace = true
-dhat = { workspace = true, optional = true }
 faster-hex.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
@@ -64,8 +62,11 @@ serde.workspace = true
 smallvec.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
 workflow-perf-monitor.workspace = true
+kaspa-hashes = { workspace = true, default-features = true }
+kaspa-utils = { workspace = true, default-features = true }
+dhat = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [dev-dependencies]
 criterion.workspace = true
