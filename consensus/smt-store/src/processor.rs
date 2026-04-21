@@ -1,18 +1,15 @@
 //! `SmtProcessor` — two-phase SMT lane processing.
 //!
 //! **Phase 1 — Accumulation** (`update_lane` / `expire_lane`):
-//! Collects lane updates and expirations into a [`LaneChanges`] collection.
+//! Collects lane updates and expirations into [`BlockLaneChanges`].
 //!
 //! **Phase 2 — Build & Persist** (`build` then `flush`):
 //! `build()` derives leaf hashes, calls [`compute_root_update`] against an
 //! immutable DB reader, and returns an [`SmtBuild`] with the root and changed
 //! branches. `flush()` persists to a `WriteBatch`; the caller commits atomically.
-//!
-//! The processor is generic over `C: LaneChanges`:
-//! - [`BlockLaneChanges`] (default) — single-block processing, all lanes share one blue_score.
-//! - [`ImportLaneChanges`] — IBD import, each lane carries its own blue_score.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -37,9 +34,32 @@ use crate::{BlockHash, LaneKey};
 
 struct VersionedBranchReader<'a, F: Fn(Hash) -> bool> {
     stores: &'a SmtStores,
-    target_blue_score: u64,
-    min_blue_score: u64,
+    bounds: SmtReadBounds,
     is_canonical: F,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SmtReadBounds {
+    /// Inclusive upper bound blue score to start the scan from (high to low)
+    pub target_blue_score: u64,
+    /// Inclusive lower bound blue score below which entries are out of scope/inactive
+    pub min_blue_score: u64,
+}
+
+impl SmtReadBounds {
+    pub const fn new(target_blue_score: u64, min_blue_score: u64) -> Self {
+        Self { target_blue_score, min_blue_score }
+    }
+
+    pub const fn for_pov(pov_blue_score: u64, inactivity_threshold: u64) -> Self {
+        Self { target_blue_score: pov_blue_score, min_blue_score: pov_blue_score.saturating_sub(inactivity_threshold) }
+    }
+}
+
+impl From<RangeInclusive<u64>> for SmtReadBounds {
+    fn from(range: RangeInclusive<u64>) -> Self {
+        Self::new(*range.end(), *range.start())
+    }
 }
 
 impl<F: Fn(Hash) -> bool> SmtStore for VersionedBranchReader<'_, F> {
@@ -47,10 +67,7 @@ impl<F: Fn(Hash) -> bool> SmtStore for VersionedBranchReader<'_, F> {
 
     fn get_node(&self, key: &BranchKey) -> Result<Option<Node>, StoreError> {
         let entity = BranchEntity { depth: key.depth, node_key: key.node_key };
-        Ok(self
-            .stores
-            .get_node(entity, self.target_blue_score, self.min_blue_score, |bh| (self.is_canonical)(bh))
-            .and_then(|v| *v.data()))
+        Ok(self.stores.get_node(entity, self.bounds, |bh| (self.is_canonical)(bh)).and_then(|v| *v.data()))
     }
 }
 
@@ -84,43 +101,53 @@ impl SmtStores {
     /// checking cache first then DB. `target_blue_score` is the block at which the
     /// read is happening — it drives `get_at`'s seek so non-canonical future
     /// versions are skipped in O(log n) rather than scanned linearly.
+    ///
+    /// A cache hit is authoritative (no DB fallback) because of the
+    /// newest-suffix invariant: the cache retains, per entity, a
+    /// blue-score-newest suffix of the versions written through the
+    /// incremental `flush` path. See the module doc in [`crate::cache`] for
+    /// the full argument and the interaction with the IBD cache-bypass path.
     pub fn get_node(
         &self,
         entity: BranchEntity,
-        target_blue_score: u64,
-        min_blue_score: u64,
+        bounds: SmtReadBounds,
         mut is_canonical: impl FnMut(Hash) -> bool,
     ) -> Option<Verified<Option<Node>>> {
         if let Some((score, block_hash, value)) =
-            self.branch_cache.lock().get(entity, target_blue_score, min_blue_score, &mut is_canonical)
+            self.branch_cache.lock().get(entity, bounds.target_blue_score, bounds.min_blue_score, &mut is_canonical)
         {
             return Some(Verified::new(*value, score, block_hash));
         }
-        self.branch_version.get_at_canonical(entity.depth, entity.node_key, target_blue_score, min_blue_score, is_canonical).unwrap()
+        self.branch_version
+            .get_at_canonical(entity.depth, entity.node_key, bounds.target_blue_score, bounds.min_blue_score, is_canonical)
+            .unwrap()
     }
 
     /// Find the latest canonical lane version in `[min_blue_score, target_blue_score]`,
     /// checking cache first then DB.
+    ///
+    /// A cache hit is authoritative for the same reason as [`Self::get_node`];
+    /// see that method's doc and [`crate::cache`] for the newest-suffix
+    /// invariant.
     pub fn get_lane(
         &self,
         lane_key: LaneKey,
-        target_blue_score: u64,
-        min_blue_score: u64,
+        bounds: SmtReadBounds,
         mut is_canonical: impl FnMut(Hash) -> bool,
     ) -> Option<Verified<LaneTipHash>> {
         if let Some((score, block_hash, value)) =
-            self.lane_cache.lock().get(lane_key, target_blue_score, min_blue_score, &mut is_canonical)
+            self.lane_cache.lock().get(lane_key, bounds.target_blue_score, bounds.min_blue_score, &mut is_canonical)
         {
             return Some(Verified::new(*value, score, block_hash));
         }
-        self.lane_version.get_at_canonical(lane_key, target_blue_score, min_blue_score, is_canonical).unwrap()
+        self.lane_version.get_at_canonical(lane_key, bounds.target_blue_score, bounds.min_blue_score, is_canonical).unwrap()
     }
 
     /// Read the lanes root hash from the branch store at depth=0.
     /// Returns the empty root if no root node exists.
-    pub fn get_lanes_root(&self, target_blue_score: u64, min_blue_score: u64, is_canonical: impl FnMut(Hash) -> bool) -> Hash {
+    pub fn get_lanes_root(&self, bounds: SmtReadBounds, is_canonical: impl FnMut(Hash) -> bool) -> Hash {
         let root_entity = BranchEntity { depth: 0, node_key: Hash::from_bytes([0; 32]) };
-        match self.get_node(root_entity, target_blue_score, min_blue_score, is_canonical) {
+        match self.get_node(root_entity, bounds, is_canonical) {
             Some(v) => match *v.data() {
                 Some(Node::Internal(hash)) => hash,
                 Some(Node::Collapsed(cl)) => {
@@ -137,11 +164,10 @@ impl SmtStores {
     pub fn prove_lane(
         &self,
         lane_key: &Hash,
-        target_blue_score: u64,
-        min_blue_score: u64,
+        bounds: SmtReadBounds,
         is_canonical: impl Fn(Hash) -> bool,
     ) -> StoreResult<OwnedSmtProof> {
-        let reader = VersionedBranchReader { stores: self, target_blue_score, min_blue_score, is_canonical };
+        let reader = VersionedBranchReader { stores: self, bounds, is_canonical };
         // Root value is unused by `prove` — it walks the store directly.
         let tree = SparseMerkleTree::<SeqCommitActiveNode, _>::with_store(reader);
         tree.prove(lane_key)
@@ -175,7 +201,7 @@ impl SmtStores {
         let mut chunks_written = 0u64;
 
         // Iterate both LeafUpdate and Structural entries at scores ≤ cutoff
-        for entry in self.score_index.get_all(cutoff_blue_score, 0) {
+        for entry in self.score_index.get_all(0..=cutoff_blue_score) {
             let entry = entry.unwrap();
             let blue_score = entry.blue_score();
             let block_hash = entry.block_hash();
@@ -246,7 +272,9 @@ impl SmtStores {
         (lane_deletes, branch_deletes)
     }
 
-    /// Clear all versioned SMT stores and caches. Used before IBD SMT sync.
+    /// Clear all versioned SMT stores and caches. Used before IBD SMT sync
+    /// to ensure that the caches are cold and the DB is empty, preserving
+    /// the authoritative-read invariants when incremental processing resumes.
     pub fn clear_all(&self) {
         self.branch_version.delete_all();
         self.lane_version.delete_all();
@@ -258,19 +286,6 @@ impl SmtStores {
 
 /// Abstraction over lane change collections.
 ///
-/// `LaneMeta` is per-lane metadata: `()` for block processing (blue_score
-/// is uniform), `u64` for IBD import (each lane has its own blue_score).
-pub trait LaneChanges {
-    type LaneMeta;
-
-    fn update(&mut self, lane_key: LaneKey, lane_tip_hash: Hash, meta: Self::LaneMeta);
-    fn to_leaf_updates(&self) -> SortedLeafUpdates;
-    fn flush_lanes(&self, stores: &SmtStores, batch: &mut WriteBatch, block_hash: BlockHash) -> StoreResult<()>;
-    fn flush_score_index(&self, stores: &SmtStores, batch: &mut WriteBatch, block_hash: BlockHash) -> StoreResult<()>;
-    fn is_empty(&self) -> bool;
-    fn len(&self) -> usize;
-}
-
 /// Lane changes within a single block. All lanes share the block's blue_score.
 pub struct BlockLaneChanges {
     blue_score: u64,
@@ -285,24 +300,20 @@ impl BlockLaneChanges {
     pub fn expire(&mut self, lane_key: LaneKey) {
         self.changes.insert(lane_key, None);
     }
-}
 
-impl LaneChanges for BlockLaneChanges {
-    type LaneMeta = ();
-
-    fn update(&mut self, lane_key: LaneKey, lane_tip_hash: Hash, _extra: ()) {
+    pub fn update(&mut self, lane_key: LaneKey, lane_tip_hash: Hash) {
         self.changes.insert(lane_key, Some(lane_tip_hash));
     }
 
-    fn to_leaf_updates(&self) -> SortedLeafUpdates {
+    pub fn to_leaf_updates(&self) -> SortedLeafUpdates {
         let bs = self.blue_score;
-        SortedLeafUpdates::from_sorted_map(&self.changes, |key, change| match change {
-            Some(tip) => smt_leaf_hash(&SmtLeafInput { lane_key: key, lane_tip: tip, blue_score: bs }),
+        SortedLeafUpdates::from_sorted_map(&self.changes, |_key, change| match change {
+            Some(tip) => smt_leaf_hash(&SmtLeafInput { lane_tip: tip, blue_score: bs }),
             None => ZERO_HASH,
         })
     }
 
-    fn flush_lanes(&self, stores: &SmtStores, batch: &mut WriteBatch, block_hash: BlockHash) -> StoreResult<()> {
+    pub fn flush_lanes(&self, stores: &SmtStores, batch: &mut WriteBatch, block_hash: BlockHash) -> StoreResult<()> {
         for (lane_key, tip) in &self.changes {
             if let Some(tip) = tip {
                 stores.lane_version.put(BatchDbWriter::new(batch), *lane_key, self.blue_score, block_hash, tip)?;
@@ -317,7 +328,7 @@ impl LaneChanges for BlockLaneChanges {
         Ok(())
     }
 
-    fn flush_score_index(&self, stores: &SmtStores, batch: &mut WriteBatch, block_hash: BlockHash) -> StoreResult<()> {
+    pub fn flush_score_index(&self, stores: &SmtStores, batch: &mut WriteBatch, block_hash: BlockHash) -> StoreResult<()> {
         use crate::keys::ScoreIndexKind;
         let updated: Vec<LaneKey> = self.changes.iter().filter_map(|(k, v)| v.as_ref().map(|_| *k)).collect();
         let expired: Vec<LaneKey> = self.changes.iter().filter_map(|(k, v)| if v.is_none() { Some(*k) } else { None }).collect();
@@ -330,107 +341,37 @@ impl LaneChanges for BlockLaneChanges {
         Ok(())
     }
 
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.changes.is_empty()
     }
 
-    fn len(&self) -> usize {
-        self.changes.len()
-    }
-}
-
-/// Lane imports with per-lane blue_score. No expirations.
-#[derive(Default)]
-pub struct ImportLaneChanges {
-    changes: BTreeMap<LaneKey, (LaneTipHash, u64)>,
-}
-
-impl ImportLaneChanges {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl LaneChanges for ImportLaneChanges {
-    type LaneMeta = u64;
-
-    fn update(&mut self, lane_key: LaneKey, lane_tip_hash: Hash, blue_score: u64) {
-        self.changes.insert(lane_key, (lane_tip_hash, blue_score));
-    }
-
-    fn to_leaf_updates(&self) -> SortedLeafUpdates {
-        SortedLeafUpdates::from_sorted_map(&self.changes, |key, (tip, bs)| {
-            smt_leaf_hash(&SmtLeafInput { lane_key: key, lane_tip: tip, blue_score: *bs })
-        })
-    }
-
-    fn flush_lanes(&self, stores: &SmtStores, batch: &mut WriteBatch, block_hash: BlockHash) -> StoreResult<()> {
-        for (lane_key, (tip, bs)) in &self.changes {
-            stores.lane_version.put(BatchDbWriter::new(batch), *lane_key, *bs, block_hash, tip)?;
-        }
-        let mut lc = stores.lane_cache.lock();
-        for (lane_key, (tip, bs)) in &self.changes {
-            lc.insert(*lane_key, *bs, block_hash, *tip);
-        }
-        Ok(())
-    }
-
-    fn flush_score_index(&self, stores: &SmtStores, batch: &mut WriteBatch, block_hash: BlockHash) -> StoreResult<()> {
-        use crate::keys::ScoreIndexKind;
-        let mut groups: BTreeMap<u64, Vec<LaneKey>> = BTreeMap::new();
-        for (lane_key, (_, bs)) in &self.changes {
-            groups.entry(*bs).or_default().push(*lane_key);
-        }
-        for (bs, keys) in &groups {
-            stores.score_index.put(BatchDbWriter::new(batch), *bs, ScoreIndexKind::LeafUpdate, block_hash, keys)?;
-        }
-        Ok(())
-    }
-
-    fn is_empty(&self) -> bool {
-        self.changes.is_empty()
-    }
-
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.changes.len()
     }
 }
 
 /// Accumulates SMT lane changes and builds the tree.
-pub struct SmtProcessor<'a, C: LaneChanges = BlockLaneChanges> {
+pub struct SmtProcessor<'a> {
     stores: &'a SmtStores,
-    blue_score: u64,
-    inactivity_threshold: u64,
+    bounds: SmtReadBounds,
     current_lanes_root: Hash,
-    lane_changes: C,
+    lane_changes: BlockLaneChanges,
 }
 
-impl<'a> SmtProcessor<'a, BlockLaneChanges> {
-    pub fn new(stores: &'a SmtStores, blue_score: u64, inactivity_threshold: u64, current_lanes_root: Hash) -> Self {
-        Self { stores, blue_score, inactivity_threshold, current_lanes_root, lane_changes: BlockLaneChanges::new(blue_score) }
+impl<'a> SmtProcessor<'a> {
+    pub fn new(stores: &'a SmtStores, write_blue_score: u64, bounds: SmtReadBounds, current_lanes_root: Hash) -> Self {
+        Self { stores, bounds, current_lanes_root, lane_changes: BlockLaneChanges::new(write_blue_score) }
     }
 
     pub fn update_lane(&mut self, lane_key: LaneKey, lane_tip_hash: Hash) {
-        self.lane_changes.update(lane_key, lane_tip_hash, ());
+        self.lane_changes.update(lane_key, lane_tip_hash);
     }
 
     pub fn expire_lane(&mut self, lane_key: LaneKey) {
         self.lane_changes.expire(lane_key);
     }
-}
 
-impl<'a> SmtProcessor<'a, ImportLaneChanges> {
-    pub fn new_import(stores: &'a SmtStores, blue_score: u64, inactivity_threshold: u64, current_lanes_root: Hash) -> Self {
-        Self { stores, blue_score, inactivity_threshold, current_lanes_root, lane_changes: ImportLaneChanges::new() }
-    }
-
-    pub fn update_lane(&mut self, lane_key: LaneKey, lane_tip_hash: Hash, blue_score: u64) {
-        self.lane_changes.update(lane_key, lane_tip_hash, blue_score);
-    }
-}
-
-impl<'a, C: LaneChanges> SmtProcessor<'a, C> {
-    pub fn build(self, is_canonical: impl Fn(Hash) -> bool) -> StoreResult<SmtBuild<C>> {
+    pub fn build(self, is_canonical: impl Fn(Hash) -> bool) -> StoreResult<SmtBuild> {
         if self.lane_changes.is_empty() {
             return Ok(SmtBuild {
                 root: self.current_lanes_root,
@@ -442,28 +383,23 @@ impl<'a, C: LaneChanges> SmtProcessor<'a, C> {
         }
 
         let leaf_updates = self.lane_changes.to_leaf_updates();
-        let reader = VersionedBranchReader {
-            stores: self.stores,
-            target_blue_score: self.blue_score,
-            min_blue_score: self.blue_score.saturating_sub(self.inactivity_threshold),
-            is_canonical,
-        };
+        let reader = VersionedBranchReader { stores: self.stores, bounds: self.bounds, is_canonical };
         let (root, node_changes) = compute_root_update::<SeqCommitActiveNode, _>(&reader, self.current_lanes_root, leaf_updates)?;
         Ok(SmtBuild { root, node_changes, lane_changes: self.lane_changes, payload_and_ctx_digest: ZERO_HASH, active_lanes_count: 0 })
     }
 }
 
 /// Result of building an SMT: root hash + changed nodes + lane changes + metadata.
-pub struct SmtBuild<C: LaneChanges = BlockLaneChanges> {
+pub struct SmtBuild {
     pub root: Hash,
     node_changes: SmtNodeChanges,
-    lane_changes: C,
+    lane_changes: BlockLaneChanges,
     /// Set by `build_seq_commit` after computing the seq_commit components.
     pub payload_and_ctx_digest: Hash,
     pub active_lanes_count: u64,
 }
 
-impl<C: LaneChanges> SmtBuild<C> {
+impl SmtBuild {
     pub fn lane_update_count(&self) -> usize {
         self.lane_changes.len()
     }
@@ -474,8 +410,8 @@ impl<C: LaneChanges> SmtBuild<C> {
 
     /// Persist the build's node/lane/score-index diff to a `WriteBatch` and populate caches.
     ///
-    /// `branch_blue_score` versions the nodes. Lane and score_index
-    /// blue_scores are determined by the `LaneChanges` implementation.
+    /// `branch_blue_score` versions the nodes and is the same blue_score used
+    /// for lane/score-index writes inside `BlockLaneChanges`.
     /// Metadata is written separately by the caller via `DbSmtMetadataStore`.
     pub fn flush(
         self,
@@ -500,5 +436,112 @@ impl<C: LaneChanges> SmtBuild<C> {
         self.lane_changes.flush_score_index(stores, batch, block_hash)?;
 
         Ok(root)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kaspa_database::create_temp_db;
+    use kaspa_database::prelude::{ConnBuilder, DirectDbWriter};
+
+    fn hash(v: u8) -> Hash {
+        Hash::from_bytes([v; 32])
+    }
+
+    fn make_stores() -> (kaspa_database::utils::DbLifetime, Arc<DB>, SmtStores) {
+        let (lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
+        let stores = SmtStores::new(db.clone(), 16, 16);
+        (lifetime, db, stores)
+    }
+
+    fn bounds(target: u64, min: u64) -> SmtReadBounds {
+        SmtReadBounds::new(target, min)
+    }
+
+    fn internal(h: Hash) -> Option<Node> {
+        Some(Node::Internal(h))
+    }
+
+    fn entity() -> BranchEntity {
+        BranchEntity { depth: 7, node_key: hash(0xEE) }
+    }
+
+    /// The cache's "for every entity, cached versions are a blue-score-newest
+    /// suffix of that entity's write history" invariant is a *same-session*
+    /// property: it only holds for versions written since the cache was last
+    /// cleared. A process restart clears the cache but leaves the DB intact,
+    /// so post-restart the cache can hold a version at blue_score X while the
+    /// DB retains pre-restart versions at scores higher than X that were
+    /// never reloaded into the cache.
+    ///
+    /// The surviving invariant is weaker: if the cache has entry `(X, Y)` for
+    /// entity E, it has every newer entry for E whose block_hash has Y as a
+    /// chain ancestor — i.e. only along Y's chain. DB-only entries above X on
+    /// an off-chain branch (a pre-restart canonical write on a chain that
+    /// the post-restart cache fill didn't touch) are allowed.
+    ///
+    /// `SmtStores::get_node` must still return the canonical DB entry above
+    /// the cache's oldest version in this scenario. A DB-continuation
+    /// strategy that resumes strictly after the cache's last-visited
+    /// `(score, bh)` silently misses the higher-score DB entry and returns
+    /// `None` — an authoritative-looking stale result.
+    #[test]
+    fn get_node_restart_then_off_chain_cache_misses_db_entry_above() {
+        let (_lt, db, stores) = make_stores();
+        let e = entity();
+        let pre_restart_bh = hash(0xAA);
+        let pre_restart_node = internal(hash(0xCC));
+        let post_restart_bh = hash(0xBB);
+        let post_restart_node = internal(hash(0xDD));
+
+        // Pre-restart DB write at blue_score 200. The restart clears the
+        // in-memory cache, so this version is now DB-only.
+        stores.branch_version.put(DirectDbWriter::new(&db), e.depth, e.node_key, 200, pre_restart_bh, pre_restart_node).unwrap();
+
+        // Post-restart normal flush path: write E at blue_score 100 into
+        // both DB and cache. The cached entry is on an off-chain fork
+        // relative to the query's `is_canonical` predicate below.
+        stores.branch_version.put(DirectDbWriter::new(&db), e.depth, e.node_key, 100, post_restart_bh, post_restart_node).unwrap();
+        stores.branch_cache.lock().insert(e, 100, post_restart_bh, post_restart_node);
+
+        // Query from the POV of a chain whose canonical entry for E is the
+        // pre-restart DB-only version at 200.
+        let got = stores
+            .get_node(e, bounds(300, 0), |bh| bh == pre_restart_bh)
+            .expect("pre-restart canonical DB entry above the cache's oldest must still be returned");
+        assert_eq!(got.blue_score(), 200, "must return the DB entry at blue_score 200 above the cache's (100, post-restart-bh)");
+        assert_eq!(got.block_hash(), pre_restart_bh);
+        assert_eq!(*got.data(), pre_restart_node);
+    }
+
+    /// Lane-cache analogue of
+    /// [`get_node_restart_then_off_chain_cache_misses_db_entry_above`].
+    ///
+    /// The restart+reorg scenario — post-restart cache only holds an
+    /// off-chain version at blue_score 100 while the DB still has a
+    /// pre-restart canonical version at blue_score 200 — applies equally to
+    /// the lane store. `get_lane` must return the DB entry at 200 for an
+    /// `is_canonical` predicate that matches the pre-restart block_hash.
+    #[test]
+    fn get_lane_restart_then_off_chain_cache_misses_db_entry_above() {
+        let (_lt, db, stores) = make_stores();
+        let lane_key = hash(0xEE);
+        let pre_restart_bh = hash(0xAA);
+        let pre_restart_tip = hash(0xCC);
+        let post_restart_bh = hash(0xBB);
+        let post_restart_tip = hash(0xDD);
+
+        stores.lane_version.put(DirectDbWriter::new(&db), lane_key, 200, pre_restart_bh, &pre_restart_tip).unwrap();
+
+        stores.lane_version.put(DirectDbWriter::new(&db), lane_key, 100, post_restart_bh, &post_restart_tip).unwrap();
+        stores.lane_cache.lock().insert(lane_key, 100, post_restart_bh, post_restart_tip);
+
+        let got = stores
+            .get_lane(lane_key, bounds(300, 0), |bh| bh == pre_restart_bh)
+            .expect("pre-restart canonical DB lane entry above the cache's oldest must still be returned");
+        assert_eq!(got.blue_score(), 200);
+        assert_eq!(got.block_hash(), pre_restart_bh);
+        assert_eq!(*got.data(), pre_restart_tip);
     }
 }

@@ -1,4 +1,4 @@
-use super::VirtualStateProcessor;
+use super::{VirtualStateProcessor, bounds::SeqCommitBounds};
 use crate::{
     errors::{
         BlockProcessResult,
@@ -41,7 +41,6 @@ use kaspa_muhash::MuHash;
 use kaspa_utils::refs::Refs;
 
 use crate::model::services::seq_commit_accessor::SeqCommitAccessor;
-use kaspa_consensus_core::hashing::tx::seq_commit_tx_digest;
 use kaspa_consensus_core::tx::TransactionId;
 use rayon::prelude::*;
 use smallvec::{SmallVec, smallvec};
@@ -518,11 +517,10 @@ impl VirtualStateProcessor {
             let merged_header = self.headers_store.get_header(merged_block).unwrap();
             let block_txs = self.block_transactions_store.get(merged_block).unwrap();
 
-            let blue_work_bytes = merged_header.blue_work.to_le_bytes();
             let coinbase_payload = &block_txs[0].payload;
-            let mpl = miner_payload_leaf(&MinerPayloadLeafInput {
+            let mpl = miner_payload_leaf(MinerPayloadLeafInput {
                 block_hash: &merged_block,
-                blue_work_bytes: &blue_work_bytes,
+                blue_work_be_bytes: &merged_header.blue_work.to_be_bytes(),
                 payload: coinbase_payload,
             });
             miner_payload_leaves.push(mpl);
@@ -530,8 +528,7 @@ impl VirtualStateProcessor {
             for accepted_tx in block_acceptance.accepted_transactions.iter() {
                 let tx = &block_txs[accepted_tx.index_within_block as usize];
                 let lane_id: [u8; 20] = *tx.subnetwork_id.as_bytes();
-                let tx_digest = seq_commit_tx_digest(accepted_tx.transaction_id, tx.version);
-                let al = activity_leaf(&tx_digest, global_merge_idx);
+                let al = activity_leaf(&accepted_tx.transaction_id, tx.version, global_merge_idx);
                 lane_activities.entry(lane_id).or_default().push(al);
                 global_merge_idx += 1;
             }
@@ -547,25 +544,29 @@ impl VirtualStateProcessor {
         data: &MergesetSeqData,
         context_hash: &Hash,
         current_blue_score: u64,
+        parent_blue_score: u64,
         selected_parent: Hash,
         parent_seq_commit: Hash,
     ) -> Vec<ResolvedLaneUpdate> {
         use kaspa_seq_commit::hashing::{activity_digest_lane, lane_key, lane_tip_next};
         use kaspa_seq_commit::types::LaneTipInput;
         let mut updates = Vec::with_capacity(data.lane_activities.len());
+        let bounds = SeqCommitBounds::new(parent_blue_score, current_blue_score, self.finality_depth);
+        let read_bounds = bounds.selected_parent_read_bounds(); // -> [current - F, parent]
 
         for (lane_id, activity_leaves) in &data.lane_activities {
             let lk = lane_key(lane_id);
             let ad = activity_digest_lane(activity_leaves.iter().copied());
 
-            // Look up existing lane tip at the current block's POV: only tips
-            // visible inside [current - F, current] count. Lanes whose last
-            // canonical write is outside that window are treated as new and
-            // anchored on parent_seq_commit (KIP-21 §5.1).
-            let existing =
-                self.smt_stores.get_lane(lk, current_blue_score, current_blue_score.saturating_sub(self.finality_depth), |bh| {
-                    self.is_smt_canonical(bh, selected_parent)
-                });
+            // Look up an existing canonical lane tip in [current - F, parent]:
+            // the current block supplies the lower cutoff, while target=parent filters
+            // anticone entries at (parent, current] at the seek level.
+            let existing = self.smt_stores.get_lane(lk, read_bounds, |bh| self.is_smt_canonical(bh, selected_parent));
+            // A lane at the window boundary (bs = current - F - 1) is invisible here
+            // even though it was active in the parent's window. This is correct: from
+            // the current block's POV the lane expired, so a re-touch is a re-activation
+            // anchored on parent_seq_commit. The matching expire in `expire_stale_lanes`
+            // and this is_new=true cancel in the active_lanes_count arithmetic.
             let is_new = existing.is_none();
             let parent_ref = existing.map(|v| *v.data()).unwrap_or(parent_seq_commit);
 
@@ -598,15 +599,24 @@ impl VirtualStateProcessor {
         use kaspa_seq_commit::types::{SeqCommitInput, SeqState};
         use kaspa_smt_store::processor::SmtProcessor;
 
+        let bounds = SeqCommitBounds::new(parent_blue_score, current_blue_score, self.finality_depth);
         // 1. Create processor starting from the parent's lanes root
-        let mut proc = SmtProcessor::new(&self.smt_stores, current_blue_score, self.finality_depth, parent_lanes_root);
+        let mut proc =
+            SmtProcessor::new(&self.smt_stores, current_blue_score, bounds.selected_parent_read_bounds(), parent_lanes_root);
 
-        // 2. Expire stale lanes
-        let expired_count = self.expire_stale_lanes(&mut proc, parent_blue_score, current_blue_score, selected_parent);
+        // 2. Expire stale lanes (scans [parent-F, current-F) for lanes with no newer version)
+        let expired_count = self.expire_stale_lanes(&mut proc, bounds, selected_parent);
 
-        // 3. Apply lane updates
-        let new_lane_count = lane_updates.iter().filter(|lu| lu.is_new).count() as u64;
+        // 3. Apply lane updates.
+        // A lane at the boundary (bs = current-F-1) gets both expired (step 2) and re-added
+        // here as is_new=true. This is not wasteful: BlockLaneChanges uses a BTreeMap keyed
+        // by lane_key, so update_lane overwrites the expire_lane entry — the walk sees only
+        // the final leaf. The two count operations cancel: expired+1, new+1 → net zero.
+        let mut new_lane_count = 0;
         for lu in lane_updates {
+            if lu.is_new {
+                new_lane_count += 1;
+            }
             proc.update_lane(lu.lane_key, lu.new_tip);
         }
 
@@ -649,7 +659,14 @@ impl VirtualStateProcessor {
 
         let parent_seq_commit = parent_header.accepted_id_merkle_root;
         let data = self.collect_mergeset_seq_data(ctx);
-        let lane_updates = self.resolve_lane_updates(&data, &context_hash, current_blue_score, selected_parent, parent_seq_commit);
+        let lane_updates = self.resolve_lane_updates(
+            &data,
+            &context_hash,
+            current_blue_score,
+            parent_header.blue_score,
+            selected_parent,
+            parent_seq_commit,
+        );
         let (parent_lanes_root, parent_active_lanes) = self.get_parent_smt_metadata(selected_parent, parent_header.blue_score);
 
         let (hash, build) = self.build_seq_commit(

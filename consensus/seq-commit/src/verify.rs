@@ -34,8 +34,7 @@ pub enum SmtVerifyError {
     ProofError(#[from] kaspa_smt::proof::SmtProofError),
 }
 
-/// Verify that the metadata is consistent with the pruning point header's
-/// `accepted_id_merkle_root` (= seq_commit).
+/// Verify that the metadata is consistent with the header's `accepted_id_merkle_root` (= seq_commit).
 pub fn verify_smt_metadata(
     metadata: &SmtMetadata<'_>,
     expected_seq_commit: Hash,
@@ -88,9 +87,8 @@ mod tests {
         Hash::from_bytes(bytes)
     }
 
-    fn lh(lane_id: &LaneId, lane_tip: &Hash, blue_score: u64) -> Hash {
-        let lk = lane_key(lane_id);
-        smt_leaf_hash(&SmtLeafInput { lane_key: &lk, lane_tip, blue_score })
+    fn lh(_lane_id: &LaneId, lane_tip: &Hash, blue_score: u64) -> Hash {
+        smt_leaf_hash(&SmtLeafInput { lane_tip, blue_score })
     }
 
     fn build_ref(entries: &[(LaneId, Hash, u64)]) -> (Hash, Smt) {

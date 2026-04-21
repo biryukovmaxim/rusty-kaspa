@@ -79,8 +79,10 @@ use kaspa_database::prelude::{StoreError, StoreResultExt, StoreResultUnitExt};
 use kaspa_hashes::{Hash, ZERO_HASH};
 use kaspa_muhash::MuHash;
 use kaspa_notify::{events::EventType, notifier::Notify};
+use kaspa_smt_store::processor::SmtReadBounds;
 use once_cell::unsync::Lazy;
 
+use super::bounds::SeqCommitBounds;
 use super::errors::{PruningImportError, PruningImportResult};
 use crossbeam_channel::{Receiver as CrossbeamReceiver, Sender as CrossbeamSender};
 use itertools::Itertools;
@@ -618,7 +620,14 @@ impl VirtualStateProcessor {
 
         let parent_seq_commit = parent_header.accepted_id_merkle_root;
         let data = self.collect_mergeset_seq_data(ctx);
-        let lane_updates = self.resolve_lane_updates(&data, &context_hash, current_blue_score, selected_parent, parent_seq_commit);
+        let lane_updates = self.resolve_lane_updates(
+            &data,
+            &context_hash,
+            current_blue_score,
+            parent_header.blue_score,
+            selected_parent,
+            parent_seq_commit,
+        );
         let (parent_lanes_root, parent_active_lanes) = self.get_parent_smt_metadata(selected_parent, parent_header.blue_score);
 
         let (commit, _build) = self.build_seq_commit(
@@ -633,6 +642,73 @@ impl VirtualStateProcessor {
             selected_parent,
         );
         commit
+    }
+
+    /// Build the `accepted_id_digests` for the genesis block.
+    ///
+    /// Pre-KIP21: Vec of genesis tx ids.
+    /// Post-KIP21: single-element vec with the genesis `seq_commit`.
+    pub(super) fn compute_genesis_accepted_id_digests(&self, ghostdag_data: &GhostdagData) -> Vec<Hash> {
+        let txs = self.genesis.build_genesis_transactions();
+        if !self.covenants_activation.is_active(self.genesis.daa_score) {
+            return txs.iter().map(|tx| tx.id()).collect();
+        }
+
+        use kaspa_consensus_core::BlueWorkType;
+        use kaspa_hashes::SeqCommitActiveNode;
+        use kaspa_seq_commit::hashing::{
+            activity_digest_lane, activity_leaf, lane_key, lane_tip_next, mergeset_context_hash, miner_payload_leaf,
+            miner_payload_root, payload_and_context_digest, seq_commit, seq_commit_timestamp, seq_state_root, smt_leaf_hash,
+        };
+        use kaspa_seq_commit::types::{LaneTipInput, MergesetContext, MinerPayloadLeafInput, SeqCommitInput, SeqState, SmtLeafInput};
+        use kaspa_smt::SmtHasher;
+
+        let blue_score = ghostdag_data.blue_score;
+        let context_hash = mergeset_context_hash(&MergesetContext {
+            timestamp: seq_commit_timestamp(self.genesis.timestamp),
+            daa_score: self.genesis.daa_score,
+            blue_score,
+        });
+
+        // Collect per-lane activity leaves from genesis transactions.
+        let mut lane_activities: std::collections::BTreeMap<[u8; 20], Vec<Hash>> = std::collections::BTreeMap::new();
+        for (idx, tx) in txs.iter().enumerate() {
+            lane_activities.entry(*tx.subnetwork_id.as_bytes()).or_default().push(activity_leaf(&tx.id(), tx.version, idx as u32));
+        }
+
+        // Miner payload root for the single genesis block.
+        let mpl = miner_payload_leaf(MinerPayloadLeafInput {
+            block_hash: &self.genesis.hash,
+            blue_work_be_bytes: &BlueWorkType::ZERO.to_be_bytes(),
+            payload: self.genesis.coinbase_payload,
+        });
+        let payload_root = miner_payload_root(std::iter::once(mpl));
+
+        // Build SMT over an in-memory store — new lanes anchor at ZERO_HASH.
+        let parent_seq_commit = ZERO_HASH;
+        let leaf_updates = kaspa_smt::store::SortedLeafUpdates::from_unsorted(lane_activities.iter().map(|(lane_id, leaves)| {
+            let lk = lane_key(lane_id);
+            let ad = activity_digest_lane(leaves.iter().copied());
+            let tip = lane_tip_next(&LaneTipInput {
+                parent_ref: &parent_seq_commit,
+                lane_key: &lk,
+                activity_digest: &ad,
+                context_hash: &context_hash,
+            });
+            kaspa_smt::store::LeafUpdate { key: lk, leaf_hash: smt_leaf_hash(&SmtLeafInput { lane_tip: &tip, blue_score }) }
+        }));
+        let empty_store = kaspa_smt::store::BTreeSmtStore::new();
+        let (lanes_root, _) = kaspa_smt::tree::compute_root_update::<SeqCommitActiveNode, _>(
+            &empty_store,
+            SeqCommitActiveNode::empty_root(),
+            leaf_updates,
+        )
+        .unwrap();
+
+        let pd = payload_and_context_digest(&context_hash, &payload_root);
+        let state_root = seq_state_root(&SeqState { lanes_root: &lanes_root, payload_and_ctx_digest: &pd });
+        let commit = seq_commit(&SeqCommitInput { parent_seq_commit: &parent_seq_commit, state_root: &state_root });
+        vec![commit]
     }
 
     /// Read stored SMT metadata for the pruning point.
@@ -656,8 +732,9 @@ impl VirtualStateProcessor {
         let pp_header = self.headers_store.get_header(pp).unwrap();
         let parent_seq_commit = self.headers_store.get_header(pp_header.direct_parents()[0]).unwrap().accepted_id_merkle_root;
 
-        let min_score = pp_header.blue_score.saturating_sub(self.finality_depth);
-        let lanes_root = self.smt_stores.get_lanes_root(pp_header.blue_score, min_score, |bh| self.is_smt_canonical(bh, pp));
+        let lanes_root = self
+            .smt_stores
+            .get_lanes_root(SmtReadBounds::for_pov(pp_header.blue_score, self.finality_depth), |bh| self.is_smt_canonical(bh, pp));
 
         Ok(SmtExportMetadata {
             lanes_root,
@@ -683,7 +760,9 @@ impl VirtualStateProcessor {
     /// lanes_root comes from the branch version store; active_lanes_count from metadata.
     pub(super) fn get_parent_smt_metadata(&self, selected_parent: Hash, parent_blue_score: u64) -> (Hash, u64) {
         let active_lanes_count = self.smt_metadata_store.get(selected_parent).map(|meta| meta.active_lanes_count).unwrap_or(0);
-        let lanes_root = self.smt_stores.get_lanes_root(parent_blue_score, 0, |bh| self.is_smt_canonical(bh, selected_parent));
+        let lanes_root = self.smt_stores.get_lanes_root(SmtReadBounds::for_pov(parent_blue_score, self.finality_depth), |bh| {
+            self.is_smt_canonical(bh, selected_parent)
+        });
         (lanes_root, active_lanes_count)
     }
 
@@ -692,33 +771,28 @@ impl VirtualStateProcessor {
     pub(super) fn expire_stale_lanes(
         &self,
         proc: &mut kaspa_smt_store::processor::SmtProcessor,
-        parent_blue_score: u64,
-        current_blue_score: u64,
+        bounds: SeqCommitBounds,
         selected_parent: Hash,
     ) -> u64 {
-        let prev_min = parent_blue_score.saturating_sub(self.finality_depth);
-        let curr_min = current_blue_score.saturating_sub(self.finality_depth);
-
-        if curr_min <= prev_min {
+        let read_bounds = bounds.selected_parent_read_bounds();
+        let Some(expired_range) = bounds.newly_expired_range() else {
             return 0;
-        }
-
+        };
+        let mut seen = std::collections::BTreeSet::new();
         let mut expired = 0u64;
         // Iterate score_index entries in [prev_min, curr_min) to find lanes that might expire
-        for entry in self.smt_stores.score_index.get_leaf_updates(curr_min.saturating_sub(1), prev_min) {
+        for entry in self.smt_stores.score_index.get_leaf_updates(expired_range) {
             let entry = entry.unwrap();
             // Only process canonical entries
             if !self.is_smt_canonical(entry.block_hash(), selected_parent) {
                 continue;
             }
-            for lk in entry.data().iter() {
-                // Check if this lane has a newer canonical version (within the active window)
-                let has_newer = self
-                    .smt_stores
-                    .get_lane(*lk, current_blue_score, curr_min, |bh| self.is_smt_canonical(bh, selected_parent))
-                    .is_some();
+            for lk in entry.data().iter().filter(|lk| seen.insert(**lk)) {
+                // Check if this lane has a newer canonical version within [curr_min, parent].
+                // target=parent filters anticone entries at (parent, current] at the seek level.
+                let is_expired = self.smt_stores.get_lane(*lk, read_bounds, |bh| self.is_smt_canonical(bh, selected_parent)).is_none();
 
-                if !has_newer {
+                if is_expired {
                     proc.expire_lane(*lk);
                     expired += 1;
                 }
@@ -1315,14 +1389,13 @@ impl VirtualStateProcessor {
         self.db.write(batch).unwrap();
         drop(selected_chain_write);
 
-        // Init virtual state
+        // Init virtual state — pre-compute accepted_id_digests here so
+        // VirtualState::from_genesis stays a plain data constructor.
+        let ghostdag_data = self.ghostdag_manager.ghostdag(&[self.genesis.hash]);
+        let accepted_id_digests = self.compute_genesis_accepted_id_digests(&ghostdag_data);
         self.commit_virtual_state(
             self.virtual_stores.upgradable_read(),
-            Arc::new(VirtualState::from_genesis(
-                &self.genesis,
-                self.ghostdag_manager.ghostdag(&[self.genesis.hash]),
-                self.covenants_activation,
-            )),
+            Arc::new(VirtualState::from_genesis(&self.genesis, ghostdag_data, accepted_id_digests)),
             &Default::default(),
             &Default::default(),
         );

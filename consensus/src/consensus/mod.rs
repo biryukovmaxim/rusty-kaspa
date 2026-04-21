@@ -47,7 +47,7 @@ use kaspa_consensus_core::{
     BlockHashSet, BlueWorkType, ChainPath, HashMapCustomHasher,
     acceptance_data::{AcceptanceData, MergesetBlockAcceptanceData},
     api::{
-        BlockValidationFutures, ConsensusApi, ConsensusStats,
+        BlockValidationFutures, ConsensusApi, ConsensusStats, ImportLaneBatchIterator,
         args::{TransactionValidationArgs, TransactionValidationBatchArgs},
         stats::BlockCount,
     },
@@ -88,6 +88,7 @@ use kaspa_core::info;
 use kaspa_database::prelude::StoreResultExt;
 use kaspa_hashes::Hash;
 use kaspa_muhash::MuHash;
+use kaspa_smt_store::processor::SmtReadBounds;
 use kaspa_txscript::caches::TxScriptCacheCounters;
 use kaspa_utils::arc::ArcExtensions;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -1135,25 +1136,27 @@ impl ConsensusApi for Consensus {
         lanes_root: Hash,
         payload_and_ctx_digest: Hash,
         expected_lane_count: u64,
-        mut rx: tokio::sync::mpsc::Receiver<Vec<kaspa_consensus_core::api::ImportLane>>,
+        lane_batches: ImportLaneBatchIterator<'_>,
     ) -> PruningImportResult<()> {
         use kaspa_hashes::ZERO_HASH;
         use kaspa_smt_store::streaming_import::streaming_import;
 
         let pp_header = self.storage.headers_store.get_header(new_pruning_point).unwrap();
-        let result = streaming_import(
-            &self.db,
-            &self.storage.smt_stores,
-            pp_header.blue_score,
-            ZERO_HASH,
-            expected_lane_count,
-            lanes_root,
-            // Chunks arrive pre-sized (up to SMT_CHUNK_SIZE) from the wire-level chunker —
-            // forwarded as-is, no re-batching.
-            std::iter::from_fn(|| rx.blocking_recv()),
-            4096,
-        )
-        .map_err(|e| PruningImportError::SmtStoreError(format!("{e}")))?;
+        let result = self.virtual_processor.install(|| {
+            streaming_import(
+                &self.db,
+                &self.storage.smt_stores,
+                pp_header.blue_score,
+                ZERO_HASH,
+                expected_lane_count,
+                lanes_root,
+                // Chunks arrive pre-sized (up to SMT_CHUNK_SIZE) from the wire-level chunker —
+                // forwarded as-is, no re-batching.
+                lane_batches,
+                4096,
+            )
+            .map_err(|e| PruningImportError::SmtStoreError(format!("{e}")))
+        })?;
 
         if result.root != lanes_root {
             return Err(PruningImportError::SmtRootMismatch { expected: lanes_root, computed: result.root });
@@ -1225,7 +1228,7 @@ impl ConsensusApi for Consensus {
                 let vp_proof = vp.clone();
                 Some(
                     smt_stores_proof
-                        .prove_lane(&lane_key, max_score, min_score, move |bh| vp_proof.is_smt_canonical(bh, pp))
+                        .prove_lane(&lane_key, SmtReadBounds::new(max_score, min_score), move |bh| vp_proof.is_smt_canonical(bh, pp))
                         .map_err(|e| ConsensusError::GeneralOwned(format!("prove_lane: {e}")))?,
                 )
             } else {
