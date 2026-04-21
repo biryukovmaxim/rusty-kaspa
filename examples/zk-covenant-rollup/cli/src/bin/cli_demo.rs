@@ -14,7 +14,7 @@ use kaspa_rpc_core::{GetBlockDagInfoResponse, RpcTransaction};
 use kaspa_txscript::script_builder::ScriptBuilder;
 use kaspa_txscript::zk_precompiles::tags::ZkTag;
 use kaspa_txscript::{pay_to_address_script, pay_to_script_hash_script};
-use kaspa_wrpc_client::prelude::{NetworkId, NetworkType, Notification};
+use kaspa_wrpc_client::prelude::{NetworkId, Notification};
 use risc0_zkvm::sha::Digestible;
 use zk_covenant_rollup_core::permission_tree::{perm_empty_leaf_hash, PermissionTree};
 use zk_covenant_rollup_core::seq_commit::{activity_leaf, from_hash, lane_tip_next, to_hash, ActivityDigestBuilder};
@@ -38,8 +38,14 @@ use zk_covenant_rollup_tui::prover::RollupProver;
 #[command(name = "cli-demo")]
 #[command(about = "Linear CLI for the ZK Covenant Rollup deploy→sync→prove→submit flow")]
 struct Args {
+    /// Kaspa network id: "mainnet", "testnet-N", "devnet", or "simnet".
+    /// Determines address prefix and default wRPC port.
+    #[arg(long, default_value = "testnet-12")]
+    network: String,
+
     /// wRPC endpoint. Formats: ip, ip:port, :port, or omitted.
-    /// Default IP: 127.0.0.1, default port: 17210
+    /// Default IP: 127.0.0.1, default port is selected from --network
+    /// (mainnet=17110, testnet=17210, simnet=17510, devnet=17610).
     #[arg(long)]
     rpc: Option<String>,
 
@@ -104,13 +110,13 @@ struct WithdrawContinuation {
 
 // ── Arg parsing helpers ──
 
-fn parse_rpc(input: Option<&str>) -> String {
+fn parse_rpc(input: Option<&str>, default_port: u16) -> String {
     match input {
-        None | Some("") => "ws://127.0.0.1:17210".to_string(),
+        None | Some("") => format!("ws://127.0.0.1:{default_port}"),
         Some(s) if s.starts_with("ws://") || s.starts_with("wss://") => s.to_string(),
         Some(s) if s.starts_with(':') => format!("ws://127.0.0.1{s}"),
         Some(s) if s.contains(':') => format!("ws://{s}"),
-        Some(s) => format!("ws://{s}:17210"),
+        Some(s) => format!("ws://{s}:{default_port}"),
     }
 }
 
@@ -980,13 +986,16 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let proof_kind = parse_proof_kind(&args.proof_kind)?;
     let backend = parse_backend(&args.backend)?;
-    let url = parse_rpc(args.rpc.as_deref());
+    let network_id: NetworkId = args.network.parse().with_context(|| format!("invalid --network: {}", args.network))?;
+    let prefix: Prefix = network_id.network_type().into();
+    let default_port = network_id.network_type().default_borsh_rpc_port();
+    let url = parse_rpc(args.rpc.as_deref(), default_port);
 
-    println!("Phase 1: Connecting to {url} ...");
-    let (node, dag_info) = connect(&url, NetworkId::with_suffix(NetworkType::Testnet, 12)).await?;
+    println!("Phase 1: Connecting to {url} (network: {network_id}) ...");
+    let (node, dag_info) = connect(&url, network_id).await?;
 
     println!("\nPhase 2: Setting up keypair...");
-    let keypair = setup_keypair(args.privkey.as_deref(), Prefix::Testnet)?;
+    let keypair = setup_keypair(args.privkey.as_deref(), prefix)?;
 
     // L2 operation amounts
     let deposit_amount: u64 = 50_000_000;
@@ -1079,7 +1088,7 @@ async fn main() -> Result<()> {
     let sk2 = secp256k1::SecretKey::new(&mut rand::thread_rng());
     let pk2_full = sk2.public_key(secp256k1::SECP256K1);
     let (xonly_pk2, _) = pk2_full.x_only_public_key();
-    let addr2 = Address::new(Prefix::Testnet, Version::PubKey, &xonly_pk2.serialize());
+    let addr2 = Address::new(prefix, Version::PubKey, &xonly_pk2.serialize());
     let spk2 = pay_to_address_script(&addr2);
     let pk2_hash = Hash::from_bytes(xonly_pk2.serialize());
     println!("  Address #2: {addr2}");
@@ -1153,7 +1162,7 @@ async fn main() -> Result<()> {
     // ── Phase 15: Withdraw #1 ────────────────────────────────────────────
 
     println!("\nPhase 15: Withdraw exit #1 ({exit1_amount} sompi)...");
-    let delegate_addr = derive_delegate_address(deploy.on_chain_covenant_id, Prefix::Testnet);
+    let delegate_addr = derive_delegate_address(deploy.on_chain_covenant_id, prefix);
     println!("  Delegate address: {delegate_addr}");
 
     let perm_redeem = prove.perm_redeem_script.as_ref().context("No permission redeem script — batch had no exits?")?;
