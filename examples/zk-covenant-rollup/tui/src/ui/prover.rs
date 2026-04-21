@@ -56,7 +56,7 @@ fn draw_chain_state(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     if let Some(prover) = &app.prover {
         let root_hex = faster_hex::hex_string(bytemuck::bytes_of(&prover.state_root));
         lines.push(Line::from(format!("State root:       {}..{}", &root_hex[..8], &root_hex[root_hex.len() - 8..])));
-        lines.push(Line::from(format!("Seq commitment:   {}", prover.seq_commitment)));
+        lines.push(Line::from(format!("Lane tip:         {}", prover.lane_tip)));
         lines.push(Line::from(format!("Last block:       {}", prover.last_processed_block)));
         lines.push(Line::from(format!("Accumulated:      {} blocks (since last proof)", prover.accumulated_blocks())));
 

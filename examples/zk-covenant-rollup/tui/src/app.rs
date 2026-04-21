@@ -21,8 +21,10 @@ use kaspa_wrpc_client::prelude::Notification;
 use ratatui::style::Color;
 use risc0_zkvm::sha::Digestible;
 use tokio::sync::mpsc;
+use zk_covenant_rollup_core::seq_commit::{from_hash, CommitmentWitness};
 use zk_covenant_rollup_core::state::empty_tree_root;
 use zk_covenant_rollup_core::PublicInput;
+use zk_covenant_rollup_core::ROLLUP_LANE_KEY;
 use zk_covenant_rollup_host::mock_chain::from_bytes;
 use zk_covenant_rollup_host::redeem::build_redeem_script;
 use zk_covenant_rollup_methods::ZK_COVENANT_ROLLUP_GUEST_ID;
@@ -230,11 +232,30 @@ enum BgResult {
         covenant_value: u64,
         on_chain_covenant_id: Hash,
         deploy_starting_block: Hash,
+        /// Timestamp of `deploy_starting_block` — needed for the prover's first
+        /// `MergesetContext.timestamp` (see `seq_commit_timestamp`).
+        deploy_starting_block_timestamp: u64,
         deploy_initial_seq: Hash,
     },
     /// VCC fetch or tx build failed — deploy aborted.
     DeployFailed {
         covenant_id: CovenantId,
+        error: String,
+    },
+    /// `get_seq_commit_lane_proof` RPC succeeded — caller should plug the
+    /// witness into `prover.set_lane_proof(...)` before proving.
+    LaneProofFetched {
+        /// Block the witness is valid for; proving must not advance past it
+        /// before the witness is consumed or it will verify against a stale commit.
+        block_hash: Hash,
+        witness: CommitmentWitness,
+        smt_proof_bytes: Vec<u8>,
+        /// `true` if proving was blocked on this fetch (driver should kick it).
+        autostart_prove: bool,
+    },
+    /// `get_seq_commit_lane_proof` RPC failed.
+    LaneProofFetchFailed {
+        block_hash: Hash,
         error: String,
     },
 }
@@ -321,6 +342,9 @@ pub struct App {
     /// True while a FetchVccAndDeploy task is in-flight (prevents pressing 'd' twice).
     pub deploy_in_progress: bool,
 
+    /// True while a `FetchLaneProof` task is in-flight (prevents double-firing).
+    pub lane_proof_fetch_active: bool,
+
     /// Number of SubmitTransaction tasks currently in-flight.
     pub pending_submit_count: usize,
 
@@ -377,7 +401,9 @@ enum PendingOp {
     },
     GenerateProof {
         gen: u64,
-        input: ProveInput,
+        // Boxed: ProveInput carries the full proving-window payload (per-block txs +
+        // lane indices + context hashes + SMT proof), which dwarfs the other variants.
+        input: Box<ProveInput>,
         backend: ProverBackend,
         kind: ProofKind,
         public_input: PublicInput,
@@ -398,6 +424,16 @@ enum PendingOp {
         network_prefix: Prefix,
         pruning_point: Hash,
     },
+    /// Call `get_seq_commit_lane_proof` for the given block and feed the result
+    /// back to the prover via [`BgResult::LaneProofFetched`].
+    ///
+    /// `autostart_prove` = `true` means proving was gated on this fetch; the
+    /// completion handler will re-invoke [`App::start_proving`].
+    FetchLaneProof {
+        block_hash: Hash,
+        lane_key: Hash,
+        autostart_prove: bool,
+    },
 }
 
 /// Deferred side-effects of submitted transactions.
@@ -412,6 +448,8 @@ enum PendingTxEffect {
         on_chain_covenant_id: Hash,
         /// Chain block that was current when the deploy tx was built (prover start).
         deploy_starting_block: Hash,
+        /// Timestamp of `deploy_starting_block`'s header (prover's seed selected-parent timestamp).
+        deploy_starting_block_timestamp: u64,
         /// Sequence commitment embedded in the deploy redeem script (prover initial_seq).
         deploy_initial_seq: Hash,
     },
@@ -524,6 +562,7 @@ impl App {
             bg_rx,
             chain_sync_active: false,
             deploy_in_progress: false,
+            lane_proof_fetch_active: false,
             pending_submit_count: 0,
             pending_bg_count: 0,
             clipboard: None,
@@ -732,13 +771,18 @@ impl App {
                     if is_deployed && self.prover.is_none() {
                         let rec = &self.covenants[self.covenant_list_index].1;
                         let starting_block = rec.deploy_starting_block.unwrap_or(self.pruning_point);
-                        let initial_seq = rec.deploy_initial_seq.unwrap_or_else(|| {
-                            Hash::default()
-                        });
+                        let starting_block_timestamp = rec.deploy_starting_block_timestamp.unwrap_or(0);
+                        let initial_seq = rec.deploy_initial_seq.unwrap_or_default();
                         let prover_cov_id = rec.on_chain_covenant_id.unwrap_or(id);
                         let initial_state_root = zk_covenant_rollup_core::state::empty_tree_root();
-                        self.prover =
-                            Some(RollupProver::new(prover_cov_id, initial_state_root, initial_seq, starting_block, self.db.clone()));
+                        self.prover = Some(RollupProver::new(
+                            prover_cov_id,
+                            initial_state_root,
+                            initial_seq,
+                            starting_block,
+                            starting_block_timestamp,
+                            self.db.clone(),
+                        ));
                         self.log("Auto-initialized prover for deployed covenant".into());
                         self.pending_ops.push(PendingOp::FetchAndProcessChain);
                     }
@@ -769,6 +813,7 @@ impl App {
             proof_kind: 0,
             on_chain_covenant_id: None,
             deploy_starting_block: None,
+            deploy_starting_block_timestamp: None,
             deploy_initial_seq: None,
         };
 
@@ -1562,10 +1607,31 @@ impl App {
         // Capture block_prove_to before the snapshot resets the proving window
         let block_prove_to = prover.last_processed_block;
 
-        let snapshot = match prover.take_prove_snapshot() {
-            Some(s) => s,
-            None => {
-                self.log("Failed to create proving snapshot".into());
+        // Proving requires a fresh lane-proof witness for `block_prove_to`.
+        // If it isn't loaded, kick off the RPC and retry once the result arrives.
+        if prover.pending_lane_proof.is_none() {
+            if !self.lane_proof_fetch_active {
+                self.lane_proof_fetch_active = true;
+                self.log(format!("Fetching lane proof for block {block_prove_to}..."));
+                self.pending_ops.push(PendingOp::FetchLaneProof {
+                    block_hash: block_prove_to,
+                    lane_key: Hash::from_bytes(bytemuck::cast(ROLLUP_LANE_KEY)),
+                    autostart_prove: true,
+                });
+            } else {
+                self.log("Lane proof already being fetched — will auto-start proving when it arrives".into());
+            }
+            return;
+        }
+
+        let snapshot = match prover.try_take_prove_snapshot() {
+            Ok(s) => s,
+            Err(crate::prover::ProveSnapshotSkipReason::NoAccumulatedBlocks) => {
+                self.log("No blocks accumulated to prove".into());
+                return;
+            }
+            Err(crate::prover::ProveSnapshotSkipReason::MissingLaneProof) => {
+                self.log("Lane proof missing — retry after fetch completes".into());
                 return;
             }
         };
@@ -1585,7 +1651,7 @@ impl App {
 
         self.pending_ops.push(PendingOp::GenerateProof {
             gen,
-            input: snapshot.input,
+            input: Box::new(snapshot.input),
             backend: self.prover_backend,
             kind: proof_kind,
             public_input,
@@ -1675,7 +1741,13 @@ impl App {
         // Build sig_script
         let sig_script = match proof.proof_kind {
             ProofKind::Succinct => {
-                match self.build_succinct_sig_script(&proof.receipt, proof.block_prove_to, &new_lane_tip, &new_state_hash, &input_redeem) {
+                match self.build_succinct_sig_script(
+                    &proof.receipt,
+                    proof.block_prove_to,
+                    &new_lane_tip,
+                    &new_state_hash,
+                    &input_redeem,
+                ) {
                     Ok(s) => s,
                     Err(e) => {
                         self.log(format!("Failed to build succinct sig_script: {e}"));
@@ -1684,7 +1756,13 @@ impl App {
                 }
             }
             ProofKind::Groth16 => {
-                match self.build_groth16_sig_script(&proof.receipt, proof.block_prove_to, &new_lane_tip, &new_state_hash, &input_redeem) {
+                match self.build_groth16_sig_script(
+                    &proof.receipt,
+                    proof.block_prove_to,
+                    &new_lane_tip,
+                    &new_state_hash,
+                    &input_redeem,
+                ) {
                     Ok(s) => s,
                     Err(e) => {
                         self.log(format!("Failed to build groth16 sig_script: {e}"));
@@ -1729,18 +1807,8 @@ impl App {
         // 2 inputs: covenant + collateral. v1 inputs commit a ComputeBudget; we seed both at
         // 0 and overwrite input[0] (the ZK proof) below via `measure_compute_budget_for_input`.
         let mut inputs = vec![
-            TransactionInput::new_with_compute_budget(
-                TransactionOutpoint::new(covenant_utxo.0, covenant_utxo.1),
-                sig_script,
-                0,
-                0,
-            ),
-            TransactionInput::new_with_compute_budget(
-                TransactionOutpoint::new(collateral.tx_id, collateral.index),
-                vec![],
-                0,
-                0,
-            ),
+            TransactionInput::new_with_compute_budget(TransactionOutpoint::new(covenant_utxo.0, covenant_utxo.1), sig_script, 0, 0),
+            TransactionInput::new_with_compute_budget(TransactionOutpoint::new(collateral.tx_id, collateral.index), vec![], 0, 0),
         ];
 
         // Outputs: [0]=covenant (full value), [1]=permission if exists, [last]=change
@@ -1766,13 +1834,8 @@ impl App {
         // Seed input[0] compute budget by running the ZK script once. calc_non_contextual_masses
         // panics on v1 transactions whose inputs have not had a ComputeBudget committed.
         {
-            let covenant_entry_draft = UtxoEntry::new(
-                covenant_value,
-                pay_to_script_hash_script(&input_redeem),
-                0,
-                true,
-                Some(covenant_id_hash),
-            );
+            let covenant_entry_draft =
+                UtxoEntry::new(covenant_value, pay_to_script_hash_script(&input_redeem), 0, true, Some(covenant_id_hash));
             let collateral_entry_draft = UtxoEntry::new(collateral.amount, deployer_spk.clone(), 0, false, None);
             let seq_commit_hash = Hash::from_slice(bytemuck::bytes_of(&new_seq_commit));
             let mut map = std::collections::HashMap::new();
@@ -2349,6 +2412,30 @@ impl App {
                         });
                     }
                 }
+                PendingOp::FetchLaneProof { block_hash, lane_key, autostart_prove } => {
+                    let node = self.node.clone();
+                    let tx = self.bg_tx.clone();
+                    tokio::spawn(async move {
+                        match node.get_seq_commit_lane_proof(block_hash, lane_key).await {
+                            Ok(resp) => {
+                                let witness = CommitmentWitness {
+                                    payload_and_ctx_digest: from_hash(resp.payload_and_ctx_digest),
+                                    parent_seq_commit: from_hash(resp.parent_seq_commit),
+                                    blue_score: resp.lane_blue_score.unwrap_or(0),
+                                };
+                                let _ = tx.send(BgResult::LaneProofFetched {
+                                    block_hash,
+                                    witness,
+                                    smt_proof_bytes: resp.smt_proof,
+                                    autostart_prove,
+                                });
+                            }
+                            Err(e) => {
+                                let _ = tx.send(BgResult::LaneProofFetchFailed { block_hash, error: e.to_string() });
+                            }
+                        }
+                    });
+                }
                 PendingOp::SubmitTransaction(transaction) => {
                     let tx_id = transaction.id();
                     // Mark inputs spent immediately (before background submission)
@@ -2457,6 +2544,7 @@ impl App {
                         };
 
                         let deploy_initial_seq = block.header.accepted_id_merkle_root;
+                        let deploy_starting_block_timestamp = block.header.timestamp;
 
                         // ── Phase 3: build and sign the deploy tx ──
                         let deployer_sk = match secp256k1::SecretKey::from_slice(&deployer_sk_bytes) {
@@ -2517,6 +2605,7 @@ impl App {
                             covenant_value,
                             on_chain_covenant_id,
                             deploy_starting_block,
+                            deploy_starting_block_timestamp,
                             deploy_initial_seq,
                         });
                     });
@@ -2676,8 +2765,16 @@ impl App {
                 self.log(format!("Failed to subscribe UTXOs: {e}"));
             }
             BgResult::ChainFetched(response) => {
-                if let Some(prover) = &mut self.prover {
+                let processed = self.prover.as_mut().map(|prover| {
                     let result = prover.process_chain_response(&response);
+                    if result.blocks_processed > 0 {
+                        // The lane-proof witness was tied to the previous tip; the
+                        // accumulator has now advanced, so any cached witness is stale.
+                        prover.clear_lane_proof();
+                    }
+                    result
+                });
+                if let Some(result) = processed {
                     let root_hex = faster_hex::hex_string(bytemuck::bytes_of(&result.new_state_root));
                     self.proving_status = format!(
                         "Processed {} blocks, {} txs, {} actions | root: {}..{}",
@@ -2731,6 +2828,7 @@ impl App {
                             covenant_value,
                             on_chain_covenant_id,
                             deploy_starting_block,
+                            deploy_starting_block_timestamp,
                             deploy_initial_seq,
                         } => {
                             if let Ok(Some(mut rec)) = self.db.get_covenant(covenant_id) {
@@ -2739,6 +2837,7 @@ impl App {
                                 rec.covenant_value = Some(covenant_value);
                                 rec.on_chain_covenant_id = Some(on_chain_covenant_id);
                                 rec.deploy_starting_block = Some(deploy_starting_block);
+                                rec.deploy_starting_block_timestamp = Some(deploy_starting_block_timestamp);
                                 rec.deploy_initial_seq = Some(deploy_initial_seq);
                                 if let Err(e) = self.db.put_covenant(covenant_id, &rec) {
                                     self.log(format!("Failed to mark covenant as deployed: {e}"));
@@ -2756,6 +2855,7 @@ impl App {
                                             initial_state_root,
                                             deploy_initial_seq,
                                             deploy_starting_block,
+                                            deploy_starting_block_timestamp,
                                             self.db.clone(),
                                         ));
                                         self.log("Auto-initialized prover after deploy".into());
@@ -2877,6 +2977,7 @@ impl App {
                         let covenant_id = self.covenants[cov_idx].0;
                         let state = ProvingState {
                             last_proved_block_hash: prover.last_processed_block,
+                            last_proved_block_timestamp: prover.last_processed_block_timestamp,
                             state_root: Hash::from_bytes(bytemuck::cast(prover.state_root)),
                             seq_commitment: prover.lane_tip,
                             proof_count: self.db.get_proving_state(covenant_id).ok().flatten().map(|s| s.proof_count + 1).unwrap_or(1),
@@ -2912,6 +3013,7 @@ impl App {
                 covenant_value,
                 on_chain_covenant_id,
                 deploy_starting_block,
+                deploy_starting_block_timestamp,
                 deploy_initial_seq,
             } => {
                 self.pending_bg_count = self.pending_bg_count.saturating_sub(1);
@@ -2930,6 +3032,7 @@ impl App {
                         covenant_value,
                         on_chain_covenant_id,
                         deploy_starting_block,
+                        deploy_starting_block_timestamp,
                         deploy_initial_seq,
                     },
                 );
@@ -2945,6 +3048,44 @@ impl App {
                 // A full un-mark would require storing the utxo outpoint; instead, log so the
                 // user can reload by reconnecting or restarting.
                 self.log("Note: refresh UTXOs if the deployer balance appears zero.".into());
+            }
+            BgResult::LaneProofFetched { block_hash, witness, smt_proof_bytes, autostart_prove } => {
+                self.lane_proof_fetch_active = false;
+                // Guard against race: the prover may have advanced past `block_hash`
+                // before the RPC returned. Applying a stale witness would silently
+                // make the next proof verify against the wrong commitment.
+                enum Outcome {
+                    Installed,
+                    Stale { current: Hash },
+                    NoProver,
+                }
+                let outcome = match &mut self.prover {
+                    Some(prover) if prover.last_processed_block == block_hash => {
+                        prover.set_lane_proof(witness, smt_proof_bytes);
+                        Outcome::Installed
+                    }
+                    Some(prover) => Outcome::Stale { current: prover.last_processed_block },
+                    None => Outcome::NoProver,
+                };
+                match outcome {
+                    Outcome::Installed => {
+                        self.log(format!("Lane proof installed for {block_hash}"));
+                        if autostart_prove {
+                            self.start_proving();
+                        }
+                    }
+                    Outcome::Stale { current } => {
+                        self.log(format!("Discarding stale lane proof for {block_hash} (prover advanced to {current})"));
+                    }
+                    Outcome::NoProver => {
+                        self.log("Lane proof arrived but prover is not initialized — dropping".into());
+                    }
+                }
+            }
+            BgResult::LaneProofFetchFailed { block_hash, error } => {
+                self.lane_proof_fetch_active = false;
+                self.flash(format!("Lane proof fetch failed: {error}"), Color::Red);
+                self.log(format!("get_seq_commit_lane_proof({block_hash}) failed: {error}"));
             }
         }
     }
@@ -3185,12 +3326,18 @@ impl App {
         if is_deployed && self.prover.is_none() {
             let rec = &self.covenants[0].1;
             let starting_block = rec.deploy_starting_block.unwrap_or(self.pruning_point);
-            let initial_seq = rec.deploy_initial_seq.unwrap_or_else(|| {
-                Hash::default()
-            });
+            let starting_block_timestamp = rec.deploy_starting_block_timestamp.unwrap_or(0);
+            let initial_seq = rec.deploy_initial_seq.unwrap_or_default();
             let prover_cov_id = rec.on_chain_covenant_id.unwrap_or(id);
             let initial_state_root = zk_covenant_rollup_core::state::empty_tree_root();
-            self.prover = Some(RollupProver::new(prover_cov_id, initial_state_root, initial_seq, starting_block, self.db.clone()));
+            self.prover = Some(RollupProver::new(
+                prover_cov_id,
+                initial_state_root,
+                initial_seq,
+                starting_block,
+                starting_block_timestamp,
+                self.db.clone(),
+            ));
             self.log("Auto-initialized prover for deployed covenant".into());
             self.pending_ops.push(PendingOp::FetchAndProcessChain);
         }
@@ -3690,6 +3837,7 @@ mod tests {
                 covenant_value: 100_000,
                 on_chain_covenant_id: fake_on_chain_id,
                 deploy_starting_block: Hash::default(),
+                deploy_starting_block_timestamp: 0,
                 deploy_initial_seq: Hash::default(),
             },
         );
@@ -3728,6 +3876,7 @@ mod tests {
                 covenant_value: 100_000,
                 on_chain_covenant_id: fake_on_chain_id,
                 deploy_starting_block: Hash::default(),
+                deploy_starting_block_timestamp: 0,
                 deploy_initial_seq: Hash::default(),
             },
         );

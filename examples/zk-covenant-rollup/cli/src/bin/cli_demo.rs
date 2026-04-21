@@ -17,9 +17,9 @@ use kaspa_txscript::{pay_to_address_script, pay_to_script_hash_script};
 use kaspa_wrpc_client::prelude::{NetworkId, NetworkType, Notification};
 use risc0_zkvm::sha::Digestible;
 use zk_covenant_rollup_core::permission_tree::{perm_empty_leaf_hash, PermissionTree};
-use zk_covenant_rollup_core::seq_commit::{ActivityDigestBuilder, activity_leaf, from_hash, lane_tip_next, to_hash};
-use zk_covenant_rollup_core::ROLLUP_LANE_KEY;
+use zk_covenant_rollup_core::seq_commit::{activity_leaf, from_hash, lane_tip_next, to_hash, ActivityDigestBuilder};
 use zk_covenant_rollup_core::state::empty_tree_root;
+use zk_covenant_rollup_core::ROLLUP_LANE_KEY;
 use zk_covenant_rollup_host::bridge::{build_delegate_entry_script, build_permission_redeem_converged, build_permission_sig_script};
 use zk_covenant_rollup_host::mock_chain::{from_bytes, MockSeqCommitAccessor};
 use zk_covenant_rollup_host::prove::{self as host_prove, ProofKind, ProveOutput, ProverBackend};
@@ -77,6 +77,7 @@ struct DeployResult {
     tx_id: Hash,
     on_chain_covenant_id: Hash,
     starting_block: Hash,
+    starting_block_timestamp: u64,
     initial_seq: Hash,
     output_value: u64,
     deploy_change: u64,
@@ -160,12 +161,7 @@ fn tx_to_rpc(tx: Transaction) -> RpcTransaction {
 }
 
 /// Converge on redeem script length (it encodes its own length, so iterate).
-fn converged_redeem_script(
-    prev_state_hash: [u32; 8],
-    prev_lane_tip: [u32; 8],
-    program_id: &[u8; 32],
-    zk_tag: &ZkTag,
-) -> Vec<u8> {
+fn converged_redeem_script(prev_state_hash: [u32; 8], prev_lane_tip: [u32; 8], program_id: &[u8; 32], zk_tag: &ZkTag) -> Vec<u8> {
     let mut computed_len: i64 = 75;
     loop {
         let script = build_redeem_script(prev_state_hash, prev_lane_tip, computed_len, program_id, zk_tag);
@@ -368,6 +364,7 @@ async fn deploy_covenant(
     // Get block header for initial seq commitment
     let block = node.get_block(starting_block, false).await.context("get_block failed")?;
     let initial_seq = block.header.accepted_id_merkle_root;
+    let starting_block_timestamp = block.header.timestamp;
     println!("  Initial seq commitment: {initial_seq}");
 
     // Build redeem script (convergence loop)
@@ -427,7 +424,15 @@ async fn deploy_covenant(
     node.submit_transaction(rpc_tx, false).await.context("Failed to submit deploy tx")?;
     println!("  Deploy tx submitted.");
 
-    Ok(DeployResult { tx_id, on_chain_covenant_id, starting_block, initial_seq, output_value: covenant_value, deploy_change: change })
+    Ok(DeployResult {
+        tx_id,
+        on_chain_covenant_id,
+        starting_block,
+        starting_block_timestamp,
+        initial_seq,
+        output_value: covenant_value,
+        deploy_change: change,
+    })
 }
 
 async fn wait_for_tx_confirmation(node: &KaspaNode, tx_id: Hash) -> Result<()> {
@@ -682,7 +687,8 @@ async fn build_and_submit_proof(
     let output_spk = pay_to_script_hash_script(&output_redeem);
 
     // Build sig_script for the covenant input
-    let sig_script = build_sig_script(&prove.output.receipt, proof_kind, prove.block_prove_to, &new_lane_tip, &new_state_hash, &input_redeem)?;
+    let sig_script =
+        build_sig_script(&prove.output.receipt, proof_kind, prove.block_prove_to, &new_lane_tip, &new_state_hash, &input_redeem)?;
     println!("  sig_script length: {} bytes", sig_script.len());
 
     // Find a collateral UTXO from the deployer's address
@@ -1020,7 +1026,14 @@ async fn main() -> Result<()> {
     println!("\nPhase 6: Initializing prover...");
     let db_path = std::env::temp_dir().join(format!("cli-demo-rollup-db-{}", deploy.on_chain_covenant_id));
     let db = std::sync::Arc::new(RollupDb::open(&db_path).context("open rollup db")?);
-    let mut prover = RollupProver::new(deploy.on_chain_covenant_id, empty_tree_root(), deploy.initial_seq, deploy.starting_block, db);
+    let mut prover = RollupProver::new(
+        deploy.on_chain_covenant_id,
+        empty_tree_root(),
+        deploy.initial_seq,
+        deploy.starting_block,
+        deploy.starting_block_timestamp,
+        db,
+    );
     println!("  Prover initialized. Starting block: {}", deploy.starting_block);
 
     // ── Phase 7: Entry deposit ────────────────────────────────────────────

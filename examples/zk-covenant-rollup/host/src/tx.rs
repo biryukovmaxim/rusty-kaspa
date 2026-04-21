@@ -181,8 +181,7 @@ pub fn measure_compute_budget_for_input(
     let mut vm =
         TxScriptEngine::from_transaction_input(&populated, &tx.inputs[input_idx], input_idx, &utxos[input_idx], exec_ctx, flags);
     vm.execute().expect("script must verify before measuring compute budget");
-    ComputeBudget::checked_covering_script_units(vm.used_script_units())
-        .expect("script units must fit in a u16 compute budget")
+    ComputeBudget::checked_covering_script_units(vm.used_script_units()).expect("script units must fit in a u16 compute budget")
 }
 
 #[cfg(test)]
@@ -409,12 +408,7 @@ mod tests {
         }
         let mut tx = Transaction::new(
             super::TX_VERSION_POST_COV_HF,
-            vec![TransactionInput::new_with_compute_budget(
-                TransactionOutpoint::new(Hash::from_u64_word(1), 1),
-                vec![],
-                10,
-                0,
-            )],
+            vec![TransactionInput::new_with_compute_budget(TransactionOutpoint::new(Hash::from_u64_word(1), 1), vec![], 10, 0)],
             outputs,
             0,
             super::SUBNETWORK_ID_NATIVE,

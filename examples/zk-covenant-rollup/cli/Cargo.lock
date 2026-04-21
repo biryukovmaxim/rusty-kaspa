@@ -8215,6 +8215,7 @@ dependencies = [
  "kaspa-merkle",
  "kaspa-notify",
  "kaspa-rpc-core",
+ "kaspa-seq-commit",
  "kaspa-txscript",
  "kaspa-wrpc-client",
  "open",

@@ -49,7 +49,7 @@ fn draw_state(frame: &mut Frame, app: &App, prover: &crate::prover::RollupProver
     let root_hex = faster_hex::hex_string(bytemuck::bytes_of(&prover.state_root));
     let current_lines = vec![
         Line::from(format!("State root:      {}..{}", &root_hex[..8], &root_hex[root_hex.len() - 8..])),
-        Line::from(format!("Seq commitment:  {}", prover.seq_commitment)),
+        Line::from(format!("Lane tip:        {}", prover.lane_tip)),
         Line::from(format!("Last block:      {}", prover.last_processed_block)),
         Line::from(format!("Exit leaves:     {}", prover.perm_builder.leaf_count())),
         Line::from(format!("Covenant:        {covenant_id_label}")),

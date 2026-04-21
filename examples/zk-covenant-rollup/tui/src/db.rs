@@ -60,6 +60,10 @@ pub struct CovenantRecord {
     /// Used as `starting_block` for prover initialization so the prover only
     /// processes blocks from the deploy point forward.
     pub deploy_starting_block: Option<Hash>,
+    /// Timestamp of `deploy_starting_block`'s header. Used as the
+    /// selected-parent timestamp when deriving the first block's
+    /// `MergesetContext.timestamp` — see `kaspa_seq_commit::hashing::seq_commit_timestamp`.
+    pub deploy_starting_block_timestamp: Option<u64>,
     /// Sequence commitment embedded in the deploy redeem script (and used as the
     /// prover's `initial_seq`). Computed from the VCC at deploy time.
     pub deploy_initial_seq: Option<Hash>,
@@ -88,6 +92,9 @@ pub struct UtxoRecord {
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 pub struct ProvingState {
     pub last_proved_block_hash: Hash,
+    /// Timestamp of `last_proved_block_hash`'s header — seeds
+    /// `selected_parent_timestamp` for the next block's context hash on restart.
+    pub last_proved_block_timestamp: u64,
     pub state_root: Hash,
     pub seq_commitment: Hash,
     pub proof_count: u64,
@@ -495,6 +502,7 @@ mod tests {
             proof_kind: 0,
             on_chain_covenant_id: None,
             deploy_starting_block: None,
+            deploy_starting_block_timestamp: None,
             deploy_initial_seq: None,
         };
 
@@ -634,6 +642,7 @@ mod tests {
             proof_kind: 0,
             on_chain_covenant_id: None,
             deploy_starting_block: None,
+            deploy_starting_block_timestamp: None,
             deploy_initial_seq: None,
         };
 
@@ -666,6 +675,7 @@ mod tests {
             proof_kind: 0,
             on_chain_covenant_id: None,
             deploy_starting_block: None,
+            deploy_starting_block_timestamp: None,
             deploy_initial_seq: None,
         };
         db.put_covenant(id, &record).unwrap();
@@ -676,6 +686,7 @@ mod tests {
             id,
             &ProvingState {
                 last_proved_block_hash: Hash::default(),
+                last_proved_block_timestamp: 0,
                 state_root: Hash::default(),
                 seq_commitment: Hash::default(),
                 proof_count: 5,

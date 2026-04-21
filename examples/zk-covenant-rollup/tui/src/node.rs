@@ -147,6 +147,18 @@ impl KaspaNode {
         Ok(self.client().get_sink().await?.sink)
     }
 
+    /// Fetch the KIP-21 lane proof witness for (block_hash, lane_key).
+    ///
+    /// The block must be a chain block at or after the current pruning point;
+    /// see the RPC docs in `kaspa-rpc-core`.
+    pub async fn get_seq_commit_lane_proof(
+        &self,
+        block_hash: RpcHash,
+        lane_key: RpcHash,
+    ) -> Result<kaspa_rpc_core::GetSeqCommitLaneProofResponse> {
+        Ok(self.client().get_seq_commit_lane_proof(block_hash, lane_key).await?)
+    }
+
     // ── Internal ──
 
     async fn register_notification_listeners(&self) -> Result<()> {

@@ -24,6 +24,7 @@ kaspa-rpc-core = { path = "../../../rpc/core" }
 kaspa-notify = { path = "../../../notify" }
 kaspa-txscript = { path = "../../../crypto/txscript" }
 kaspa-merkle = { path = "../../../crypto/merkle" }
+kaspa-seq-commit = { path = "../../../consensus/seq-commit" }
 
 borsh = { version = "1.6.0", features = ["derive"] }
 bytemuck = "1.24.0"

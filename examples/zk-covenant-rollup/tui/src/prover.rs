@@ -2,19 +2,23 @@ use kaspa_consensus_core::subnets::SUBNETWORK_ID_NATIVE;
 use kaspa_consensus_core::tx::{Transaction, TransactionInput, TransactionOutpoint, TransactionOutput};
 use kaspa_hashes::Hash;
 use kaspa_rpc_core::GetVirtualChainFromBlockV2Response;
+use kaspa_seq_commit::hashing::mergeset_context_hash;
+use kaspa_seq_commit::types::MergesetContext;
 use std::sync::Arc;
 use zk_covenant_rollup_core::permission_tree::required_depth;
+use zk_covenant_rollup_core::seq_commit::{from_hash, CommitmentWitness};
 use zk_covenant_rollup_core::PublicInput;
 use zk_covenant_rollup_core::{
     action::{ActionHeader, EntryAction, ExitAction, TransferAction, OP_ENTRY, OP_EXIT, OP_TRANSFER},
-    bytes_to_words_ref, extract_pubkey_from_spk, is_p2pk_spk, perm_leaf_hash,
+    extract_pubkey_from_spk, is_p2pk_spk, perm_leaf_hash,
     permission_tree::StreamingPermTreeBuilder,
     smt::Smt,
     state::{AccountWitness, StateRoot},
 };
 use zk_covenant_rollup_host::mock_chain::from_bytes;
 use zk_covenant_rollup_host::mock_tx::{
-    ActionWitness, EntryWitnessData, ExitWitnessData, ExitWitnessRest, TransferWitnessData, TransferWitnessRest, ZkTransaction,
+    rollup_lane_indices, ActionWitness, EntryWitnessData, ExitWitnessData, ExitWitnessRest, TransferWitnessData, TransferWitnessRest,
+    ZkTransaction,
 };
 use zk_covenant_rollup_host::prove::ProveInput;
 
@@ -23,9 +27,24 @@ use crate::db::RollupDb;
 /// State saved before a proof attempt so it can be restored if the proof fails.
 struct RollbackState {
     accumulated_block_txs: Vec<Vec<ZkTransaction>>,
+    accumulated_block_lane_indices: Vec<Vec<u32>>,
+    accumulated_block_context_hashes: Vec<[u32; 8]>,
     accumulated_exit_data: Vec<(Vec<u8>, u64)>,
     prev_proved_state_root: StateRoot,
     prev_proved_lane_tip: Hash,
+    prev_processed_block_timestamp: u64,
+}
+
+/// Host-side witness for the final block of a proving window.
+///
+/// Populated out-of-band via [`RollupProver::set_lane_proof`] by calling the
+/// `get_seq_commit_lane_proof` RPC. Without it the prover cannot build a
+/// complete [`ProveInput`], so [`RollupProver::take_prove_snapshot`] will
+/// return `None`.
+#[derive(Clone, Debug)]
+pub struct LaneProofWitness {
+    pub witness: CommitmentWitness,
+    pub smt_proof_bytes: Vec<u8>,
 }
 
 /// Tracks L2 state and processes chain data for proving.
@@ -60,10 +79,25 @@ pub struct RollupProver {
     pub prev_proved_lane_tip: Hash,
     /// All block txs accumulated since the last proof.
     pub accumulated_block_txs: Vec<Vec<ZkTransaction>>,
+    /// Per-block rollup-lane `merge_idx` values (positions of lane txs inside
+    /// each block's `accumulated_block_txs[i]`).
+    pub accumulated_block_lane_indices: Vec<Vec<u32>>,
+    /// Per-block `mergeset_context_hash` (`H_mergeset_context(ts, daa, blue)`)
+    /// computed from block headers in `process_chain_response`.
+    pub accumulated_block_context_hashes: Vec<[u32; 8]>,
     /// Permission tree builder for the current proving window (for exits).
     pub accumulated_perm_builder: StreamingPermTreeBuilder,
     /// (spk_bytes, amount) for each exit in the current proving window.
     pub accumulated_exit_data: Vec<(Vec<u8>, u64)>,
+    /// Timestamp of the most recently processed chain block — used as
+    /// `selected_parent_timestamp` for the next block's context hash
+    /// (per `kaspa_seq_commit::hashing::seq_commit_timestamp`).
+    pub last_processed_block_timestamp: u64,
+
+    /// Host witness for the LAST block of the current proving window.
+    /// Set by the RPC layer via [`set_lane_proof`] before calling
+    /// [`take_prove_snapshot`].
+    pub pending_lane_proof: Option<LaneProofWitness>,
 
     /// Snapshot saved before the last proof attempt; used to roll back on failure.
     pending_rollback: Option<RollbackState>,
@@ -77,6 +111,16 @@ pub struct ProveSnapshot {
     pub perm_redeem_script: Option<Vec<u8>>,
     /// (spk_bytes, amount) for each exit in the proving window (empty if none).
     pub perm_exit_data: Vec<(Vec<u8>, u64)>,
+}
+
+/// Reason [`RollupProver::take_prove_snapshot`] returned `None`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProveSnapshotSkipReason {
+    /// No blocks have accumulated since the last proof.
+    NoAccumulatedBlocks,
+    /// Blocks accumulated but the lane proof witness hasn't been fetched yet.
+    /// Call [`RollupProver::set_lane_proof`] after `get_seq_commit_lane_proof`.
+    MissingLaneProof,
 }
 
 /// Result of processing a VCC v2 response.
@@ -94,6 +138,7 @@ impl RollupProver {
         initial_state_root: StateRoot,
         initial_lane_tip: Hash,
         starting_block: Hash,
+        starting_block_timestamp: u64,
         db: Arc<RollupDb>,
     ) -> Self {
         let covenant_id_words = from_bytes(covenant_id.as_bytes());
@@ -110,10 +155,28 @@ impl RollupProver {
             prev_proved_state_root: initial_state_root,
             prev_proved_lane_tip: initial_lane_tip,
             accumulated_block_txs: Vec::new(),
+            accumulated_block_lane_indices: Vec::new(),
+            accumulated_block_context_hashes: Vec::new(),
             accumulated_perm_builder: StreamingPermTreeBuilder::new(),
             accumulated_exit_data: Vec::new(),
+            last_processed_block_timestamp: starting_block_timestamp,
+            pending_lane_proof: None,
             pending_rollback: None,
         }
+    }
+
+    /// Set the host-side lane-proof witness obtained from the
+    /// `get_seq_commit_lane_proof` RPC for the hash stored in
+    /// [`Self::last_processed_block`]. Must be called before
+    /// [`Self::take_prove_snapshot`].
+    pub fn set_lane_proof(&mut self, witness: CommitmentWitness, smt_proof_bytes: Vec<u8>) {
+        self.pending_lane_proof = Some(LaneProofWitness { witness, smt_proof_bytes });
+    }
+
+    /// Clear the pending lane-proof witness. Should be called when the
+    /// accumulator grows past the block the witness was fetched for.
+    pub fn clear_lane_proof(&mut self) {
+        self.pending_lane_proof = None;
     }
 
     /// Number of blocks accumulated since the last proof.
@@ -129,16 +192,25 @@ impl RollupProver {
     ///
     /// Returns `None` if there are no blocks to prove.
     pub fn take_prove_snapshot(&mut self) -> Option<ProveSnapshot> {
+        self.try_take_prove_snapshot().ok()
+    }
+
+    /// Like [`take_prove_snapshot`] but returns the specific skip reason on failure.
+    pub fn try_take_prove_snapshot(&mut self) -> Result<ProveSnapshot, ProveSnapshotSkipReason> {
         if self.accumulated_block_txs.is_empty() {
-            return None;
+            return Err(ProveSnapshotSkipReason::NoAccumulatedBlocks);
         }
+        let lane_proof = self.pending_lane_proof.take().ok_or(ProveSnapshotSkipReason::MissingLaneProof)?;
 
         // Save rollback state before consuming anything.
         self.pending_rollback = Some(RollbackState {
             accumulated_block_txs: self.accumulated_block_txs.clone(),
+            accumulated_block_lane_indices: self.accumulated_block_lane_indices.clone(),
+            accumulated_block_context_hashes: self.accumulated_block_context_hashes.clone(),
             accumulated_exit_data: self.accumulated_exit_data.clone(),
             prev_proved_state_root: self.prev_proved_state_root,
             prev_proved_lane_tip: self.prev_proved_lane_tip,
+            prev_processed_block_timestamp: self.last_processed_block_timestamp,
         });
 
         let public_input = PublicInput {
@@ -148,6 +220,8 @@ impl RollupProver {
         };
 
         let block_txs = std::mem::take(&mut self.accumulated_block_txs);
+        let block_lane_indices = std::mem::take(&mut self.accumulated_block_lane_indices);
+        let block_context_hashes = std::mem::take(&mut self.accumulated_block_context_hashes);
 
         // Take the accumulated perm builder (replace with fresh one)
         let old_perm_builder = std::mem::replace(&mut self.accumulated_perm_builder, StreamingPermTreeBuilder::new());
@@ -178,8 +252,16 @@ impl RollupProver {
         self.prev_proved_state_root = self.state_root;
         self.prev_proved_lane_tip = self.lane_tip;
 
-        Some(ProveSnapshot {
-            input: ProveInput { public_input, block_txs, perm_redeem_script_len },
+        Ok(ProveSnapshot {
+            input: ProveInput {
+                public_input,
+                block_txs,
+                block_lane_indices,
+                block_context_hashes,
+                commitment_witness: lane_proof.witness,
+                smt_proof_bytes: lane_proof.smt_proof_bytes,
+                perm_redeem_script_len,
+            },
             perm_redeem_script,
             perm_exit_data,
         })
@@ -198,9 +280,14 @@ impl RollupProver {
             None => return,
         };
         self.accumulated_block_txs = rb.accumulated_block_txs;
+        self.accumulated_block_lane_indices = rb.accumulated_block_lane_indices;
+        self.accumulated_block_context_hashes = rb.accumulated_block_context_hashes;
         self.accumulated_exit_data = rb.accumulated_exit_data.clone();
         self.prev_proved_state_root = rb.prev_proved_state_root;
         self.prev_proved_lane_tip = rb.prev_proved_lane_tip;
+        self.last_processed_block_timestamp = rb.prev_processed_block_timestamp;
+        // Invalidate any pending lane-proof witness — it covered the post-rollback window.
+        self.pending_lane_proof = None;
 
         // Reconstruct both perm builders from the saved exit data.
         let mut acc = StreamingPermTreeBuilder::new();
@@ -233,7 +320,6 @@ impl RollupProver {
                     None => continue,
                 };
 
-                let tx_id_words = bytes_to_words_ref(&tx.id().as_bytes());
                 let version = tx.version;
 
                 // All rollup lane txs are V1 and potential actions (payload-based detection)
@@ -280,21 +366,34 @@ impl RollupProver {
                 self.last_processed_block = response.added_chain_block_hashes[block_idx];
             }
 
+            // Per-block context hash: `H_mergeset_context(ts, daa, blue)`.
+            // Timestamp is the selected parent's per `seq_commit_timestamp` — i.e. the
+            // timestamp of the block we just finished processing (or
+            // `last_processed_block_timestamp` for the first block of a sync batch).
+            let daa_score = block.chain_block_header.daa_score.unwrap_or(0);
+            let blue_score = block.chain_block_header.blue_score.unwrap_or(0);
+            let ctx = MergesetContext { timestamp: self.last_processed_block_timestamp, daa_score, blue_score };
+            let ctx_hash_words = from_hash(mergeset_context_hash(&ctx));
+
+            // Lane indices: positions of rollup-lane txs in zk_txs.
+            let lane_indices = rollup_lane_indices(&zk_txs);
+
+            // Advance timestamp pointer for the next block's context hash.
+            if let Some(ts) = block.chain_block_header.timestamp {
+                self.last_processed_block_timestamp = ts;
+            }
+
             // Also accumulate for proving (clone into the proving window)
             self.accumulated_block_txs.push(zk_txs.clone());
+            self.accumulated_block_lane_indices.push(lane_indices);
+            self.accumulated_block_context_hashes.push(ctx_hash_words);
             self.last_block_txs.push(zk_txs);
             blocks_processed += 1;
         }
 
         self.state_root = self.smt.root();
 
-        ProcessResult {
-            blocks_processed,
-            txs_processed,
-            actions_found,
-            new_state_root: self.state_root,
-            new_lane_tip: self.lane_tip,
-        }
+        ProcessResult { blocks_processed, txs_processed, actions_found, new_state_root: self.state_root, new_lane_tip: self.lane_tip }
     }
 
     /// Build an ActionWitness for an action transaction and apply the state transition.
@@ -532,4 +631,87 @@ fn rpc_optional_to_transaction(rpc: &kaspa_rpc_core::RpcOptionalTransaction) -> 
         .collect();
 
     Some(Transaction::new(version, inputs, outputs, lock_time, subnetwork_id, gas, payload))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use zk_covenant_rollup_core::state::empty_tree_root;
+
+    fn test_prover(tmp: &TempDir) -> RollupProver {
+        let db = Arc::new(RollupDb::open(tmp.path()).expect("open rollup db"));
+        RollupProver::new(
+            Hash::from_bytes([1; 32]),
+            empty_tree_root(),
+            Hash::from_bytes([2; 32]),
+            Hash::from_bytes([3; 32]),
+            1_700_000_000,
+            db,
+        )
+    }
+
+    fn mk_witness() -> CommitmentWitness {
+        CommitmentWitness { payload_and_ctx_digest: [0x11; 8], parent_seq_commit: [0x22; 8], blue_score: 42 }
+    }
+
+    #[test]
+    fn take_snapshot_returns_none_when_empty() {
+        let tmp = TempDir::new().unwrap();
+        let mut prover = test_prover(&tmp);
+        assert!(matches!(prover.try_take_prove_snapshot(), Err(ProveSnapshotSkipReason::NoAccumulatedBlocks)));
+    }
+
+    #[test]
+    fn take_snapshot_reports_missing_lane_proof() {
+        let tmp = TempDir::new().unwrap();
+        let mut prover = test_prover(&tmp);
+        // Simulate a synced block window without the RPC lane proof yet.
+        prover.accumulated_block_txs.push(Vec::new());
+        prover.accumulated_block_lane_indices.push(Vec::new());
+        prover.accumulated_block_context_hashes.push([0; 8]);
+        assert!(matches!(prover.try_take_prove_snapshot(), Err(ProveSnapshotSkipReason::MissingLaneProof)));
+    }
+
+    #[test]
+    fn set_lane_proof_enables_snapshot_and_is_consumed() {
+        let tmp = TempDir::new().unwrap();
+        let mut prover = test_prover(&tmp);
+        prover.accumulated_block_txs.push(Vec::new());
+        prover.accumulated_block_lane_indices.push(Vec::new());
+        prover.accumulated_block_context_hashes.push([0xCC; 8]);
+
+        prover.set_lane_proof(mk_witness(), vec![0xAA, 0xBB]);
+        let snap = prover.try_take_prove_snapshot().expect("snapshot should succeed");
+
+        assert_eq!(snap.input.block_lane_indices.len(), 1);
+        assert_eq!(snap.input.block_context_hashes, vec![[0xCC; 8]]);
+        assert_eq!(snap.input.commitment_witness.blue_score, 42);
+        assert_eq!(snap.input.smt_proof_bytes, vec![0xAA, 0xBB]);
+
+        // Witness is single-use: after being folded into the snapshot it must be cleared,
+        // otherwise a second prove window would reuse a stale witness.
+        assert!(prover.pending_lane_proof.is_none());
+        // And the accumulators are drained.
+        assert!(prover.accumulated_block_txs.is_empty());
+        assert!(prover.accumulated_block_lane_indices.is_empty());
+        assert!(prover.accumulated_block_context_hashes.is_empty());
+    }
+
+    #[test]
+    fn rollback_restores_accumulators_and_drops_witness() {
+        let tmp = TempDir::new().unwrap();
+        let mut prover = test_prover(&tmp);
+        prover.accumulated_block_txs.push(Vec::new());
+        prover.accumulated_block_lane_indices.push(vec![0, 1]);
+        prover.accumulated_block_context_hashes.push([0xDE; 8]);
+        prover.set_lane_proof(mk_witness(), vec![0x42]);
+        let _snap = prover.try_take_prove_snapshot().unwrap();
+
+        prover.rollback_prove_window();
+
+        assert_eq!(prover.accumulated_block_lane_indices, vec![vec![0u32, 1]]);
+        assert_eq!(prover.accumulated_block_context_hashes, vec![[0xDE; 8]]);
+        assert!(prover.pending_lane_proof.is_none(), "rollback must clear stale witness");
+    }
 }
