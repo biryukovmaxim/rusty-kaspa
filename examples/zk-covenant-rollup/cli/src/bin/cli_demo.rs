@@ -762,7 +762,7 @@ async fn build_and_submit_proof(
 
     let collateral_units = estimate_script_units_upper_bound::<PopulatedTransaction, SigHashReusedValuesUnsync>(
         &[0; 66],
-        &input_spk,
+        &collateral.utxo_entry.script_public_key,
         SCRIPT_UNITS_PER_SIGOP_COUNT_UNIT,
     );
     // Build proof transaction: input[0]=covenant, input[1]=collateral.
