@@ -99,6 +99,7 @@ struct ProveResult {
 struct WithdrawResult {
     tx_id: Hash,
     continuation: Option<WithdrawContinuation>,
+    tx: Transaction,
 }
 
 struct WithdrawContinuation {
@@ -269,6 +270,32 @@ async fn connect(url: &str, network_id: NetworkId) -> Result<(KaspaNode, GetBloc
     Ok((node, dag_info))
 }
 
+async fn arm_tx_confirmation_wait(node: &KaspaNode, tx_id: Hash) -> Result<tokio::task::JoinHandle<Result<()>>> {
+    let receiver = node.event_receiver();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let _ = ready_tx.send(());
+        loop {
+            let event = receiver.recv().await.context("Event channel closed while waiting for tx confirmation")?;
+            if let NodeEvent::Notification(Notification::VirtualChainChanged(n)) = event {
+                for atx in n.accepted_transaction_ids.iter() {
+                    for id in &atx.accepted_transaction_ids {
+                        if *id == tx_id {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    });
+    ready_rx.await.context("confirmation waiter failed to arm")?;
+    Ok(handle)
+}
+
+async fn await_tx_confirmation_task(task: tokio::task::JoinHandle<Result<()>>) -> Result<()> {
+    task.await.context("confirmation waiter task failed")?
+}
+
 fn setup_keypair(privkey: Option<&str>, prefix: Prefix) -> Result<Keypair> {
     let secret_key = if let Some(hex_str) = privkey {
         let mut buf = [0u8; 32];
@@ -340,14 +367,14 @@ async fn wait_for_mature_utxo(
     }
 }
 
-async fn deploy_covenant(
+async fn build_deploy_covenant(
     node: &KaspaNode,
     dag_info: &GetBlockDagInfoResponse,
     keypair: &Keypair,
     proof_kind: ProofKind,
     covenant_value: u64,
     gas_utxo: (Hash, u32, u64),
-) -> Result<DeployResult> {
+) -> Result<(DeployResult, Transaction)> {
     let (gas_tx_id, gas_index, gas_amount) = gas_utxo;
 
     // Paginate VCC v1 to find the chain tip we'll anchor the covenant to.
@@ -446,36 +473,18 @@ async fn deploy_covenant(
     let tx_id = signed.tx.id();
     println!("  Deploy tx ID: {tx_id}");
 
-    // Submit
-    let rpc_tx = tx_to_rpc(signed.tx);
-    node.submit_transaction(rpc_tx, false).await.context("Failed to submit deploy tx")?;
-    println!("  Deploy tx submitted.");
-
-    Ok(DeployResult {
-        tx_id,
-        on_chain_covenant_id,
-        starting_block,
-        starting_block_timestamp,
-        initial_seq,
-        output_value: covenant_value,
-        deploy_change: change,
-    })
-}
-
-async fn wait_for_tx_confirmation(node: &KaspaNode, tx_id: Hash) -> Result<()> {
-    let receiver = node.event_receiver();
-    loop {
-        let event = receiver.recv().await.context("Event channel closed while waiting for tx confirmation")?;
-        if let NodeEvent::Notification(Notification::VirtualChainChanged(n)) = event {
-            for atx in n.accepted_transaction_ids.iter() {
-                for id in &atx.accepted_transaction_ids {
-                    if *id == tx_id {
-                        return Ok(());
-                    }
-                }
-            }
-        }
-    }
+    Ok((
+        DeployResult {
+            tx_id,
+            on_chain_covenant_id,
+            starting_block,
+            starting_block_timestamp,
+            initial_seq,
+            output_value: covenant_value,
+            deploy_change: change,
+        },
+        signed.tx,
+    ))
 }
 
 /// Walk the selected-parent chain forward from `starting_block` and collect
@@ -605,13 +614,13 @@ async fn run_prove(prover: &mut RollupProver, backend: ProverBackend, proof_kind
     Ok(ProveResult { output, block_prove_to, prev_state_hash, prev_lane_tip, perm_redeem_script, perm_exit_data })
 }
 
-async fn build_and_submit_proof(
+async fn build_proof_tx(
     node: &KaspaNode,
     prove: &ProveResult,
     proof_kind: ProofKind,
     deploy: &DeployResult,
     keypair: &Keypair,
-) -> Result<Hash> {
+) -> Result<Transaction> {
     let journal = &prove.output.receipt.journal.bytes;
     // Journal layout (192 bytes base, 224 with permission):
     //   prev_state(32) | prev_lane_tip(32) | new_state(32) | new_lane_tip(32)
@@ -838,13 +847,7 @@ async fn build_and_submit_proof(
     // ────────────────────────────────────────────────────────────────────────
 
     println!("  Proof tx ID: {proof_tx_id}");
-
-    // Submit
-    let rpc_tx = tx_to_rpc(proof_tx);
-    node.submit_transaction(rpc_tx, false).await.context("Failed to submit proof tx")?;
-    println!("  Proof tx submitted.");
-
-    Ok(proof_tx_id)
+    Ok(proof_tx)
 }
 
 // ── Action / withdrawal helpers ──
@@ -880,7 +883,7 @@ fn derive_delegate_address(covenant_id: Hash, prefix: Prefix) -> Address {
     Address::new(prefix, Version::ScriptHash, &hash_bytes)
 }
 
-async fn withdraw_exit(
+async fn build_withdraw_tx(
     node: &KaspaNode,
     covenant_id: Hash,
     perm_outpoint: (Hash, u32),
@@ -1033,11 +1036,7 @@ async fn withdraw_exit(
     println!("  Destination: {dest_value} sompi (fee: {estimated_fee})");
     // ────────────────────────────────────────────────────────────────────
 
-    let rpc_tx = tx_to_rpc(tx);
-    node.submit_transaction(rpc_tx, false).await.context("Failed to submit withdraw tx")?;
-    println!("  Withdraw tx submitted.");
-
-    Ok(WithdrawResult { tx_id, continuation })
+    Ok(WithdrawResult { tx_id, continuation, tx })
 }
 
 // ── Main ──
@@ -1079,10 +1078,13 @@ async fn main() -> Result<()> {
     let dag_info = node.get_block_dag_info().await.context("get_block_dag_info failed")?;
 
     println!("\nPhase 4: Deploying covenant...");
-    let deploy = deploy_covenant(&node, &dag_info, &keypair, proof_kind, args.covenant_value, gas_utxo).await?;
+    let (deploy, deploy_tx) = build_deploy_covenant(&node, &dag_info, &keypair, proof_kind, args.covenant_value, gas_utxo).await?;
+    let deploy_wait = arm_tx_confirmation_wait(&node, deploy.tx_id).await?;
+    node.submit_transaction(tx_to_rpc(deploy_tx), false).await.context("Failed to submit deploy tx")?;
+    println!("  Deploy tx submitted.");
 
     println!("\nPhase 5: Waiting for deploy tx confirmation...");
-    wait_for_tx_confirmation(&node, deploy.tx_id).await?;
+    await_tx_confirmation_task(deploy_wait).await?;
     println!("  Deploy tx confirmed!");
 
     // Get fee estimate for action transactions
@@ -1117,9 +1119,13 @@ async fn main() -> Result<()> {
         let tx_id = signed.id();
         println!("  Entry tx ID: {tx_id}");
         submitted_tx_ids.push(tx_id);
-        node.submit_transaction(tx_to_rpc(signed), false).await.context("submit entry tx")?;
+        let confirm_wait = arm_tx_confirmation_wait(&node, tx_id).await?;
+        if let Err(e) = node.submit_transaction(tx_to_rpc(signed), false).await {
+            confirm_wait.abort();
+            return Err(e).context("submit entry tx");
+        }
         println!("  Waiting for confirmation...");
-        wait_for_tx_confirmation(&node, tx_id).await?;
+        await_tx_confirmation_task(confirm_wait).await?;
         println!("  Entry tx confirmed!");
         tx_id
     };
@@ -1140,9 +1146,13 @@ async fn main() -> Result<()> {
         let tx_id = signed.id();
         println!("  Exit #1 tx ID: {tx_id}");
         submitted_tx_ids.push(tx_id);
-        node.submit_transaction(tx_to_rpc(signed), false).await.context("submit exit #1 tx")?;
+        let confirm_wait = arm_tx_confirmation_wait(&node, tx_id).await?;
+        if let Err(e) = node.submit_transaction(tx_to_rpc(signed), false).await {
+            confirm_wait.abort();
+            return Err(e).context("submit exit #1 tx");
+        }
         println!("  Waiting for confirmation...");
-        wait_for_tx_confirmation(&node, tx_id).await?;
+        await_tx_confirmation_task(confirm_wait).await?;
         println!("  Exit #1 tx confirmed!");
         tx_id
     };
@@ -1174,9 +1184,13 @@ async fn main() -> Result<()> {
         let tx_id = signed.id();
         println!("  Transfer tx ID: {tx_id}");
         submitted_tx_ids.push(tx_id);
-        node.submit_transaction(tx_to_rpc(signed), false).await.context("submit transfer tx")?;
+        let confirm_wait = arm_tx_confirmation_wait(&node, tx_id).await?;
+        if let Err(e) = node.submit_transaction(tx_to_rpc(signed), false).await {
+            confirm_wait.abort();
+            return Err(e).context("submit transfer tx");
+        }
         println!("  Waiting for confirmation...");
-        wait_for_tx_confirmation(&node, tx_id).await?;
+        await_tx_confirmation_task(confirm_wait).await?;
         println!("  Transfer tx confirmed!");
         tx_id
     };
@@ -1197,9 +1211,13 @@ async fn main() -> Result<()> {
         let tx_id = signed.id();
         println!("  Exit #2 tx ID: {tx_id}");
         submitted_tx_ids.push(tx_id);
-        node.submit_transaction(tx_to_rpc(signed), false).await.context("submit exit #2 tx")?;
+        let confirm_wait = arm_tx_confirmation_wait(&node, tx_id).await?;
+        if let Err(e) = node.submit_transaction(tx_to_rpc(signed), false).await {
+            confirm_wait.abort();
+            return Err(e).context("submit exit #2 tx");
+        }
         println!("  Waiting for confirmation...");
-        wait_for_tx_confirmation(&node, tx_id).await?;
+        await_tx_confirmation_task(confirm_wait).await?;
         println!("  Exit #2 tx confirmed!");
         tx_id
     };
@@ -1252,10 +1270,17 @@ async fn main() -> Result<()> {
     // ── Phase 14: Submit proof with permission output ────────────────────
 
     println!("\nPhase 14: Building and submitting proof...");
-    let proof_tx_id = build_and_submit_proof(&node, &prove, proof_kind, &deploy, &keypair).await?;
+    let proof_tx = build_proof_tx(&node, &prove, proof_kind, &deploy, &keypair).await?;
+    let proof_tx_id = proof_tx.id();
+    let proof_wait = arm_tx_confirmation_wait(&node, proof_tx_id).await?;
+    if let Err(e) = node.submit_transaction(tx_to_rpc(proof_tx), false).await {
+        proof_wait.abort();
+        return Err(e).context("Failed to submit proof tx");
+    }
+    println!("  Proof tx submitted.");
 
     println!("  Waiting for proof tx confirmation...");
-    wait_for_tx_confirmation(&node, proof_tx_id).await?;
+    await_tx_confirmation_task(proof_wait).await?;
     println!("  Proof tx confirmed!");
 
     // ── Phase 15: Withdraw #1 ────────────────────────────────────────────
@@ -1265,7 +1290,7 @@ async fn main() -> Result<()> {
     println!("  Delegate address: {delegate_addr}");
 
     let perm_redeem = prove.perm_redeem_script.as_ref().context("No permission redeem script — batch had no exits?")?;
-    let w1 = withdraw_exit(
+    let w1 = build_withdraw_tx(
         &node,
         deploy.on_chain_covenant_id,
         (proof_tx_id, 1), // permission UTXO at proof tx output[1]
@@ -1277,9 +1302,15 @@ async fn main() -> Result<()> {
         &keypair,
     )
     .await?;
+    let w1_wait = arm_tx_confirmation_wait(&node, w1.tx_id).await?;
+    if let Err(e) = node.submit_transaction(tx_to_rpc(w1.tx.clone()), false).await {
+        w1_wait.abort();
+        return Err(e).context("Failed to submit withdraw #1 tx");
+    }
+    println!("  Withdraw #1 tx submitted.");
 
     println!("  Waiting for withdraw #1 confirmation...");
-    wait_for_tx_confirmation(&node, w1.tx_id).await?;
+    await_tx_confirmation_task(w1_wait).await?;
     println!("  Withdraw #1 confirmed!");
 
     // ── Phase 16: Withdraw #2 ────────────────────────────────────────────
@@ -1287,7 +1318,7 @@ async fn main() -> Result<()> {
     println!("\nPhase 16: Withdraw exit #2 ({exit2_amount} sompi)...");
     let w1_cont = w1.continuation.context("Expected continuation permission after withdraw #1")?;
 
-    let w2 = withdraw_exit(
+    let w2 = build_withdraw_tx(
         &node,
         deploy.on_chain_covenant_id,
         (w1.tx_id, 1), // continuation permission UTXO at withdraw #1 output[1]
@@ -1299,9 +1330,15 @@ async fn main() -> Result<()> {
         &keypair,
     )
     .await?;
+    let w2_wait = arm_tx_confirmation_wait(&node, w2.tx_id).await?;
+    if let Err(e) = node.submit_transaction(tx_to_rpc(w2.tx.clone()), false).await {
+        w2_wait.abort();
+        return Err(e).context("Failed to submit withdraw #2 tx");
+    }
+    println!("  Withdraw #2 tx submitted.");
 
     println!("  Waiting for withdraw #2 confirmation...");
-    wait_for_tx_confirmation(&node, w2.tx_id).await?;
+    await_tx_confirmation_task(w2_wait).await?;
     println!("  Withdraw #2 confirmed!");
 
     // ── Summary ──────────────────────────────────────────────────────────
