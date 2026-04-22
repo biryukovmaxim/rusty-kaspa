@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use kaspa_addresses::{Address, Prefix, Version};
-use kaspa_consensus_core::constants::TX_VERSION_POST_COV_HF;
+use kaspa_consensus_core::constants::{STORAGE_MASS_PARAMETER, TX_VERSION_POST_COV_HF};
 use kaspa_consensus_core::hashing::sighash::SigHashReusedValuesUnsync;
 use kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL;
 use kaspa_consensus_core::mass::units::SCRIPT_UNITS_PER_SIGOP_COUNT_UNIT;
@@ -759,6 +759,12 @@ async fn build_and_submit_proof(
         &input_spk,
         SCRIPT_UNITS_PER_SIGOP_COUNT_UNIT,
     );
+
+    let collateral_units = estimate_script_units_upper_bound::<PopulatedTransaction, SigHashReusedValuesUnsync>(
+        &[0; 66],
+        &input_spk,
+        SCRIPT_UNITS_PER_SIGOP_COUNT_UNIT,
+    );
     // Build proof transaction: input[0]=covenant, input[1]=collateral.
     // v1 inputs must commit a `ComputeBudget`. Start both at 0; we'll measure input[0]
     // (the ZK proof script) dynamically below and overwrite its mass before fee estimation.
@@ -770,7 +776,12 @@ async fn build_and_submit_proof(
             0,
             ComputeBudget::try_from(units).context("Could not convert input units into compute budget (mass)")?.0,
         ),
-        TransactionInput::new_with_compute_budget(collateral_outpoint, vec![], 0, 0),
+        TransactionInput::new_with_compute_budget(
+            collateral_outpoint,
+            [0; 66].to_vec(),
+            0,
+            ComputeBudget::try_from(collateral_units).context("Could not convert input units into compute budget (mass)")?.0,
+        ),
     ];
 
     // output[0]=covenant (full value preserved)
@@ -804,7 +815,7 @@ async fn build_and_submit_proof(
 
     // Estimate fee from mass
     let tmp_tx = Transaction::new(TX_VERSION_POST_COV_HF, inputs.clone(), outputs.clone(), 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
-    let mass_calc = kaspa_consensus_core::mass::MassCalculator::new(1, 10, 0);
+    let mass_calc = kaspa_consensus_core::mass::MassCalculator::new(1, 10, STORAGE_MASS_PARAMETER);
     let mass = mass_calc.calc_non_contextual_masses(&tmp_tx).compute_mass;
     let fee_estimate = node.get_fee_estimate().await.context("get_fee_estimate failed")?;
     let priority_feerate = fee_estimate.priority_bucket.feerate;
@@ -832,16 +843,20 @@ async fn build_and_submit_proof(
     proof_tx.inputs[1].signature_script = collateral_sig;
 
     // ── Local script verification (same path as on-chain) ───────────────────
-    match try_verify_tx_input(
-        &proof_tx,
-        &[covenant_entry, collateral_entry],
-        0,
-        &accessor,
-        proof_tx.inputs[0].mass.allowed_script_units(),
-    ) {
-        Ok(()) => println!("  [ok] Local script verification passed"),
-        Err(e) => bail!("Local script verification failed: {e}\n  (the on-chain script will also reject this tx)"),
+
+    for (idx, input) in proof_tx.inputs.iter().enumerate() {
+        match try_verify_tx_input(
+            &proof_tx,
+            &[covenant_entry.clone(), collateral_entry.clone()],
+            idx,
+            &accessor,
+            input.mass.allowed_script_units(),
+        ) {
+            Ok(()) => println!("  [ok] Local script verification passed"),
+            Err(e) => bail!("Local script verification failed: {e}\n  (the on-chain script will also reject this tx)"),
+        }
     }
+
     // ────────────────────────────────────────────────────────────────────────
 
     println!("  Proof tx ID: {proof_tx_id}");
