@@ -4,6 +4,8 @@ use kaspa_addresses::{Address, Prefix, Version};
 use kaspa_consensus_core::constants::TX_VERSION_POST_COV_HF;
 use kaspa_consensus_core::hashing::sighash::SigHashReusedValuesUnsync;
 use kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL;
+use kaspa_consensus_core::mass::units::SCRIPT_UNITS_PER_SIGOP_COUNT_UNIT;
+use kaspa_consensus_core::mass::ComputeBudget;
 use kaspa_consensus_core::sign::{sign, sign_input};
 use kaspa_consensus_core::subnets::SUBNETWORK_ID_NATIVE;
 use kaspa_consensus_core::tx::{
@@ -14,9 +16,7 @@ use kaspa_hashes::Hash;
 use kaspa_rpc_core::{GetBlockDagInfoResponse, RpcTransaction};
 use kaspa_txscript::script_builder::ScriptBuilder;
 use kaspa_txscript::zk_precompiles::tags::ZkTag;
-use kaspa_txscript::{
-    estimate_script_units_upper_bound, pay_to_address_script, pay_to_script_hash_script,
-};
+use kaspa_txscript::{estimate_script_units_upper_bound, pay_to_address_script, pay_to_script_hash_script};
 use kaspa_wrpc_client::prelude::{NetworkId, Notification};
 use risc0_zkvm::sha::Digestible;
 use zk_covenant_rollup_core::permission_tree::{perm_empty_leaf_hash, PermissionTree};
@@ -26,7 +26,7 @@ use zk_covenant_rollup_host::bridge::{build_delegate_entry_script, build_permiss
 use zk_covenant_rollup_host::mock_chain::{from_bytes, MockSeqCommitAccessor};
 use zk_covenant_rollup_host::prove::{self as host_prove, ProofKind, ProveOutput, ProverBackend};
 use zk_covenant_rollup_host::redeem::build_redeem_script;
-use zk_covenant_rollup_host::tx::{try_verify_tx_input};
+use zk_covenant_rollup_host::tx::try_verify_tx_input;
 use zk_covenant_rollup_methods::ZK_COVENANT_ROLLUP_GUEST_ID;
 use zk_covenant_rollup_tui::actions::{build_entry_tx, build_exit_tx, build_transfer_tx, compute_fee};
 use zk_covenant_rollup_tui::balance::Utxo;
@@ -754,13 +754,22 @@ async fn build_and_submit_proof(
         collateral_amount, collateral_outpoint.transaction_id, collateral_outpoint.index
     );
 
-    let budget = estimate_script_units_upper_bound::<PopulatedTransaction, SigHashReusedValuesUnsync>(&sig_script, &input_spk, 1000);
+    let units = estimate_script_units_upper_bound::<PopulatedTransaction, SigHashReusedValuesUnsync>(
+        &sig_script,
+        &input_spk,
+        SCRIPT_UNITS_PER_SIGOP_COUNT_UNIT,
+    );
     // Build proof transaction: input[0]=covenant, input[1]=collateral.
     // v1 inputs must commit a `ComputeBudget`. Start both at 0; we'll measure input[0]
     // (the ZK proof script) dynamically below and overwrite its mass before fee estimation.
     let covenant_utxo_outpoint = TransactionOutpoint::new(deploy.tx_id, 0);
     let inputs = vec![
-        TransactionInput::new_with_compute_budget(covenant_utxo_outpoint, sig_script, 0, (budget.0 / 100) as u16 + 1),
+        TransactionInput::new_with_compute_budget(
+            covenant_utxo_outpoint,
+            sig_script,
+            0,
+            ComputeBudget::try_from(units).context("Could not convert input units into compute budget (mass)")?.0,
+        ),
         TransactionInput::new_with_compute_budget(collateral_outpoint, vec![], 0, 0),
     ];
 
@@ -1012,23 +1021,6 @@ async fn withdraw_exit(
     let tx_id = tx.id();
     println!("  Withdraw tx ID: {tx_id}");
     println!("  Destination: {dest_value} sompi (fee: {estimated_fee})");
-
-    // ── Local script verification ────────────────────────────────────────
-    {
-        println!("  [diag] inputs: {} (perm + {} delegates + collateral)", tx.inputs.len(), selected_delegates.len());
-        println!("  [diag] outputs: {}", tx.outputs.len());
-        for (i, out) in tx.outputs.iter().enumerate() {
-            println!("    output[{i}]: {} sompi, spk_len={}", out.value, out.script_public_key.script().len());
-        }
-        println!("  [diag] perm_utxo SPK hash: {}", faster_hex::hex_string(&all_entries[0].script_public_key.script()[2..34]));
-        println!("  [diag] delegate_total={delegate_total} deduct={amount} change={}", delegate_total - amount);
-
-        let accessor = MockSeqCommitAccessor(std::collections::HashMap::new());
-        match try_verify_tx_input(&tx, &all_entries, 0, &accessor, tx.inputs[0].mass.allowed_script_units()) {
-            Ok(()) => println!("  [ok] Local permission script verification passed"),
-            Err(e) => bail!("Local permission script verification FAILED: {e}\n  (the on-chain script will also reject this tx)"),
-        }
-    }
     // ────────────────────────────────────────────────────────────────────
 
     let rpc_tx = tx_to_rpc(tx);

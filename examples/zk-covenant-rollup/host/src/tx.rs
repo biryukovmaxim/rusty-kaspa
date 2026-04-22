@@ -143,7 +143,7 @@ pub fn try_verify_tx_input(
     utxos: &[UtxoEntry],
     input_idx: usize,
     accessor: &dyn SeqCommitAccessor,
-    sigop_script_units: ScriptUnits
+    sigop_script_units: ScriptUnits,
 ) -> Result<(), String> {
     let sig_cache = Cache::new(10_000);
     let reused_values = SigHashReusedValuesUnsync::new();

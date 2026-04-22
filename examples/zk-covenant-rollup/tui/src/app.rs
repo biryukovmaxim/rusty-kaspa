@@ -780,7 +780,8 @@ impl App {
                         let initial_seq = rec.deploy_initial_seq.unwrap_or_default();
                         let prover_cov_id = rec.on_chain_covenant_id.unwrap_or(id);
                         let initial_state_root = zk_covenant_rollup_core::state::empty_tree_root();
-                        self.prover = Some(RollupProver::new(prover_cov_id, initial_state_root, initial_seq, starting_block, self.db.clone()));
+                        self.prover =
+                            Some(RollupProver::new(prover_cov_id, initial_state_root, initial_seq, starting_block, self.db.clone()));
                         self.sync_selected_parent_timestamp = starting_block_timestamp;
                         self.log("Auto-initialized prover for deployed covenant".into());
                         self.pending_ops.push(PendingOp::FetchAndProcessChain);
@@ -1913,7 +1914,8 @@ impl App {
             ));
 
             let utxos = vec![covenant_entry.clone(), collateral_entry.clone()];
-            match zk_covenant_rollup_host::tx::try_verify_tx_input(&tx, &utxos, 0, &accessor, tx.inputs[0].mass.allowed_script_units()) {
+            match zk_covenant_rollup_host::tx::try_verify_tx_input(&tx, &utxos, 0, &accessor, tx.inputs[0].mass.allowed_script_units())
+            {
                 Ok(()) => self.log("Local script verification: PASSED".into()),
                 Err(e) => {
                     self.log(format!("Local script verification FAILED: {e}"));

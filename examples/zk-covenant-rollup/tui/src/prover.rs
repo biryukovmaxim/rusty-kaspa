@@ -384,12 +384,7 @@ impl RollupProver {
         self.accumulated_block_context_hashes.push(ctx_words);
         self.last_block_txs.push(lane_zk_txs.clone());
 
-        ApplyResult {
-            lane_tx_count: lane_zk_txs.len(),
-            actions_found,
-            new_state_root: self.state_root,
-            new_lane_tip: self.lane_tip,
-        }
+        ApplyResult { lane_tx_count: lane_zk_txs.len(), actions_found, new_state_root: self.state_root, new_lane_tip: self.lane_tip }
     }
 
     /// Streaming compat path for the TUI: walk a VCC v2 response, find blocks
