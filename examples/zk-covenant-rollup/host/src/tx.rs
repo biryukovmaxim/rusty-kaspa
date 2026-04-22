@@ -1,5 +1,5 @@
 use kaspa_consensus_core::config::params::TESTNET12_PARAMS;
-use kaspa_consensus_core::mass::{ComputeBudget, Mass, MassCalculator};
+use kaspa_consensus_core::mass::{ComputeBudget, Mass, MassCalculator, ScriptUnits};
 use kaspa_consensus_core::{
     constants::{SOMPI_PER_KASPA, TX_VERSION_POST_COV_HF},
     hashing::sighash::SigHashReusedValuesUnsync,
@@ -125,7 +125,7 @@ pub fn make_multi_input_mock_transaction(
 pub fn verify_tx_input(tx: &Transaction, utxos: &[UtxoEntry], input_idx: usize, accessor: &dyn SeqCommitAccessor) {
     let sig_cache = Cache::new(10_000);
     let reused_values = SigHashReusedValuesUnsync::new();
-    let flags = EngineFlags { covenants_enabled: true, sigop_script_units: Default::default() };
+    let flags = EngineFlags { covenants_enabled: true, ..Default::default() };
 
     let populated = PopulatedTransaction::new(tx, utxos.to_vec());
     let cov_ctx = CovenantsContext::from_tx(&populated).unwrap();
@@ -143,10 +143,11 @@ pub fn try_verify_tx_input(
     utxos: &[UtxoEntry],
     input_idx: usize,
     accessor: &dyn SeqCommitAccessor,
+    sigop_script_units: ScriptUnits
 ) -> Result<(), String> {
     let sig_cache = Cache::new(10_000);
     let reused_values = SigHashReusedValuesUnsync::new();
-    let flags = EngineFlags { covenants_enabled: true, sigop_script_units: Default::default() };
+    let flags = EngineFlags { covenants_enabled: true, sigop_script_units };
 
     let populated = PopulatedTransaction::new(tx, utxos.to_vec());
     let cov_ctx = CovenantsContext::from_tx(&populated).unwrap();
@@ -171,7 +172,12 @@ pub fn measure_compute_budget_for_input(
 ) -> ComputeBudget {
     let sig_cache = Cache::new(10_000);
     let reused_values = SigHashReusedValuesUnsync::new();
-    let flags = EngineFlags { covenants_enabled: true, sigop_script_units: Default::default() };
+    // `sigop_script_units` must match consensus, otherwise the measured units
+    // undercount sigop cost and the resulting `ComputeBudget` fails the
+    // on-chain check. `EngineFlags::default()` bakes in the consensus
+    // `Gram(mass_per_sig_op).into()` value; we only override
+    // `covenants_enabled` for the covenant path.
+    let flags = EngineFlags { covenants_enabled: true, ..Default::default() };
 
     let populated = PopulatedTransaction::new(tx, utxos.to_vec());
     let cov_ctx = CovenantsContext::from_tx(&populated).unwrap();

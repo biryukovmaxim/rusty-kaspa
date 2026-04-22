@@ -60,15 +60,21 @@ impl ProofKind {
 }
 
 /// All data needed to produce a ZK proof for a batch of rollup blocks.
+///
+/// Only blocks with rollup-lane activity appear here. `block_lane_txs[i]`
+/// holds the lane txs of block `i` in global-merge-idx order;
+/// `block_lane_merge_idxs[i][j]` is the global `merge_idx` of
+/// `block_lane_txs[i][j]` in that block's `AcceptedTxList` — i.e. its
+/// position among **all** accepted txs of the block's mergeset, not among
+/// lane-only txs. Non-lane txs are never fetched nor sent to the guest.
 pub struct ProveInput {
     /// Public input committed to the proof (prev state, prev seq, covenant ID).
     pub public_input: PublicInput,
-    /// Every transaction in each block (lane members + unrelated txs).
-    /// Guest-visible lane txs are selected by `block_lane_indices`.
-    pub block_txs: Vec<Vec<ZkTransaction>>,
-    /// Real `merge_idx` of each lane tx in its block. Non-lane txs are
-    /// filtered out here and never reach the guest.
-    pub block_lane_indices: Vec<Vec<u32>>,
+    /// Only the rollup-lane txs per block, ordered by global merge_idx.
+    pub block_lane_txs: Vec<Vec<ZkTransaction>>,
+    /// Global `merge_idx` of each lane tx in its block's full AcceptedTxList
+    /// (parallel to `block_lane_txs`).
+    pub block_lane_merge_idxs: Vec<Vec<u32>>,
     /// Per-block context hashes (host precomputes `mergeset_context_hash`).
     pub block_context_hashes: Vec<[u32; 8]>,
     /// Commitment witness header (Pod).
@@ -164,18 +170,20 @@ fn find_r0vm() -> Result<std::path::PathBuf, String> {
 
 fn build_env(input: &ProveInput) -> Result<ExecutorEnv<'_>, String> {
     let mut binding = ExecutorEnv::builder();
-    let builder =
-        binding.write_slice(core::slice::from_ref(&input.public_input)).write_slice(&(input.block_txs.len() as u32).to_le_bytes());
+    let builder = binding
+        .write_slice(core::slice::from_ref(&input.public_input))
+        .write_slice(&(input.block_lane_txs.len() as u32).to_le_bytes());
 
-    for (i, lane_indices) in input.block_lane_indices.iter().enumerate() {
-        let lane_count = lane_indices.len() as u32;
+    for (i, lane_txs) in input.block_lane_txs.iter().enumerate() {
+        let lane_count = lane_txs.len() as u32;
         builder.write_slice(&lane_count.to_le_bytes());
         if lane_count > 0 {
             // Context hash only when the lane is active in this block
             builder.write_slice(bytemuck::cast_slice::<u32, u8>(&input.block_context_hashes[i]));
-            for &merge_idx in lane_indices {
+            for (j, tx) in lane_txs.iter().enumerate() {
+                let merge_idx = input.block_lane_merge_idxs[i][j];
                 builder.write_slice(&merge_idx.to_le_bytes());
-                input.block_txs[i][merge_idx as usize].write_to_env(builder);
+                tx.write_to_env(builder);
             }
         }
     }

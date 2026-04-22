@@ -1,0 +1,3 @@
+   Compiling risc0-circuit-keccak-sys v4.0.2
+   Compiling risc0-circuit-rv32im-sys v4.0.2
+   Compiling zk-covenant-rollup-methods v0.1.0 (/home/maxim/kaspa/rusty-kaspa/examples/zk-covenant-rollup/methods)

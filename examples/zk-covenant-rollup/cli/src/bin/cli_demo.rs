@@ -2,36 +2,37 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use kaspa_addresses::{Address, Prefix, Version};
 use kaspa_consensus_core::constants::TX_VERSION_POST_COV_HF;
+use kaspa_consensus_core::hashing::sighash::SigHashReusedValuesUnsync;
 use kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL;
 use kaspa_consensus_core::sign::{sign, sign_input};
 use kaspa_consensus_core::subnets::SUBNETWORK_ID_NATIVE;
 use kaspa_consensus_core::tx::{
-    CovenantBinding, ScriptPublicKey, SignableTransaction, Transaction, TransactionInput, TransactionOutpoint, TransactionOutput,
-    UtxoEntry,
+    CovenantBinding, PopulatedTransaction, ScriptPublicKey, SignableTransaction, Transaction, TransactionInput, TransactionOutpoint,
+    TransactionOutput, UtxoEntry,
 };
 use kaspa_hashes::Hash;
 use kaspa_rpc_core::{GetBlockDagInfoResponse, RpcTransaction};
 use kaspa_txscript::script_builder::ScriptBuilder;
 use kaspa_txscript::zk_precompiles::tags::ZkTag;
-use kaspa_txscript::{pay_to_address_script, pay_to_script_hash_script};
+use kaspa_txscript::{
+    estimate_script_units_upper_bound, pay_to_address_script, pay_to_script_hash_script,
+};
 use kaspa_wrpc_client::prelude::{NetworkId, Notification};
 use risc0_zkvm::sha::Digestible;
 use zk_covenant_rollup_core::permission_tree::{perm_empty_leaf_hash, PermissionTree};
-use zk_covenant_rollup_core::seq_commit::{activity_leaf, from_hash, lane_tip_next, to_hash, ActivityDigestBuilder};
 use zk_covenant_rollup_core::state::empty_tree_root;
 use zk_covenant_rollup_core::ROLLUP_LANE_KEY;
 use zk_covenant_rollup_host::bridge::{build_delegate_entry_script, build_permission_redeem_converged, build_permission_sig_script};
 use zk_covenant_rollup_host::mock_chain::{from_bytes, MockSeqCommitAccessor};
 use zk_covenant_rollup_host::prove::{self as host_prove, ProofKind, ProveOutput, ProverBackend};
 use zk_covenant_rollup_host::redeem::build_redeem_script;
-use zk_covenant_rollup_host::tx::{measure_compute_budget_for_input, try_verify_tx_input};
+use zk_covenant_rollup_host::tx::{try_verify_tx_input};
 use zk_covenant_rollup_methods::ZK_COVENANT_ROLLUP_GUEST_ID;
 use zk_covenant_rollup_tui::actions::{build_entry_tx, build_exit_tx, build_transfer_tx, compute_fee};
 use zk_covenant_rollup_tui::balance::Utxo;
 use zk_covenant_rollup_tui::db::RollupDb;
 use zk_covenant_rollup_tui::node::{KaspaNode, NodeEvent};
-use zk_covenant_rollup_tui::prover::RollupProver;
-
+use zk_covenant_rollup_tui::prover::{BlockActivity, RollupProver};
 // ── CLI args ──
 
 #[derive(Parser, Debug)]
@@ -352,7 +353,7 @@ async fn deploy_covenant(
 ) -> Result<DeployResult> {
     let (gas_tx_id, gas_index, gas_amount) = gas_utxo;
 
-    // Paginate VCC v1 to find the chain tip
+    // Paginate VCC v1 to find the chain tip we'll anchor the covenant to.
     println!("  Fetching confirmed chain tip from pruning point...");
     let mut current_hash = dag_info.pruning_point_hash;
     let mut last_added_block = None;
@@ -367,11 +368,34 @@ async fn deploy_covenant(
     let starting_block = last_added_block.context("VCC returned no added blocks")?;
     println!("  Deploy starting block: {starting_block}");
 
-    // Get block header for initial seq commitment
+    // Initial **lane tip** (not the block's own AIR!): ask consensus what our
+    // lane's tip is as of `starting_block` via `get_seq_commit_lane_proof`.
+    //
+    // - The block header's `accepted_id_merkle_root` is the whole block's
+    //   `seq_commit` — a commitment over *every* lane's state + miner payload
+    //   context, NOT our lane's tip.
+    // - For the first activity block B1 after deploy, consensus computes
+    //   `tip_B1 = lane_tip_next(prev_tip, lane_key, activity_digest, ctx)`
+    //   where `prev_tip` is: (a) the lane's last stored SMT tip if the lane
+    //   already exists, or (b) `SeqCommit(parent(B1))` if it's a new lane.
+    //   Case (a) is what we anchor here.
+    // - If our lane hasn't been seen yet at `starting_block` (SMT returned
+    //   lane_tip = None), there's no existing tip to chain from — bail and
+    //   ask the user to resubmit after a lane tx has been confirmed.
+    let lane_key_hash = Hash::from_bytes(bytemuck::cast(zk_covenant_rollup_core::ROLLUP_LANE_KEY));
+    let lane_proof_at_anchor = node
+        .get_seq_commit_lane_proof(starting_block, lane_key_hash)
+        .await
+        .context("get_seq_commit_lane_proof(starting_block) failed")?;
+    let initial_seq = lane_proof_at_anchor.lane_tip.context(
+        "rollup lane is not present in the active-lanes SMT at the deploy anchor — \
+         no existing tip to chain from. Need either prior lane activity on this chain \
+         or a witness-based covenant anchor (tracked separately)",
+    )?;
     let block = node.get_block(starting_block, false).await.context("get_block failed")?;
-    let initial_seq = block.header.accepted_id_merkle_root;
     let starting_block_timestamp = block.header.timestamp;
-    println!("  Initial seq commitment: {initial_seq}");
+    println!("  Initial lane tip:    {initial_seq} (from get_seq_commit_lane_proof)");
+    println!("  Initial lane blue_score: {}", lane_proof_at_anchor.lane_blue_score.unwrap_or(0));
 
     // Build redeem script (convergence loop)
     let prev_state_hash = empty_tree_root();
@@ -457,84 +481,100 @@ async fn wait_for_tx_confirmation(node: &KaspaNode, tx_id: Hash) -> Result<()> {
     }
 }
 
-async fn sync_chain(node: &KaspaNode, prover: &mut RollupProver) -> Result<usize> {
-    let mut sync_cursor = prover.last_processed_block;
-    let mut total_blocks = 0usize;
-    let mut total_txs = 0usize;
-    let mut total_actions = 0usize;
-    let mut seq_mismatches = 0usize;
+/// Walk the selected-parent chain forward from `starting_block` and collect
+/// every block that contains at least one rollup-subnetwork tx. Each
+/// [`BlockActivity`] carries **all** lane txs in the block (not just ours),
+/// with their global `merge_idx` — this is what KIP-21's `lane_tip_next`
+/// needs to match consensus, even when multiple parties share the subnetwork.
+///
+/// `our_tx_ids` is only the termination condition: we keep paging VCC v2
+/// until we have seen every id in the accepted-tx list of some chain block.
+async fn find_our_activity(
+    node: &KaspaNode,
+    our_tx_ids: &[Hash],
+    starting_block: Hash,
+    starting_block_timestamp: u64,
+) -> Result<Vec<BlockActivity>> {
+    use kaspa_consensus_core::subnets::SubnetworkId;
+    use std::collections::HashSet;
+    use zk_covenant_rollup_core::ROLLUP_SUBNETWORK_ID;
+    use zk_covenant_rollup_tui::prover::rpc_optional_to_transaction;
 
-    loop {
-        let resp = node.get_virtual_chain_v2(sync_cursor, Some(1000)).await.context("VCC v2 fetch failed")?;
+    let rollup_subnet = SubnetworkId::from_bytes(ROLLUP_SUBNETWORK_ID);
+    let mut remaining: HashSet<Hash> = our_tx_ids.iter().copied().collect();
+
+    let mut activity: Vec<BlockActivity> = Vec::new();
+    let mut cursor = starting_block;
+    let mut prev_block_timestamp = starting_block_timestamp;
+
+    while !remaining.is_empty() {
+        let resp = node.get_virtual_chain_v2(cursor, Some(1000)).await.context("VCC v2 fetch failed")?;
         if resp.added_chain_block_hashes.is_empty() {
-            break;
+            // Chain tip reached but some of our txs aren't yet in a chain block — wait.
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
         }
 
-        // Capture seq commitment BEFORE this batch for independent re-computation.
-        let mut computed_lane_tip: [u32; 8] = from_bytes(prover.lane_tip.as_bytes());
-
-        let result = prover.process_chain_response(&resp);
-
-        // Independently re-derive seq commitment per block using the same streaming merkle
-        // that the guest uses: seq_commitment_leaf(tx_id, version) for each ZkTransaction.
-        // If our computed AIR matches block header AIR → rollup impl is correct, guest needs debugging.
-        // If it doesn't match → tx_id reconstruction or tx filtering has a bug in the rollup impl.
-        for (i, (block_zk_txs, rpc_block)) in
-            prover.last_block_txs.iter().zip(resp.chain_block_accepted_transactions.iter()).enumerate()
-        {
-            let rpc_tx_count = rpc_block.accepted_transactions.len();
-            let zk_tx_count = block_zk_txs.len();
-            if rpc_tx_count != zk_tx_count {
-                eprintln!(
-                    "  [WARN] block[{i}]: RPC has {rpc_tx_count} txs but ZkTransactions has {zk_tx_count} \
-                     (some dropped by rpc_optional_to_transaction)"
-                );
+        for (i, rpc_block) in resp.chain_block_accepted_transactions.iter().enumerate() {
+            let block_hash = resp.added_chain_block_hashes.get(i).copied().context("VCC v2: chain block hash missing")?;
+            let header = &rpc_block.chain_block_header;
+            // Collect every rollup-lane tx in this block (not just ours) and
+            // tick our known ids off as we see them.
+            let mut lane_txs: Vec<(Transaction, u32)> = Vec::new();
+            for (merge_idx, rpc_tx) in rpc_block.accepted_transactions.iter().enumerate() {
+                if rpc_tx.subnetwork_id != Some(rollup_subnet) {
+                    continue;
+                }
+                if let Some(tx_id) = rpc_tx.verbose_data.as_ref().and_then(|v| v.transaction_id) {
+                    remaining.remove(&tx_id);
+                }
+                if let Some(tx) = rpc_optional_to_transaction(rpc_tx) {
+                    lane_txs.push((tx, merge_idx as u32));
+                }
             }
 
-            let mut builder = ActivityDigestBuilder::new();
-            for (merge_idx, zk_tx) in block_zk_txs.iter().enumerate() {
-                builder.add_leaf(to_hash(&activity_leaf(&zk_tx.tx_id(), zk_tx.version(), merge_idx as u32)));
+            if !lane_txs.is_empty() {
+                let daa_score = header.daa_score.unwrap_or(0);
+                let blue_score = header.blue_score.unwrap_or(0);
+                activity.push(BlockActivity {
+                    block_hash,
+                    selected_parent_timestamp: prev_block_timestamp,
+                    daa_score,
+                    blue_score,
+                    lane_txs,
+                });
             }
-            let context_hash = [0u32; 8]; // TODO: read real context hash
-            let activity_digest = from_hash(builder.finalize());
-            computed_lane_tip = lane_tip_next(&computed_lane_tip, &ROLLUP_LANE_KEY, &activity_digest, &context_hash);
-            let computed_hash = Hash::from_bytes(bytemuck::cast(computed_lane_tip));
 
-            let block_hash = resp.added_chain_block_hashes.get(i).copied().unwrap_or_default();
-            match rpc_block.chain_block_header.accepted_id_merkle_root {
-                Some(header_air) if computed_hash != header_air => {
-                    seq_mismatches += 1;
-                    eprintln!(
-                        "  [SEQ MISMATCH] block[{i}] {block_hash} ({zk_tx_count}/{rpc_tx_count} ZkTxs/RPC)\n    \
-                         computed: {computed_hash}\n    header:   {header_air}"
-                    );
-                }
-                None => {
-                    eprintln!("  [WARN] block[{i}] {block_hash} has no AIR in header");
-                }
-                _ => {}
+            if let Some(ts) = header.timestamp {
+                prev_block_timestamp = ts;
             }
         }
 
-        total_blocks += result.blocks_processed;
-        total_txs += result.txs_processed;
-        total_actions += result.actions_found;
-        sync_cursor = *resp.added_chain_block_hashes.last().unwrap();
+        cursor = *resp.added_chain_block_hashes.last().unwrap();
     }
 
-    if seq_mismatches > 0 {
-        bail!(
-            "{seq_mismatches} seq commitment mismatch(es) during sync — \
-             tx_id reconstruction or tx filtering bug in rollup impl"
-        );
-    }
+    Ok(activity)
+}
 
-    println!("  Synced: {} blocks, {} txs, {} actions", total_blocks, total_txs, total_actions);
-    println!("  [ok] All {total_blocks} blocks verified: computed seq commitments match block headers");
-    println!("  State root: {}", Hash::from_bytes(bytemuck::cast(prover.state_root)));
-    println!("  Seq commitment: {}", prover.lane_tip);
-    println!("  Accumulated blocks for proving: {}", prover.accumulated_blocks());
-    Ok(total_actions)
+/// Fetch and decode the KIP-21 lane proof witness for `(prove_at, lane_key)`.
+///
+/// Returns the witness + SMT proof plus consensus's stored lane_tip, so the
+/// caller can sanity-check its own `lane_tip_next` chain before paying to
+/// generate a ZK proof that would mismatch the block header's AIR.
+async fn fetch_lane_proof(
+    node: &KaspaNode,
+    prove_at: Hash,
+    lane_key: Hash,
+) -> Result<(zk_covenant_rollup_core::seq_commit::CommitmentWitness, Vec<u8>, Hash)> {
+    let resp = node.get_seq_commit_lane_proof(prove_at, lane_key).await.context("get_seq_commit_lane_proof failed")?;
+    let lane_blue_score = resp.lane_blue_score.context("lane_proof: lane_blue_score missing (lane absent at this block)")?;
+    let consensus_lane_tip = resp.lane_tip.context("lane_proof: lane_tip missing (lane absent at this block)")?;
+    let witness = zk_covenant_rollup_core::seq_commit::CommitmentWitness {
+        payload_and_ctx_digest: from_bytes(resp.payload_and_ctx_digest.as_bytes()),
+        parent_seq_commit: from_bytes(resp.parent_seq_commit.as_bytes()),
+        blue_score: lane_blue_score,
+    };
+    Ok((witness, resp.smt_proof, consensus_lane_tip))
 }
 
 async fn run_prove(prover: &mut RollupProver, backend: ProverBackend, proof_kind: ProofKind) -> Result<ProveResult> {
@@ -547,7 +587,7 @@ async fn run_prove(prover: &mut RollupProver, backend: ProverBackend, proof_kind
     let perm_exit_data = snapshot.perm_exit_data;
     let input = snapshot.input;
 
-    println!("  Proving {} block(s) with backend={:?}, kind={:?}", input.block_txs.len(), backend, proof_kind);
+    println!("  Proving {} block(s) with backend={:?}, kind={:?}", input.block_lane_txs.len(), backend, proof_kind);
     println!("  block_prove_to: {block_prove_to}");
     println!("  prev_state_hash: {}", Hash::from_bytes(bytemuck::cast(prev_state_hash)));
     println!("  prev_lane_tip: {}", Hash::from_bytes(bytemuck::cast(prev_lane_tip)));
@@ -691,6 +731,7 @@ async fn build_and_submit_proof(
     let input_redeem = converged_redeem_script(prove.prev_state_hash, prove.prev_lane_tip, &program_id, &zk_tag);
     let output_redeem = converged_redeem_script(new_state_hash, new_lane_tip, &program_id, &zk_tag);
     let output_spk = pay_to_script_hash_script(&output_redeem);
+    let input_spk = pay_to_script_hash_script(&output_redeem);
 
     // Build sig_script for the covenant input
     let sig_script =
@@ -713,12 +754,13 @@ async fn build_and_submit_proof(
         collateral_amount, collateral_outpoint.transaction_id, collateral_outpoint.index
     );
 
+    let budget = estimate_script_units_upper_bound::<PopulatedTransaction, SigHashReusedValuesUnsync>(&sig_script, &input_spk, 1000);
     // Build proof transaction: input[0]=covenant, input[1]=collateral.
     // v1 inputs must commit a `ComputeBudget`. Start both at 0; we'll measure input[0]
     // (the ZK proof script) dynamically below and overwrite its mass before fee estimation.
     let covenant_utxo_outpoint = TransactionOutpoint::new(deploy.tx_id, 0);
-    let mut inputs = vec![
-        TransactionInput::new_with_compute_budget(covenant_utxo_outpoint, sig_script, 0, 0),
+    let inputs = vec![
+        TransactionInput::new_with_compute_budget(covenant_utxo_outpoint, sig_script, 0, (budget.0 / 100) as u16 + 1),
         TransactionInput::new_with_compute_budget(collateral_outpoint, vec![], 0, 0),
     ];
 
@@ -750,11 +792,6 @@ async fn build_and_submit_proof(
         UtxoEntry::new(deploy.output_value, pay_to_script_hash_script(&input_redeem), 0, false, Some(deploy.on_chain_covenant_id));
     let collateral_entry = UtxoEntry::new(collateral_amount, keypair.deployer_spk.clone(), collateral_daa, false, None);
     let accessor = MockSeqCommitAccessor(std::collections::HashMap::from([(prove.block_prove_to, new_seq_commit_hash)]));
-    let draft_tx = Transaction::new(TX_VERSION_POST_COV_HF, inputs.clone(), outputs.clone(), 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
-    let covenant_compute_budget =
-        measure_compute_budget_for_input(&draft_tx, &[covenant_entry.clone(), collateral_entry.clone()], 0, &accessor);
-    inputs[0].mass = covenant_compute_budget.into();
-    println!("  Covenant input compute budget: {}", u16::from(covenant_compute_budget));
 
     // Estimate fee from mass
     let tmp_tx = Transaction::new(TX_VERSION_POST_COV_HF, inputs.clone(), outputs.clone(), 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
@@ -786,7 +823,13 @@ async fn build_and_submit_proof(
     proof_tx.inputs[1].signature_script = collateral_sig;
 
     // ── Local script verification (same path as on-chain) ───────────────────
-    match try_verify_tx_input(&proof_tx, &[covenant_entry, collateral_entry], 0, &accessor) {
+    match try_verify_tx_input(
+        &proof_tx,
+        &[covenant_entry, collateral_entry],
+        0,
+        &accessor,
+        proof_tx.inputs[0].mass.allowed_script_units(),
+    ) {
         Ok(()) => println!("  [ok] Local script verification passed"),
         Err(e) => bail!("Local script verification failed: {e}\n  (the on-chain script will also reject this tx)"),
     }
@@ -803,6 +846,22 @@ async fn build_and_submit_proof(
 }
 
 // ── Action / withdrawal helpers ──
+
+/// Compute fee for an action transaction by measuring the mass of its signed form.
+/// Signing is required for an accurate mass because it sets the per-input compute
+/// budget and fills in the signature_script, both of which contribute to the mass.
+fn compute_action_tx_fee(
+    unsigned_draft: Transaction,
+    secret_key: &secp256k1::SecretKey,
+    sender_spk: &ScriptPublicKey,
+    gas_amount: u64,
+    priority_feerate: f64,
+) -> u64 {
+    let signed = sign_action_tx(unsigned_draft, secret_key, sender_spk, gas_amount);
+    let mass_calc = kaspa_consensus_core::mass::MassCalculator::new(1, 10, 0);
+    let mass = mass_calc.calc_non_contextual_masses(&signed).compute_mass;
+    compute_fee(mass, priority_feerate)
+}
 
 fn sign_action_tx(tx: Transaction, secret_key: &secp256k1::SecretKey, sender_spk: &ScriptPublicKey, gas_amount: u64) -> Transaction {
     let utxo_entry = UtxoEntry::new(gas_amount, sender_spk.clone(), 0, false, None);
@@ -965,7 +1024,7 @@ async fn withdraw_exit(
         println!("  [diag] delegate_total={delegate_total} deduct={amount} change={}", delegate_total - amount);
 
         let accessor = MockSeqCommitAccessor(std::collections::HashMap::new());
-        match try_verify_tx_input(&tx, &all_entries, 0, &accessor) {
+        match try_verify_tx_input(&tx, &all_entries, 0, &accessor, tx.inputs[0].mass.allowed_script_units()) {
             Ok(()) => println!("  [ok] Local permission script verification passed"),
             Err(e) => bail!("Local permission script verification FAILED: {e}\n  (the on-chain script will also reject this tx)"),
         }
@@ -1027,60 +1086,65 @@ async fn main() -> Result<()> {
     // Get fee estimate for action transactions
     let fee_estimate = node.get_fee_estimate().await.context("get_fee_estimate failed")?;
     let priority_feerate = fee_estimate.priority_bucket.feerate;
-    let action_fee = compute_fee(2000, priority_feerate);
-    println!("  Action fee: {action_fee} sompi (feerate: {priority_feerate:.2})");
 
     // ── Phase 6: Init prover ──────────────────────────────────────────────
 
     println!("\nPhase 6: Initializing prover...");
     let db_path = std::env::temp_dir().join(format!("cli-demo-rollup-db-{}", deploy.on_chain_covenant_id));
     let db = std::sync::Arc::new(RollupDb::open(&db_path).context("open rollup db")?);
-    let mut prover = RollupProver::new(
-        deploy.on_chain_covenant_id,
-        empty_tree_root(),
-        deploy.initial_seq,
-        deploy.starting_block,
-        deploy.starting_block_timestamp,
-        db,
-    );
+    let mut prover = RollupProver::new(deploy.on_chain_covenant_id, empty_tree_root(), deploy.initial_seq, deploy.starting_block, db);
     println!("  Prover initialized. Starting block: {}", deploy.starting_block);
+
+    // Record the tx_id of every lane tx we submit. `find_our_activity` keeps
+    // paging the virtual chain until it has seen all of them in chain-accepted
+    // blocks — that's the "we're caught up" signal.
+    let mut submitted_tx_ids: Vec<Hash> = Vec::new();
 
     // ── Phase 7: Entry deposit ────────────────────────────────────────────
 
     println!("\nPhase 7: Entry deposit ({deposit_amount} sompi to deployer L2 account)...");
     let entry_gas = Utxo { tx_id: deploy.tx_id, index: 1, amount: deploy.deploy_change };
-    let entry_tx = build_entry_tx(deployer_pk, deploy.on_chain_covenant_id, deposit_amount, &entry_gas, action_fee)
+    let draft_entry =
+        build_entry_tx(deployer_pk, deploy.on_chain_covenant_id, deposit_amount, &entry_gas, 0).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let entry_fee = compute_action_tx_fee(draft_entry, &keypair.secret_key, &keypair.deployer_spk, entry_gas.amount, priority_feerate);
+    println!("  Entry fee: {entry_fee} sompi (feerate: {priority_feerate:.2})");
+    let entry_tx = build_entry_tx(deployer_pk, deploy.on_chain_covenant_id, deposit_amount, &entry_gas, entry_fee)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let entry_tx_id = {
         let signed = sign_action_tx(entry_tx, &keypair.secret_key, &keypair.deployer_spk, entry_gas.amount);
         let tx_id = signed.id();
         println!("  Entry tx ID: {tx_id}");
+        submitted_tx_ids.push(tx_id);
         node.submit_transaction(tx_to_rpc(signed), false).await.context("submit entry tx")?;
         println!("  Waiting for confirmation...");
         wait_for_tx_confirmation(&node, tx_id).await?;
         println!("  Entry tx confirmed!");
         tx_id
     };
-    let entry_change_amount = entry_gas.amount - deposit_amount - action_fee;
+    let entry_change_amount = entry_gas.amount - deposit_amount - entry_fee;
 
     // ── Phase 8: Exit #1 ─────────────────────────────────────────────────
 
     println!("\nPhase 8: Exit #1 ({exit1_amount} L2 sompi from deployer, dest=deployer)...");
     let exit1_gas = Utxo { tx_id: entry_tx_id, index: 1, amount: entry_change_amount };
     let exit1_dest_spk_bytes = keypair.deployer_spk.script().to_vec();
+    let draft_exit1 =
+        build_exit_tx(deployer_pk, exit1_amount, &exit1_dest_spk_bytes, &exit1_gas, 0).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let exit1_fee = compute_action_tx_fee(draft_exit1, &keypair.secret_key, &keypair.deployer_spk, exit1_gas.amount, priority_feerate);
     let exit1_tx =
-        build_exit_tx(deployer_pk, exit1_amount, &exit1_dest_spk_bytes, &exit1_gas, action_fee).map_err(|e| anyhow::anyhow!("{e}"))?;
+        build_exit_tx(deployer_pk, exit1_amount, &exit1_dest_spk_bytes, &exit1_gas, exit1_fee).map_err(|e| anyhow::anyhow!("{e}"))?;
     let exit1_tx_id = {
         let signed = sign_action_tx(exit1_tx, &keypair.secret_key, &keypair.deployer_spk, exit1_gas.amount);
         let tx_id = signed.id();
         println!("  Exit #1 tx ID: {tx_id}");
+        submitted_tx_ids.push(tx_id);
         node.submit_transaction(tx_to_rpc(signed), false).await.context("submit exit #1 tx")?;
         println!("  Waiting for confirmation...");
         wait_for_tx_confirmation(&node, tx_id).await?;
         println!("  Exit #1 tx confirmed!");
         tx_id
     };
-    let exit1_output_amount = exit1_gas.amount - action_fee;
+    let exit1_output_amount = exit1_gas.amount - exit1_fee;
 
     // ── Phase 9: Generate keypair #2 ─────────────────────────────────────
 
@@ -1097,31 +1161,40 @@ async fn main() -> Result<()> {
 
     println!("\nPhase 10: Transfer ({transfer_amount} L2 sompi, deployer -> account #2)...");
     let transfer_gas = Utxo { tx_id: exit1_tx_id, index: 0, amount: exit1_output_amount };
-    let transfer_tx = build_transfer_tx(deployer_pk, pk2_hash, transfer_amount, &transfer_gas, &addr2, action_fee)
+    let draft_transfer =
+        build_transfer_tx(deployer_pk, pk2_hash, transfer_amount, &transfer_gas, &addr2, 0).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let transfer_fee =
+        compute_action_tx_fee(draft_transfer, &keypair.secret_key, &keypair.deployer_spk, transfer_gas.amount, priority_feerate);
+    let transfer_tx = build_transfer_tx(deployer_pk, pk2_hash, transfer_amount, &transfer_gas, &addr2, transfer_fee)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let transfer_tx_id = {
         let signed = sign_action_tx(transfer_tx, &keypair.secret_key, &keypair.deployer_spk, transfer_gas.amount);
         let tx_id = signed.id();
         println!("  Transfer tx ID: {tx_id}");
+        submitted_tx_ids.push(tx_id);
         node.submit_transaction(tx_to_rpc(signed), false).await.context("submit transfer tx")?;
         println!("  Waiting for confirmation...");
         wait_for_tx_confirmation(&node, tx_id).await?;
         println!("  Transfer tx confirmed!");
         tx_id
     };
-    let transfer_output_amount = transfer_gas.amount - action_fee;
+    let transfer_output_amount = transfer_gas.amount - transfer_fee;
 
     // ── Phase 11: Exit #2 ────────────────────────────────────────────────
 
     // Exit #2 destination is deployer's address so the output serves as proof collateral
     println!("\nPhase 11: Exit #2 ({exit2_amount} L2 sompi from account #2, dest=deployer)...");
     let exit2_gas = Utxo { tx_id: transfer_tx_id, index: 0, amount: transfer_output_amount };
+    let draft_exit2 =
+        build_exit_tx(pk2_hash, exit2_amount, &exit1_dest_spk_bytes, &exit2_gas, 0).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let exit2_fee = compute_action_tx_fee(draft_exit2, &sk2, &spk2, exit2_gas.amount, priority_feerate);
     let exit2_tx =
-        build_exit_tx(pk2_hash, exit2_amount, &exit1_dest_spk_bytes, &exit2_gas, action_fee).map_err(|e| anyhow::anyhow!("{e}"))?;
+        build_exit_tx(pk2_hash, exit2_amount, &exit1_dest_spk_bytes, &exit2_gas, exit2_fee).map_err(|e| anyhow::anyhow!("{e}"))?;
     let exit2_tx_id = {
         let signed = sign_action_tx(exit2_tx, &sk2, &spk2, exit2_gas.amount);
         let tx_id = signed.id();
         println!("  Exit #2 tx ID: {tx_id}");
+        submitted_tx_ids.push(tx_id);
         node.submit_transaction(tx_to_rpc(signed), false).await.context("submit exit #2 tx")?;
         println!("  Waiting for confirmation...");
         wait_for_tx_confirmation(&node, tx_id).await?;
@@ -1129,21 +1202,45 @@ async fn main() -> Result<()> {
         tx_id
     };
 
-    // ── Phase 12: Sync chain (retry until all actions found) ─────────────
+    // ── Phase 12: Locate our activity + fetch lane proof witness ─────────
 
-    println!("\nPhase 12: Syncing chain...");
-    let expected_actions = 4; // entry + exit1 + transfer + exit2
-    let mut cumulative_actions = 0usize;
-    loop {
-        let actions = sync_chain(&node, &mut prover).await?;
-        cumulative_actions += actions;
-        if cumulative_actions >= expected_actions {
-            println!("  All {expected_actions} actions found.");
-            break;
-        }
-        println!("  Found {cumulative_actions}/{expected_actions} actions so far, waiting for more blocks...");
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    println!("\nPhase 12: Locating our tx activity on chain...");
+    let activity = find_our_activity(&node, &submitted_tx_ids, deploy.starting_block, deploy.starting_block_timestamp).await?;
+    println!("  Found activity in {} block(s):", activity.len());
+    for block in &activity {
+        println!(
+            "    {} — {} lane tx(s) (daa={}, blue={})",
+            block.block_hash,
+            block.lane_txs.len(),
+            block.daa_score,
+            block.blue_score
+        );
     }
+
+    let mut total_actions = 0usize;
+    for block in &activity {
+        let result = prover.apply_block_activity(block);
+        total_actions += result.actions_found;
+    }
+    println!("  Applied {total_actions} actions across {} activity block(s).", activity.len());
+    println!("  State root: {}", Hash::from_bytes(bytemuck::cast(prover.state_root)));
+    println!("  Lane tip:   {}", prover.lane_tip);
+
+    let prove_at_block = activity.last().context("no activity blocks found — nothing to prove")?.block_hash;
+    println!("  Fetching lane proof at {prove_at_block}...");
+    let lane_key_hash = Hash::from_bytes(bytemuck::cast(ROLLUP_LANE_KEY));
+    let (witness, smt_proof_bytes, consensus_lane_tip) = fetch_lane_proof(&node, prove_at_block, lane_key_hash).await?;
+    if prover.lane_tip != consensus_lane_tip {
+        bail!(
+            "derived lane_tip disagrees with consensus at {prove_at_block} — \
+             KIP-21 anchor or activity mismatch (see deploy_covenant TODO).\n  \
+             derived:   {}\n  consensus: {}",
+            prover.lane_tip,
+            consensus_lane_tip,
+        );
+    }
+    prover.set_lane_proof(witness, smt_proof_bytes);
+    println!("  Lane proof witness installed (blue_score={}).", prover.pending_lane_proof.as_ref().unwrap().witness.blue_score);
 
     // ── Phase 13: Prove ──────────────────────────────────────────────────
 

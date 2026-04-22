@@ -319,6 +319,10 @@ pub struct App {
     pub prover: Option<RollupProver>,
     pub proving_status: String,
     pub pruning_point: Hash,
+    /// Rolling `selected_parent_timestamp` used for KIP-21 context hashes.
+    /// Advances as chain blocks are processed; seeded from the deploy
+    /// starting block when the prover is (re)initialised.
+    pub sync_selected_parent_timestamp: u64,
     pub prover_backend: ProverBackend,
     pub proof_in_progress: bool,
     pub last_proof_result: Option<String>,
@@ -551,6 +555,7 @@ impl App {
             prover: None,
             proving_status: "No covenant selected".into(),
             pruning_point: Hash::default(),
+            sync_selected_parent_timestamp: 0,
             prover_backend: ProverBackend::Local,
             proof_in_progress: false,
             last_proof_result: None,
@@ -775,14 +780,8 @@ impl App {
                         let initial_seq = rec.deploy_initial_seq.unwrap_or_default();
                         let prover_cov_id = rec.on_chain_covenant_id.unwrap_or(id);
                         let initial_state_root = zk_covenant_rollup_core::state::empty_tree_root();
-                        self.prover = Some(RollupProver::new(
-                            prover_cov_id,
-                            initial_state_root,
-                            initial_seq,
-                            starting_block,
-                            starting_block_timestamp,
-                            self.db.clone(),
-                        ));
+                        self.prover = Some(RollupProver::new(prover_cov_id, initial_state_root, initial_seq, starting_block, self.db.clone()));
+                        self.sync_selected_parent_timestamp = starting_block_timestamp;
                         self.log("Auto-initialized prover for deployed covenant".into());
                         self.pending_ops.push(PendingOp::FetchAndProcessChain);
                     }
@@ -1644,7 +1643,7 @@ impl App {
         let gen = self.proof_generation;
         self.log(format!(
             "Starting proof: {} blocks, backend={}, kind={}",
-            snapshot.input.block_txs.len(),
+            snapshot.input.block_lane_txs.len(),
             self.prover_backend.label(),
             proof_kind.label()
         ));
@@ -1914,7 +1913,7 @@ impl App {
             ));
 
             let utxos = vec![covenant_entry.clone(), collateral_entry.clone()];
-            match zk_covenant_rollup_host::tx::try_verify_tx_input(&tx, &utxos, 0, &accessor) {
+            match zk_covenant_rollup_host::tx::try_verify_tx_input(&tx, &utxos, 0, &accessor, tx.inputs[0].mass.allowed_script_units()) {
                 Ok(()) => self.log("Local script verification: PASSED".into()),
                 Err(e) => {
                     self.log(format!("Local script verification FAILED: {e}"));
@@ -2766,29 +2765,27 @@ impl App {
             }
             BgResult::ChainFetched(response) => {
                 let processed = self.prover.as_mut().map(|prover| {
-                    let result = prover.process_chain_response(&response);
-                    if result.blocks_processed > 0 {
+                    let (blocks, actions) = prover.process_vcc_rollup_lane(&response, &mut self.sync_selected_parent_timestamp);
+                    if blocks > 0 {
                         // The lane-proof witness was tied to the previous tip; the
                         // accumulator has now advanced, so any cached witness is stale.
                         prover.clear_lane_proof();
                     }
-                    result
+                    (blocks, actions)
                 });
-                if let Some(result) = processed {
-                    let root_hex = faster_hex::hex_string(bytemuck::bytes_of(&result.new_state_root));
-                    self.proving_status = format!(
-                        "Processed {} blocks, {} txs, {} actions | root: {}..{}",
-                        result.blocks_processed,
-                        result.txs_processed,
-                        result.actions_found,
-                        &root_hex[..8],
-                        &root_hex[root_hex.len() - 8..],
-                    );
-                    if result.blocks_processed > 0 {
-                        self.log(format!(
-                            "Chain processing: {} blocks, {} txs ({} actions)",
-                            result.blocks_processed, result.txs_processed, result.actions_found,
-                        ));
+                if let Some((blocks, actions)) = processed {
+                    if let Some(prover) = &self.prover {
+                        let root_hex = faster_hex::hex_string(bytemuck::bytes_of(&prover.state_root));
+                        self.proving_status = format!(
+                            "Applied {} activity blocks, {} actions | root: {}..{}",
+                            blocks,
+                            actions,
+                            &root_hex[..8],
+                            &root_hex[root_hex.len() - 8..],
+                        );
+                    }
+                    if blocks > 0 {
+                        self.log(format!("Chain processing: {blocks} activity blocks ({actions} actions)"));
                     }
                 }
                 // Mine on-chain txs into history (confirms ours, records others')
@@ -2855,9 +2852,9 @@ impl App {
                                             initial_state_root,
                                             deploy_initial_seq,
                                             deploy_starting_block,
-                                            deploy_starting_block_timestamp,
                                             self.db.clone(),
                                         ));
+                                        self.sync_selected_parent_timestamp = deploy_starting_block_timestamp;
                                         self.log("Auto-initialized prover after deploy".into());
                                         self.pending_ops.push(PendingOp::FetchAndProcessChain);
                                     }
@@ -2977,7 +2974,7 @@ impl App {
                         let covenant_id = self.covenants[cov_idx].0;
                         let state = ProvingState {
                             last_proved_block_hash: prover.last_processed_block,
-                            last_proved_block_timestamp: prover.last_processed_block_timestamp,
+                            last_proved_block_timestamp: self.sync_selected_parent_timestamp,
                             state_root: Hash::from_bytes(bytemuck::cast(prover.state_root)),
                             seq_commitment: prover.lane_tip,
                             proof_count: self.db.get_proving_state(covenant_id).ok().flatten().map(|s| s.proof_count + 1).unwrap_or(1),
@@ -3330,14 +3327,8 @@ impl App {
             let initial_seq = rec.deploy_initial_seq.unwrap_or_default();
             let prover_cov_id = rec.on_chain_covenant_id.unwrap_or(id);
             let initial_state_root = zk_covenant_rollup_core::state::empty_tree_root();
-            self.prover = Some(RollupProver::new(
-                prover_cov_id,
-                initial_state_root,
-                initial_seq,
-                starting_block,
-                starting_block_timestamp,
-                self.db.clone(),
-            ));
+            self.prover = Some(RollupProver::new(prover_cov_id, initial_state_root, initial_seq, starting_block, self.db.clone()));
+            self.sync_selected_parent_timestamp = starting_block_timestamp;
             self.log("Auto-initialized prover for deployed covenant".into());
             self.pending_ops.push(PendingOp::FetchAndProcessChain);
         }

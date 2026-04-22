@@ -1,0 +1,277 @@
+   Compiling risc0-circuit-recursion-sys v4.0.2
+   Compiling risc0-circuit-keccak-sys v4.0.2
+   Compiling risc0-circuit-rv32im v4.0.4
+   Compiling zk-covenant-rollup-methods v0.1.0 (/home/maxim/kaspa/rusty-kaspa/examples/zk-covenant-rollup/methods)
+warning: risc0-circuit-recursion-sys@4.0.2: /home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-circuit-recursion-sys@4.0.2: /home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-circuit-recursion-sys@4.0.2:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-circuit-recursion-sys@4.0.2:       |                            ~~~~~^~~~~~
+warning: risc0-circuit-recursion-sys@4.0.2: /home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-circuit-recursion-sys@4.0.2: /home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-circuit-recursion-sys@4.0.2:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-circuit-recursion-sys@4.0.2:       |                            ~~~~~^~~~~~
+warning: risc0-circuit-recursion-sys@4.0.2: /home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-circuit-recursion-sys@4.0.2: /home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-circuit-recursion-sys@4.0.2:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-circuit-recursion-sys@4.0.2:       |                            ~~~~~^~~~~~
+warning: risc0-circuit-recursion-sys@4.0.2: kernels/cuda/ffi.cu: In member function 'void HostExecContext::verifyWom(uint32_t)':
+warning: risc0-circuit-recursion-sys@4.0.2: kernels/cuda/ffi.cu:227:25: warning: unused parameter 'mode' [-Wunused-parameter]
+warning: risc0-circuit-recursion-sys@4.0.2:   227 |   void verifyWom(uint32_t mode) {
+warning: risc0-circuit-recursion-sys@4.0.2:       |                ~~~~~~~~~^~~~
+warning: risc0-circuit-recursion-sys@4.0.2: /home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-circuit-recursion-sys@4.0.2: /home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-circuit-recursion-sys@4.0.2:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-circuit-recursion-sys@4.0.2:       |                            ~~~~~^~~~~~
+warning: risc0-circuit-recursion-sys@4.0.2: /home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+warning: risc0-circuit-recursion-sys@4.0.2: /home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+warning: risc0-circuit-recursion-sys@4.0.2:    82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+warning: risc0-circuit-recursion-sys@4.0.2:       |                            ~~~~~^~~~~~
+warning: risc0-circuit-recursion-sys@4.0.2: Killed
+warning: risc0-circuit-recursion-sys@4.0.2: ToolExecError: command did not execute successfully (status code exit status: 137): LC_ALL="C" "/usr/local/cuda/bin/nvcc" "-ccbin=c++" "-Xcompiler" "-O3" "-Xcompiler" "-ffunction-sections" "-Xcompiler" "-fdata-sections" "-Xcompiler" "-fPIC" "-m64" "-I" "/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda" "-I" "/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/cxx" "-I" "/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sppark-0.1.14/sppark" "-Xcompiler" "-Wall" "-Xcompiler" "-Wextra" "-DFEATURE_BABY_BEAR" "-arch=native" "-diag-suppress=177" "-diag-suppress=2922" "-Xcudafe" "--display_error_number" "-Xcompiler" "-Wno-missing-braces,-Wno-unused-function" "-o" "/home/maxim/kaspa/rusty-kaspa/target/release/build/risc0-circuit-recursion-sys-f623b7eb3033b99a/out/c1cd554380eb85a8-step_exec.o" "-c" "--device-c" "kernels/cuda/step_exec.cu"
+error: failed to run custom build command for `risc0-circuit-recursion-sys v4.0.2`
+
+Caused by:
+  process didn't exit successfully: `/home/maxim/kaspa/rusty-kaspa/target/release/build/risc0-circuit-recursion-sys-80da1c5ea279246c/build-script-build` (exit status: 1)
+  --- stdout
+  cargo:rerun-if-changed=kernels/cxx
+  cargo:rerun-if-env-changed=RISC0_SKIP_BUILD_KERNELS
+  cargo:rerun-if-changed=kernels/cxx/extern.cpp
+  cargo:rerun-if-changed=kernels/cxx/ffi.cpp
+  cargo:rerun-if-changed=kernels/cxx/poly_fp.cpp
+  cargo:rerun-if-changed=kernels/cxx/step_compute_accum.cpp
+  cargo:rerun-if-changed=kernels/cxx/step_exec.cpp
+  cargo:rerun-if-changed=kernels/cxx/step_verify_accum.cpp
+  cargo:rerun-if-changed=kernels/cxx/step_verify_bytes.cpp
+  cargo:rerun-if-changed=kernels/cxx/step_verify_mem.cpp
+  OUT_DIR = Some(/home/maxim/kaspa/rusty-kaspa/target/release/build/risc0-circuit-recursion-sys-f623b7eb3033b99a/out)
+  OPT_LEVEL = Some(3)
+  TARGET = Some(x86_64-unknown-linux-gnu)
+  CARGO_ENCODED_RUSTFLAGS = Some(-Ctarget-cpu=native)
+  HOST = Some(x86_64-unknown-linux-gnu)
+  cargo:rerun-if-env-changed=CXX_x86_64-unknown-linux-gnu
+  CXX_x86_64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CXX_x86_64_unknown_linux_gnu
+  CXX_x86_64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CXX
+  HOST_CXX = None
+  cargo:rerun-if-env-changed=CXX
+  CXX = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  RUSTC_WRAPPER = Some()
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  CARGO_CFG_TARGET_FEATURE = Some(adx,aes,avx,avx2,bmi1,bmi2,cmpxchg16b,f16c,fma,fxsr,lzcnt,movbe,pclmulqdq,popcnt,rdrand,rdseed,sha,sse,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,xsave,xsavec,xsaveopt,xsaves)
+  cargo:rerun-if-env-changed=CXXFLAGS
+  CXXFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CXXFLAGS
+  HOST_CXXFLAGS = None
+  cargo:rerun-if-env-changed=CXXFLAGS_x86_64_unknown_linux_gnu
+  CXXFLAGS_x86_64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CXXFLAGS_x86_64-unknown-linux-gnu
+  CXXFLAGS_x86_64-unknown-linux-gnu = None
+  OUT_DIR = Some(/home/maxim/kaspa/rusty-kaspa/target/release/build/risc0-circuit-recursion-sys-f623b7eb3033b99a/out)
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  TARGET = Some(x86_64-unknown-linux-gnu)
+  CARGO_CFG_TARGET_FEATURE = Some(adx,aes,avx,avx2,bmi1,bmi2,cmpxchg16b,f16c,fma,fxsr,lzcnt,movbe,pclmulqdq,popcnt,rdrand,rdseed,sha,sse,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,xsave,xsavec,xsaveopt,xsaves)
+  HOST = Some(x86_64-unknown-linux-gnu)
+  cargo:rerun-if-env-changed=CXXFLAGS
+  CXXFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CXXFLAGS
+  HOST_CXXFLAGS = None
+  cargo:rerun-if-env-changed=CXXFLAGS_x86_64_unknown_linux_gnu
+  CXXFLAGS_x86_64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CXXFLAGS_x86_64-unknown-linux-gnu
+  CXXFLAGS_x86_64-unknown-linux-gnu = None
+  OUT_DIR = Some(/home/maxim/kaspa/rusty-kaspa/target/release/build/risc0-circuit-recursion-sys-f623b7eb3033b99a/out)
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  TARGET = Some(x86_64-unknown-linux-gnu)
+  CARGO_CFG_TARGET_FEATURE = Some(adx,aes,avx,avx2,bmi1,bmi2,cmpxchg16b,f16c,fma,fxsr,lzcnt,movbe,pclmulqdq,popcnt,rdrand,rdseed,sha,sse,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,xsave,xsavec,xsaveopt,xsaves)
+  HOST = Some(x86_64-unknown-linux-gnu)
+  cargo:rerun-if-env-changed=CXXFLAGS
+  CXXFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CXXFLAGS
+  HOST_CXXFLAGS = None
+  cargo:rerun-if-env-changed=CXXFLAGS_x86_64_unknown_linux_gnu
+  CXXFLAGS_x86_64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CXXFLAGS_x86_64-unknown-linux-gnu
+  CXXFLAGS_x86_64-unknown-linux-gnu = None
+  OUT_DIR = Some(/home/maxim/kaspa/rusty-kaspa/target/release/build/risc0-circuit-recursion-sys-f623b7eb3033b99a/out)
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  TARGET = Some(x86_64-unknown-linux-gnu)
+  CARGO_CFG_TARGET_FEATURE = Some(adx,aes,avx,avx2,bmi1,bmi2,cmpxchg16b,f16c,fma,fxsr,lzcnt,movbe,pclmulqdq,popcnt,rdrand,rdseed,sha,sse,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,xsave,xsavec,xsaveopt,xsaves)
+  HOST = Some(x86_64-unknown-linux-gnu)
+  cargo:rerun-if-env-changed=CXXFLAGS
+  CXXFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CXXFLAGS
+  HOST_CXXFLAGS = None
+  cargo:rerun-if-env-changed=CXXFLAGS_x86_64_unknown_linux_gnu
+  CXXFLAGS_x86_64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CXXFLAGS_x86_64-unknown-linux-gnu
+  CXXFLAGS_x86_64-unknown-linux-gnu = None
+  OUT_DIR = Some(/home/maxim/kaspa/rusty-kaspa/target/release/build/risc0-circuit-recursion-sys-f623b7eb3033b99a/out)
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  TARGET = Some(x86_64-unknown-linux-gnu)
+  CARGO_CFG_TARGET_FEATURE = Some(adx,aes,avx,avx2,bmi1,bmi2,cmpxchg16b,f16c,fma,fxsr,lzcnt,movbe,pclmulqdq,popcnt,rdrand,rdseed,sha,sse,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,xsave,xsavec,xsaveopt,xsaves)
+  HOST = Some(x86_64-unknown-linux-gnu)
+  cargo:rerun-if-env-changed=CXXFLAGS
+  CXXFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CXXFLAGS
+  HOST_CXXFLAGS = None
+  cargo:rerun-if-env-changed=CXXFLAGS_x86_64_unknown_linux_gnu
+  CXXFLAGS_x86_64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CXXFLAGS_x86_64-unknown-linux-gnu
+  CXXFLAGS_x86_64-unknown-linux-gnu = None
+  OUT_DIR = Some(/home/maxim/kaspa/rusty-kaspa/target/release/build/risc0-circuit-recursion-sys-f623b7eb3033b99a/out)
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  TARGET = Some(x86_64-unknown-linux-gnu)
+  CARGO_CFG_TARGET_FEATURE = Some(adx,aes,avx,avx2,bmi1,bmi2,cmpxchg16b,f16c,fma,fxsr,lzcnt,movbe,pclmulqdq,popcnt,rdrand,rdseed,sha,sse,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,xsave,xsavec,xsaveopt,xsaves)
+  HOST = Some(x86_64-unknown-linux-gnu)
+  cargo:rerun-if-env-changed=CXXFLAGS
+  CXXFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CXXFLAGS
+  HOST_CXXFLAGS = None
+  cargo:rerun-if-env-changed=CXXFLAGS_x86_64_unknown_linux_gnu
+  CXXFLAGS_x86_64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CXXFLAGS_x86_64-unknown-linux-gnu
+  CXXFLAGS_x86_64-unknown-linux-gnu = None
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  cargo:rerun-if-env-changed=AR_x86_64-unknown-linux-gnu
+  AR_x86_64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=AR_x86_64_unknown_linux_gnu
+  AR_x86_64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_AR
+  HOST_AR = None
+  cargo:rerun-if-env-changed=AR
+  AR = None
+  cargo:rerun-if-env-changed=ARFLAGS
+  ARFLAGS = None
+  cargo:rerun-if-env-changed=HOST_ARFLAGS
+  HOST_ARFLAGS = None
+  cargo:rerun-if-env-changed=ARFLAGS_x86_64_unknown_linux_gnu
+  ARFLAGS_x86_64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=ARFLAGS_x86_64-unknown-linux-gnu
+  ARFLAGS_x86_64-unknown-linux-gnu = None
+  cargo:rustc-link-lib=static=risc0_recursion_cpu
+  cargo:rustc-link-search=native=/home/maxim/kaspa/rusty-kaspa/target/release/build/risc0-circuit-recursion-sys-f623b7eb3033b99a/out
+  cargo:rerun-if-env-changed=CXXSTDLIB_x86_64-unknown-linux-gnu
+  CXXSTDLIB_x86_64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CXXSTDLIB_x86_64_unknown_linux_gnu
+  CXXSTDLIB_x86_64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CXXSTDLIB
+  HOST_CXXSTDLIB = None
+  cargo:rerun-if-env-changed=CXXSTDLIB
+  CXXSTDLIB = None
+  cargo:rustc-link-lib=stdc++
+  cargo:rerun-if-changed=kernels/cuda
+  cargo:rerun-if-env-changed=RISC0_SKIP_BUILD_KERNELS
+  cargo:rerun-if-changed=kernels/cuda/eval_check.cu
+  cargo:rerun-if-changed=kernels/cuda/ffi.cu
+  cargo:rerun-if-changed=kernels/cuda/ffi_supra.cu
+  cargo:rerun-if-changed=kernels/cuda/sppark.cu
+  cargo:rerun-if-changed=kernels/cuda/step_compute_accum.cu
+  cargo:rerun-if-changed=kernels/cuda/step_exec.cu
+  cargo:rerun-if-changed=kernels/cuda/step_verify_accum.cu
+  cargo:rerun-if-changed=kernels/cuda/step_verify_bytes.cu
+  cargo:rerun-if-changed=kernels/cuda/step_verify_mem.cu
+  cargo:rerun-if-changed=kernels/cuda
+  cargo:rerun-if-env-changed=NVCC_APPEND_FLAGS
+  cargo:rerun-if-env-changed=NVCC_PREPEND_FLAGS
+  cargo:rerun-if-env-changed=RISC0_CUDART_LINKAGE
+  cargo:rerun-if-env-changed=NVCC_CCBIN
+  cargo:rerun-if-changed=/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda
+  cargo:rerun-if-changed=/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/cxx
+  cargo:rerun-if-changed=/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sppark-0.1.14/sppark
+  OUT_DIR = Some(/home/maxim/kaspa/rusty-kaspa/target/release/build/risc0-circuit-recursion-sys-f623b7eb3033b99a/out)
+  OPT_LEVEL = Some(3)
+  TARGET = Some(x86_64-unknown-linux-gnu)
+  CARGO_ENCODED_RUSTFLAGS = Some(-Ctarget-cpu=native)
+  HOST = Some(x86_64-unknown-linux-gnu)
+  cargo:rerun-if-env-changed=CXX_x86_64-unknown-linux-gnu
+  CXX_x86_64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=CXX_x86_64_unknown_linux_gnu
+  CXX_x86_64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_CXX
+  HOST_CXX = None
+  cargo:rerun-if-env-changed=CXX
+  CXX = None
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  RUSTC_WRAPPER = Some()
+  cargo:rerun-if-env-changed=NVCC_x86_64-unknown-linux-gnu
+  NVCC_x86_64-unknown-linux-gnu = None
+  cargo:rerun-if-env-changed=NVCC_x86_64_unknown_linux_gnu
+  NVCC_x86_64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=HOST_NVCC
+  HOST_NVCC = None
+  cargo:rerun-if-env-changed=NVCC
+  NVCC = Some(/usr/local/cuda/bin/nvcc)
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  CARGO_CFG_TARGET_FEATURE = Some(adx,aes,avx,avx2,bmi1,bmi2,cmpxchg16b,f16c,fma,fxsr,lzcnt,movbe,pclmulqdq,popcnt,rdrand,rdseed,sha,sse,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,xsave,xsavec,xsaveopt,xsaves)
+  cargo:rerun-if-env-changed=CXXFLAGS
+  CXXFLAGS = None
+  cargo:rerun-if-env-changed=HOST_CXXFLAGS
+  HOST_CXXFLAGS = None
+  cargo:rerun-if-env-changed=CXXFLAGS_x86_64_unknown_linux_gnu
+  CXXFLAGS_x86_64_unknown_linux_gnu = None
+  cargo:rerun-if-env-changed=CXXFLAGS_x86_64-unknown-linux-gnu
+  CXXFLAGS_x86_64-unknown-linux-gnu = None
+  cargo:warning=/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+  cargo:warning=/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+  cargo:warning=   82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+  cargo:warning=      |                            ~~~~~^~~~~~
+  cargo:warning=/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+  cargo:warning=/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+  cargo:warning=   82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+  cargo:warning=      |                            ~~~~~^~~~~~
+  cargo:warning=/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+  cargo:warning=/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+  cargo:warning=   82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+  cargo:warning=      |                            ~~~~~^~~~~~
+  cargo:warning=kernels/cuda/ffi.cu: In member function 'void HostExecContext::verifyWom(uint32_t)':
+  cargo:warning=kernels/cuda/ffi.cu:227:25: warning: unused parameter 'mode' [-Wunused-parameter]
+  cargo:warning=  227 |   void verifyWom(uint32_t mode) {
+  cargo:warning=      |                ~~~~~~~~~^~~~
+  cargo:warning=/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+  cargo:warning=/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+  cargo:warning=   82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+  cargo:warning=      |                            ~~~~~^~~~~~
+  cargo:warning=/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h: In constructor 'constexpr Fp::Fp(uint32_t, bool)':
+  cargo:warning=/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda/fp.h:82:33: warning: unused parameter 'ignore' [-Wunused-parameter]
+  cargo:warning=   82 |   __host__ __device__ constexpr Fp(uint32_t val, bool ignore) : val(val) {}
+  cargo:warning=      |                            ~~~~~^~~~~~
+  cargo:warning=Killed
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 0
+  exit status: 137
+  cargo:warning=ToolExecError: command did not execute successfully (status code exit status: 137): LC_ALL="C" "/usr/local/cuda/bin/nvcc" "-ccbin=c++" "-Xcompiler" "-O3" "-Xcompiler" "-ffunction-sections" "-Xcompiler" "-fdata-sections" "-Xcompiler" "-fPIC" "-m64" "-I" "/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda" "-I" "/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/cxx" "-I" "/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sppark-0.1.14/sppark" "-Xcompiler" "-Wall" "-Xcompiler" "-Wextra" "-DFEATURE_BABY_BEAR" "-arch=native" "-diag-suppress=177" "-diag-suppress=2922" "-Xcudafe" "--display_error_number" "-Xcompiler" "-Wno-missing-braces,-Wno-unused-function" "-o" "/home/maxim/kaspa/rusty-kaspa/target/release/build/risc0-circuit-recursion-sys-f623b7eb3033b99a/out/c1cd554380eb85a8-step_exec.o" "-c" "--device-c" "kernels/cuda/step_exec.cu"
+  exit status: 0
+
+  --- stderr
+
+
+  error occurred in cc-rs: command did not execute successfully (status code exit status: 137): LC_ALL="C" "/usr/local/cuda/bin/nvcc" "-ccbin=c++" "-Xcompiler" "-O3" "-Xcompiler" "-ffunction-sections" "-Xcompiler" "-fdata-sections" "-Xcompiler" "-fPIC" "-m64" "-I" "/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/kernels/zkp/cuda" "-I" "/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/risc0-sys-1.5.0/cxx" "-I" "/home/maxim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sppark-0.1.14/sppark" "-Xcompiler" "-Wall" "-Xcompiler" "-Wextra" "-DFEATURE_BABY_BEAR" "-arch=native" "-diag-suppress=177" "-diag-suppress=2922" "-Xcudafe" "--display_error_number" "-Xcompiler" "-Wno-missing-braces,-Wno-unused-function" "-o" "/home/maxim/kaspa/rusty-kaspa/target/release/build/risc0-circuit-recursion-sys-f623b7eb3033b99a/out/c1cd554380eb85a8-step_exec.o" "-c" "--device-c" "kernels/cuda/step_exec.cu"
+
+
+warning: build failed, waiting for other jobs to finish...
