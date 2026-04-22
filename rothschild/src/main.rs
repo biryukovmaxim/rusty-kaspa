@@ -3,6 +3,7 @@ use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 use clap::{Arg, ArgAction, Command};
 use itertools::Itertools;
 use kaspa_addresses::{Address, Prefix, Version};
+use kaspa_consensus_core::subnets::SUBNETWORK_NAMESPACE_LEN;
 use kaspa_consensus_core::{
     config::params::{TESTNET_PARAMS, TESTNET12_PARAMS},
     constants::{SOMPI_PER_KASPA, TX_VERSION, TX_VERSION_POST_COV_HF},
@@ -556,7 +557,7 @@ async fn maybe_send_tx(
             .map(|_| {
                 let mut bytes = [0u8; SUBNETWORK_ID_SIZE];
                 loop {
-                    rng.fill(&mut bytes[..]);
+                    rng.fill(&mut bytes[..SUBNETWORK_NAMESPACE_LEN]);
                     // Reserved IDs have the form [x, 0, 0, ..., 0] (first byte + 19 zero bytes)
                     if bytes[1..].iter().any(|&b| b != 0) {
                         return SubnetworkId::from_bytes(bytes);
