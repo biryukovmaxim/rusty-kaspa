@@ -15,6 +15,31 @@ use kaspa_txscript::{
     TxScriptEngine,
 };
 
+/// Measure and stamp per-input compute budgets into a v1 transaction.
+///
+/// The transaction should already contain final script bodies for every input that
+/// participates in script execution. For manually signed P2PK collateral inputs this
+/// means signing the draft transaction once before calling this helper.
+pub fn apply_measured_compute_budgets(
+    tx: &mut Transaction,
+    utxos: &[UtxoEntry],
+    accessor: &dyn SeqCommitAccessor,
+) -> Result<(), String> {
+    if !kaspa_consensus_core::tx::TxInputMass::version_expects_compute_budget_field(tx.version) {
+        return Ok(());
+    }
+    if tx.inputs.len() != utxos.len() {
+        return Err(format!("inputs/utxos length mismatch: {} inputs vs {} utxos", tx.inputs.len(), utxos.len()));
+    }
+
+    let budgets: Result<Vec<_>, _> =
+        (0..tx.inputs.len()).map(|input_idx| try_measure_compute_budget_for_input(tx, utxos, input_idx, accessor)).collect();
+    for (input, budget) in tx.inputs.iter_mut().zip(budgets?.into_iter()) {
+        input.mass = budget.into();
+    }
+    Ok(())
+}
+
 /// Create a mock covenant transaction
 pub fn make_mock_transaction(lock_time: u64, input_spk: ScriptPublicKey, output_spk: ScriptPublicKey) -> (Transaction, UtxoEntry) {
     let cov_id = Hash::from_bytes([0xFF; 32]);
@@ -159,6 +184,36 @@ pub fn try_verify_tx_input(
     vm.execute().map_err(|e| format!("{e}"))
 }
 
+/// Like [`measure_compute_budget_for_input`] but returns `Result`.
+pub fn try_measure_compute_budget_for_input(
+    tx: &Transaction,
+    utxos: &[UtxoEntry],
+    input_idx: usize,
+    accessor: &dyn SeqCommitAccessor,
+) -> Result<ComputeBudget, String> {
+    let sig_cache = Cache::new(10_000);
+    let reused_values = SigHashReusedValuesUnsync::new();
+    let flags = EngineFlags { covenants_enabled: true, ..Default::default() };
+
+    let populated = PopulatedTransaction::new(tx, utxos.to_vec());
+    let cov_ctx = CovenantsContext::from_tx(&populated).map_err(|e| format!("{e}"))?;
+    let exec_ctx =
+        EngineContext::new(&sig_cache).with_reused(&reused_values).with_seq_commit_accessor(accessor).with_covenants_ctx(&cov_ctx);
+
+    let mut vm = TxScriptEngine::from_transaction_input_with_script_units_limit(
+        &populated,
+        &tx.inputs[input_idx],
+        input_idx,
+        &utxos[input_idx],
+        exec_ctx,
+        flags,
+        ScriptUnits(u64::MAX),
+    );
+    vm.execute().map_err(|e| format!("{e}"))?;
+    ComputeBudget::checked_covering_script_units(vm.used_script_units())
+        .ok_or_else(|| format!("script units {} exceed max coverable compute budget", vm.used_script_units().0))
+}
+
 /// Run the script engine on `input_idx` without a budget limit and return the minimum
 /// `ComputeBudget` that would cover the observed script units. v1 transactions must commit
 /// a per-input compute budget; callers that build a proof/covenant tx whose script cost
@@ -170,24 +225,7 @@ pub fn measure_compute_budget_for_input(
     input_idx: usize,
     accessor: &dyn SeqCommitAccessor,
 ) -> ComputeBudget {
-    let sig_cache = Cache::new(10_000);
-    let reused_values = SigHashReusedValuesUnsync::new();
-    // `sigop_script_units` must match consensus, otherwise the measured units
-    // undercount sigop cost and the resulting `ComputeBudget` fails the
-    // on-chain check. `EngineFlags::default()` bakes in the consensus
-    // `Gram(mass_per_sig_op).into()` value; we only override
-    // `covenants_enabled` for the covenant path.
-    let flags = EngineFlags { covenants_enabled: true, ..Default::default() };
-
-    let populated = PopulatedTransaction::new(tx, utxos.to_vec());
-    let cov_ctx = CovenantsContext::from_tx(&populated).unwrap();
-    let exec_ctx =
-        EngineContext::new(&sig_cache).with_reused(&reused_values).with_seq_commit_accessor(accessor).with_covenants_ctx(&cov_ctx);
-
-    let mut vm =
-        TxScriptEngine::from_transaction_input(&populated, &tx.inputs[input_idx], input_idx, &utxos[input_idx], exec_ctx, flags);
-    vm.execute().expect("script must verify before measuring compute budget");
-    ComputeBudget::checked_covering_script_units(vm.used_script_units()).expect("script units must fit in a u16 compute budget")
+    try_measure_compute_budget_for_input(tx, utxos, input_idx, accessor).expect("script must verify before measuring compute budget")
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use kaspa_addresses::{Address, Prefix, Version};
-use kaspa_consensus_core::constants::TX_VERSION_POST_COV_HF;
+use kaspa_consensus_core::constants::{STORAGE_MASS_PARAMETER, TX_VERSION_POST_COV_HF};
 use kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL;
 use kaspa_consensus_core::sign::{sign, sign_input};
 use kaspa_consensus_core::subnets::SUBNETWORK_ID_NATIVE;
@@ -34,6 +34,7 @@ use zk_covenant_rollup_core::permission_tree::{perm_empty_leaf_hash, PermissionT
 use zk_covenant_rollup_host::bridge::{build_delegate_entry_script, build_permission_redeem_converged, build_permission_sig_script};
 use zk_covenant_rollup_host::mock_tx::ActionWitness;
 use zk_covenant_rollup_host::prove::{self as host_prove, ProofKind, ProveInput, ProverBackend};
+use zk_covenant_rollup_host::tx::apply_measured_compute_budgets;
 
 use crate::balance::UtxoTracker;
 use crate::db::{CovenantId, CovenantRecord, ProvingState, Pubkey, RollupDb, TxRecordDb, TxStatusDb};
@@ -1804,9 +1805,8 @@ impl App {
             }
         };
 
-        // 2 inputs: covenant + collateral. v1 inputs commit a ComputeBudget; we seed both at
-        // 0 and overwrite input[0] (the ZK proof) below via `measure_compute_budget_for_input`.
-        let mut inputs = vec![
+        // 2 inputs: covenant + collateral.
+        let inputs = vec![
             TransactionInput::new_with_compute_budget(TransactionOutpoint::new(covenant_utxo.0, covenant_utxo.1), sig_script, 0, 0),
             TransactionInput::new_with_compute_budget(TransactionOutpoint::new(collateral.tx_id, collateral.index), vec![], 0, 0),
         ];
@@ -1831,30 +1831,23 @@ impl App {
         // Change output (no covenant binding) — placeholder, adjusted after fee estimation
         outputs.push(TransactionOutput::new(collateral.amount, deployer_spk.clone()));
 
-        // Seed input[0] compute budget by running the ZK script once. calc_non_contextual_masses
-        // panics on v1 transactions whose inputs have not had a ComputeBudget committed.
-        {
-            let covenant_entry_draft =
-                UtxoEntry::new(covenant_value, pay_to_script_hash_script(&input_redeem), 0, true, Some(covenant_id_hash));
-            let collateral_entry_draft = UtxoEntry::new(collateral.amount, deployer_spk.clone(), 0, false, None);
-            let seq_commit_hash = Hash::from_slice(bytemuck::bytes_of(&new_seq_commit));
-            let mut map = std::collections::HashMap::new();
-            map.insert(proof.block_prove_to, seq_commit_hash);
-            let accessor = zk_covenant_rollup_host::mock_chain::MockSeqCommitAccessor(map);
-            let draft_tx =
-                Transaction::new(TX_VERSION_POST_COV_HF, inputs.clone(), outputs.clone(), 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
-            let covenant_compute_budget = zk_covenant_rollup_host::tx::measure_compute_budget_for_input(
-                &draft_tx,
-                &[covenant_entry_draft, collateral_entry_draft],
-                0,
-                &accessor,
-            );
-            inputs[0].mass = covenant_compute_budget.into();
-        }
-
         // Estimate fee from compute mass
-        let tmp_tx = Transaction::new(TX_VERSION_POST_COV_HF, inputs.clone(), outputs.clone(), 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
-        let mass_calc = kaspa_consensus_core::mass::MassCalculator::new(1, 10, 0);
+        let covenant_entry = UtxoEntry::new(covenant_value, pay_to_script_hash_script(&input_redeem), 0, true, Some(covenant_id_hash));
+        let collateral_entry = UtxoEntry::new(collateral.amount, deployer_spk.clone(), 0, false, None);
+        let seq_commit_hash = Hash::from_slice(bytemuck::bytes_of(&new_seq_commit));
+        let mut map = std::collections::HashMap::new();
+        map.insert(proof.block_prove_to, seq_commit_hash);
+        let accessor = zk_covenant_rollup_host::mock_chain::MockSeqCommitAccessor(map);
+        let mut tmp_tx = Transaction::new(TX_VERSION_POST_COV_HF, inputs.clone(), outputs.clone(), 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+        let provisional_signable =
+            SignableTransaction::with_entries(tmp_tx.clone(), vec![covenant_entry.clone(), collateral_entry.clone()]);
+        tmp_tx.inputs[1].signature_script =
+            sign_input(&provisional_signable.as_verifiable(), 1, &deployer_sk.secret_bytes(), SIG_HASH_ALL);
+        if let Err(e) = apply_measured_compute_budgets(&mut tmp_tx, &[covenant_entry.clone(), collateral_entry.clone()], &accessor) {
+            self.log(format!("Failed to estimate proof tx compute budgets: {e}"));
+            return;
+        }
+        let mass_calc = kaspa_consensus_core::mass::MassCalculator::new(1, 10, STORAGE_MASS_PARAMETER);
         let mass = mass_calc.calc_non_contextual_masses(&tmp_tx).compute_mass;
         let priority_feerate = self.cached_fee_estimate.as_ref().map(|e| e.priority_bucket.feerate).unwrap_or(1.0);
         let estimated_fee = crate::actions::compute_fee(mass, priority_feerate);
@@ -1875,12 +1868,11 @@ impl App {
             outputs.pop();
         }
 
-        // Build tx, then sign collateral input
-        let mut tx = Transaction::new(TX_VERSION_POST_COV_HF, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+        // Build tx, then sign collateral input.
+        let mut tx = Transaction::new(TX_VERSION_POST_COV_HF, tmp_tx.inputs.clone(), outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
         let tx_id = tx.id();
 
         // Sign only input[1] (collateral) — input[0] already has ZK sig_script
-        let covenant_entry = UtxoEntry::new(covenant_value, pay_to_script_hash_script(&input_redeem), 0, true, Some(covenant_id_hash));
         let collateral_entry = UtxoEntry::new(collateral.amount, deployer_spk, 0, false, None);
         let signable = SignableTransaction::with_entries(tx.clone(), vec![covenant_entry.clone(), collateral_entry.clone()]);
         let collateral_sig = sign_input(&signable.as_verifiable(), 1, &deployer_sk.secret_bytes(), SIG_HASH_ALL);
@@ -1888,11 +1880,6 @@ impl App {
 
         // ── Local script verification before submitting ──
         {
-            let seq_commit_hash = Hash::from_slice(bytemuck::bytes_of(&new_seq_commit));
-            let mut map = std::collections::HashMap::new();
-            map.insert(proof.block_prove_to, seq_commit_hash);
-            let accessor = zk_covenant_rollup_host::mock_chain::MockSeqCommitAccessor(map);
-
             // Log prover state for debugging
             if let Some(prover) = &self.prover {
                 self.log(format!(
@@ -1914,14 +1901,17 @@ impl App {
             ));
 
             let utxos = vec![covenant_entry.clone(), collateral_entry.clone()];
-            match zk_covenant_rollup_host::tx::try_verify_tx_input(&tx, &utxos, 0, &accessor, tx.inputs[0].mass.allowed_script_units())
-            {
-                Ok(()) => self.log("Local script verification: PASSED".into()),
-                Err(e) => {
-                    self.log(format!("Local script verification FAILED: {e}"));
-                    return;
+            for (idx, input) in tx.inputs.iter().enumerate() {
+                match zk_covenant_rollup_host::tx::try_verify_tx_input(&tx, &utxos, idx, &accessor, input.mass.allowed_script_units())
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        self.log(format!("Local script verification FAILED at input {idx}: {e}"));
+                        return;
+                    }
                 }
             }
+            self.log("Local script verification: PASSED".into());
         }
 
         self.utxo_tracker.mark_spent(collateral.tx_id, collateral.index);
@@ -2145,17 +2135,12 @@ impl App {
             }
         };
 
-        let priority_feerate = self.cached_fee_estimate.as_ref().map(|e| e.priority_bucket.feerate).unwrap_or(1.0);
-        let estimated_withdraw_mass: u64 = 5000;
-        let estimated_fee = crate::actions::compute_fee(estimated_withdraw_mass, priority_feerate);
-
         // Full withdrawal amount goes to destination — fee paid by collateral
         let dest_value = amount;
 
         let delegate_sig_script = ScriptBuilder::new().add_data(&delegate_script).unwrap().drain();
 
-        // Build inputs: permission + delegates + collateral. All scripts here fit in the
-        // per-input free compute allowance, so every v1 input commits ComputeBudget(0).
+        // Build inputs: permission + delegates + collateral.
         let perm_utxo_ref = self.perm_utxo.as_ref().unwrap();
         let mut inputs = vec![TransactionInput::new_with_compute_budget(
             TransactionOutpoint::new(perm_utxo_ref.utxo.0, perm_utxo_ref.utxo.1),
@@ -2203,27 +2188,59 @@ impl App {
             outputs.push(TransactionOutput::new(change, delegate_spk.clone()));
         }
 
-        // Collateral change
-        let collateral_change = collateral.amount.saturating_sub(estimated_fee);
-        if collateral_change > 0 {
-            outputs.push(TransactionOutput::new(collateral_change, deployer_spk.clone()));
-        }
-
-        let mut tx = Transaction::new(TX_VERSION_POST_COV_HF, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
-
-        // Sign collateral input
         let perm_entry =
             UtxoEntry::new(perm_utxo_ref.value, pay_to_script_hash_script(&perm_state.redeem_script), 0, true, Some(covenant_id_hash));
         let mut all_entries: Vec<UtxoEntry> = vec![perm_entry];
         for utxo in &selected_delegates {
             all_entries.push(UtxoEntry::new(utxo.amount, delegate_spk.clone(), 0, false, None));
         }
-        all_entries.push(UtxoEntry::new(collateral.amount, deployer_spk, 0, false, None));
+        all_entries.push(UtxoEntry::new(collateral.amount, deployer_spk.clone(), 0, false, None));
 
+        outputs.push(TransactionOutput::new(collateral.amount, deployer_spk.clone()));
+
+        let mut tx = Transaction::new(TX_VERSION_POST_COV_HF, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
         let collateral_idx = tx.inputs.len() - 1;
-        let signable = SignableTransaction::with_entries(tx.clone(), all_entries);
+        let provisional_signable = SignableTransaction::with_entries(tx.clone(), all_entries.clone());
+        tx.inputs[collateral_idx].signature_script =
+            sign_input(&provisional_signable.as_verifiable(), collateral_idx, &deployer_sk.secret_bytes(), SIG_HASH_ALL);
+        let accessor = zk_covenant_rollup_host::mock_chain::MockSeqCommitAccessor(std::collections::HashMap::new());
+        if let Err(e) = apply_measured_compute_budgets(&mut tx, &all_entries, &accessor) {
+            self.log(format!("Failed to estimate withdraw tx compute budgets: {e}"));
+            return;
+        }
+
+        let priority_feerate = self.cached_fee_estimate.as_ref().map(|e| e.priority_bucket.feerate).unwrap_or(1.0);
+        let mass_calc = kaspa_consensus_core::mass::MassCalculator::new(1, 10, STORAGE_MASS_PARAMETER);
+        let estimated_fee = crate::actions::compute_fee(mass_calc.calc_non_contextual_masses(&tx).compute_mass, priority_feerate);
+
+        let collateral_change = collateral.amount.saturating_sub(estimated_fee);
+        let change_idx = tx.outputs.len() - 1;
+        if collateral_change > 0 {
+            tx.outputs[change_idx].value = collateral_change;
+        } else {
+            tx.outputs.pop();
+        }
+
+        // Re-sign collateral input after final outputs are fixed.
+        let signable = SignableTransaction::with_entries(tx.clone(), all_entries.clone());
         let sig = sign_input(&signable.as_verifiable(), collateral_idx, &deployer_sk.secret_bytes(), SIG_HASH_ALL);
         tx.inputs[collateral_idx].signature_script = sig;
+
+        for (idx, input) in tx.inputs.iter().enumerate() {
+            match zk_covenant_rollup_host::tx::try_verify_tx_input(
+                &tx,
+                &all_entries,
+                idx,
+                &accessor,
+                input.mass.allowed_script_units(),
+            ) {
+                Ok(()) => {}
+                Err(e) => {
+                    self.log(format!("Local withdraw verification FAILED at input {idx}: {e}"));
+                    return;
+                }
+            }
+        }
 
         let tx_id = tx.id();
 
