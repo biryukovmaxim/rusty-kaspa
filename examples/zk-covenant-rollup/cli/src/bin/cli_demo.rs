@@ -298,8 +298,10 @@ async fn await_tx_confirmation_task(task: tokio::task::JoinHandle<Result<()>>, n
     // observation and declaring the tx lost. Covers the race where the tx is
     // already in a block that isn't yet on the selected chain; the VCC
     // subscription carries no confirmation count so we fall back to a DAA
-    // delta budget.
-    const MISSING_MEMPOOL_DAA_BUDGET: u64 = 10;
+    // delta budget. Kaspa devnet runs at ~10 BPS, so 10s of polling advances
+    // DAA by ~100; the budget needs to cover several polls plus chain
+    // resolution latency.
+    const MISSING_MEMPOOL_DAA_BUDGET: u64 = 600;
     let mut task = task;
     let mut interval = tokio::time::interval(Duration::from_secs(10));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1059,7 +1061,9 @@ async fn build_withdraw_tx(
     // Placeholder collateral change output — adjusted after fee estimation.
     outputs.push(TransactionOutput::new(collateral_amount, keypair.deployer_spk.clone()));
 
-    let mut tx = Transaction::new(TX_VERSION_POST_COV_HF, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+    // `new_non_finalized`: we mutate outputs below (fee adjustment), so we
+    // defer the id commit until `tx.finalize()` after all mutations.
+    let mut tx = Transaction::new_non_finalized(TX_VERSION_POST_COV_HF, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
     let collateral_input_idx = tx.inputs.len() - 1;
     let provisional_signable = SignableTransaction::with_entries(tx.clone(), all_entries.clone());
     tx.inputs[collateral_input_idx].signature_script =
@@ -1095,6 +1099,12 @@ async fn build_withdraw_tx(
     let signable = SignableTransaction::with_entries(tx.clone(), all_entries.clone());
     let sig = sign_input(&signable.as_verifiable(), collateral_input_idx, &keypair.secret_key.secret_bytes(), SIG_HASH_ALL);
     tx.inputs[collateral_input_idx].signature_script = sig;
+
+    // Final id commit after all output/input mutations. Without this `tx.id()`
+    // would return the default zero hash (from `new_non_finalized`) — or, if we
+    // had used `Transaction::new`, the stale id hashed against the placeholder
+    // collateral output that was adjusted above.
+    tx.finalize();
 
     for (idx, input) in tx.inputs.iter().enumerate() {
         try_verify_tx_input(&tx, &all_entries, idx, &verify_accessor, input.mass.allowed_script_units())
