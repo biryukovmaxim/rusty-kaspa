@@ -294,11 +294,18 @@ async fn arm_tx_confirmation_wait(node: &KaspaNode, tx_id: Hash) -> Result<tokio
 
 async fn await_tx_confirmation_task(task: tokio::task::JoinHandle<Result<()>>, node: &KaspaNode, tx_id: Hash) -> Result<()> {
     use std::time::Duration;
+    // Grace window in virtual DAA score units between first "not in mempool"
+    // observation and declaring the tx lost. Covers the race where the tx is
+    // already in a block that isn't yet on the selected chain; the VCC
+    // subscription carries no confirmation count so we fall back to a DAA
+    // delta budget.
+    const MISSING_MEMPOOL_DAA_BUDGET: u64 = 10;
     let mut task = task;
     let mut interval = tokio::time::interval(Duration::from_secs(10));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     interval.tick().await; // consume the immediate tick
     let mut poll_count: u32 = 0;
+    let mut first_missing_daa: Option<u64> = None;
     loop {
         tokio::select! {
             res = &mut task => {
@@ -307,19 +314,33 @@ async fn await_tx_confirmation_task(task: tokio::task::JoinHandle<Result<()>>, n
             _ = interval.tick() => {
                 poll_count += 1;
                 match node.get_mempool_entry(tx_id).await {
-                    Ok(Some(entry)) => println!(
-                        "  [mempool@{poll_count}0s] still pending (fee={}, orphan={})",
-                        entry.fee, entry.is_orphan
-                    ),
+                    Ok(Some(entry)) => {
+                        first_missing_daa = None;
+                        println!(
+                            "  [mempool@{poll_count}0s] still pending (fee={}, orphan={})",
+                            entry.fee, entry.is_orphan
+                        );
+                    }
                     Ok(None) => {
                         // Invariant: the tx must either sit in the mempool or be
-                        // reported as accepted via VirtualChainChanged. The VCC
-                        // subscription carries no confirmation count, so if mempool
-                        // says "not found" while the waiter is still running we
-                        // have no way to distinguish "included but not yet on
-                        // selected chain" from eviction — bail and investigate.
-                        anyhow::bail!(
-                            "[mempool@{poll_count}0s] tx {tx_id} missing from mempool with no chain acceptance yet"
+                        // reported as accepted via VirtualChainChanged. Allow a
+                        // grace window before erroring — the tx may be in a block
+                        // that hasn't yet been selected into the chain, which
+                        // drops it from mempool without firing VCC for it yet.
+                        let daa = node
+                            .get_block_dag_info()
+                            .await
+                            .context("get_block_dag_info while checking missing-mempool grace")?
+                            .virtual_daa_score;
+                        let anchor = *first_missing_daa.get_or_insert(daa);
+                        let elapsed = daa.saturating_sub(anchor);
+                        if elapsed >= MISSING_MEMPOOL_DAA_BUDGET {
+                            anyhow::bail!(
+                                "[mempool@{poll_count}0s] tx {tx_id} missing from mempool for {elapsed} DAA blocks with no chain acceptance"
+                            );
+                        }
+                        println!(
+                            "  [mempool@{poll_count}0s] tx not in mempool — waiting chain resolution (DAA +{elapsed}/{MISSING_MEMPOOL_DAA_BUDGET})"
                         );
                     }
                     Err(e) => println!("  [mempool@{poll_count}0s] mempool query failed: {e}"),
