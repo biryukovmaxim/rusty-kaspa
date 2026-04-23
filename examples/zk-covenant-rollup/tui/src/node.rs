@@ -147,6 +147,24 @@ impl KaspaNode {
         Ok(self.client().get_sink().await?.sink)
     }
 
+    /// Look up a tx in the mempool. Returns `Ok(None)` when the node reports
+    /// the tx is not in mempool (either never accepted, already included in a
+    /// block, or evicted).
+    ///
+    /// Over wRPC the server's `RpcError::TransactionNotFound` is transported
+    /// as a string and surfaces on the client as `RpcError::RpcSubsystem(_)`,
+    /// so we also fold the string form into `Ok(None)`.
+    pub async fn get_mempool_entry(&self, tx_id: RpcHash) -> Result<Option<kaspa_rpc_core::RpcMempoolEntry>> {
+        match self.client().get_mempool_entry(tx_id, true, false).await {
+            Ok(entry) => Ok(Some(entry)),
+            Err(kaspa_rpc_core::RpcError::TransactionNotFound(_)) => Ok(None),
+            Err(kaspa_rpc_core::RpcError::RpcSubsystem(ref s)) if s.contains("not found") && s.contains(&tx_id.to_string()) => {
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Fetch the KIP-21 lane proof witness for (block_hash, lane_key).
     ///
     /// The block must be a chain block at or after the current pruning point;

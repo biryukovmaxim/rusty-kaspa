@@ -292,8 +292,41 @@ async fn arm_tx_confirmation_wait(node: &KaspaNode, tx_id: Hash) -> Result<tokio
     Ok(handle)
 }
 
-async fn await_tx_confirmation_task(task: tokio::task::JoinHandle<Result<()>>) -> Result<()> {
-    task.await.context("confirmation waiter task failed")?
+async fn await_tx_confirmation_task(task: tokio::task::JoinHandle<Result<()>>, node: &KaspaNode, tx_id: Hash) -> Result<()> {
+    use std::time::Duration;
+    let mut task = task;
+    let mut interval = tokio::time::interval(Duration::from_secs(10));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval.tick().await; // consume the immediate tick
+    let mut poll_count: u32 = 0;
+    loop {
+        tokio::select! {
+            res = &mut task => {
+                return res.context("confirmation waiter task failed")?;
+            }
+            _ = interval.tick() => {
+                poll_count += 1;
+                match node.get_mempool_entry(tx_id).await {
+                    Ok(Some(entry)) => println!(
+                        "  [mempool@{poll_count}0s] still pending (fee={}, orphan={})",
+                        entry.fee, entry.is_orphan
+                    ),
+                    Ok(None) => {
+                        // Invariant: the tx must either sit in the mempool or be
+                        // reported as accepted via VirtualChainChanged. The VCC
+                        // subscription carries no confirmation count, so if mempool
+                        // says "not found" while the waiter is still running we
+                        // have no way to distinguish "included but not yet on
+                        // selected chain" from eviction — bail and investigate.
+                        anyhow::bail!(
+                            "[mempool@{poll_count}0s] tx {tx_id} missing from mempool with no chain acceptance yet"
+                        );
+                    }
+                    Err(e) => println!("  [mempool@{poll_count}0s] mempool query failed: {e}"),
+                }
+            }
+        }
+    }
 }
 
 fn setup_keypair(privkey: Option<&str>, prefix: Prefix) -> Result<Keypair> {
@@ -392,34 +425,41 @@ async fn build_deploy_covenant(
     let starting_block = last_added_block.context("VCC returned no added blocks")?;
     println!("  Deploy starting block: {starting_block}");
 
-    // Initial **lane tip** (not the block's own AIR!): ask consensus what our
-    // lane's tip is as of `starting_block` via `get_seq_commit_lane_proof`.
+    // Initial lane anchor baked into the covenant redeem script.
     //
-    // - The block header's `accepted_id_merkle_root` is the whole block's
-    //   `seq_commit` — a commitment over *every* lane's state + miner payload
-    //   context, NOT our lane's tip.
-    // - For the first activity block B1 after deploy, consensus computes
-    //   `tip_B1 = lane_tip_next(prev_tip, lane_key, activity_digest, ctx)`
-    //   where `prev_tip` is: (a) the lane's last stored SMT tip if the lane
-    //   already exists, or (b) `SeqCommit(parent(B1))` if it's a new lane.
-    //   Case (a) is what we anchor here.
-    // - If our lane hasn't been seen yet at `starting_block` (SMT returned
-    //   lane_tip = None), there's no existing tip to chain from — bail and
-    //   ask the user to resubmit after a lane tx has been confirmed.
+    // For the first activity block B1 after deploy, consensus computes
+    // `tip_B1 = lane_tip_next(parent_ref, lane_key, activity_digest, ctx)`
+    // where `parent_ref` comes from `resolve_lane_updates` at
+    // `consensus/src/pipeline/virtual_processor/utxo_validation.rs`:
+    //   parent_ref = existing_lane_tip.unwrap_or(parent_seq_commit)
+    //
+    // - Existing lane: RPC returns `lane_tip = Some(stored_tip)` → anchor on it.
+    // - New lane (first-ever activity): RPC returns `lane_tip = None`; consensus
+    //   will use `SeqCommit(parent(B1))`. In the common-case where B1's selected
+    //   parent is `starting_block`, that equals `starting_block.accepted_id_merkle_root`
+    //   (the whole-block seq_commit stored in the header). We anchor on that.
+    //   If B1 ends up with a different selected parent, verification of the first
+    //   batch will fail and needs re-anchoring — that's an acceptable failure mode
+    //   for a demo on devnet.
     let lane_key_hash = Hash::from_bytes(bytemuck::cast(zk_covenant_rollup_core::ROLLUP_LANE_KEY));
     let lane_proof_at_anchor = node
         .get_seq_commit_lane_proof(starting_block, lane_key_hash)
         .await
         .context("get_seq_commit_lane_proof(starting_block) failed")?;
-    let initial_seq = lane_proof_at_anchor.lane_tip.context(
-        "rollup lane is not present in the active-lanes SMT at the deploy anchor — \
-         no existing tip to chain from. Need either prior lane activity on this chain \
-         or a witness-based covenant anchor (tracked separately)",
-    )?;
     let block = node.get_block(starting_block, false).await.context("get_block failed")?;
     let starting_block_timestamp = block.header.timestamp;
-    println!("  Initial lane tip:    {initial_seq} (from get_seq_commit_lane_proof)");
-    println!("  Initial lane blue_score: {}", lane_proof_at_anchor.lane_blue_score.unwrap_or(0));
+    let initial_seq = match lane_proof_at_anchor.lane_tip {
+        Some(tip) => {
+            println!("  Initial lane tip:    {tip} (existing lane — from get_seq_commit_lane_proof)");
+            println!("  Initial lane blue_score: {}", lane_proof_at_anchor.lane_blue_score.unwrap_or(0));
+            tip
+        }
+        None => {
+            let anchor = block.header.accepted_id_merkle_root;
+            println!("  Initial lane tip:    {anchor} (new lane — SeqCommit(starting_block))");
+            anchor
+        }
+    };
 
     // Build redeem script (convergence loop)
     let prev_state_hash = empty_tree_root();
@@ -885,6 +925,7 @@ fn derive_delegate_address(covenant_id: Hash, prefix: Prefix) -> Address {
 
 async fn build_withdraw_tx(
     node: &KaspaNode,
+    params: &kaspa_consensus_core::config::params::Params,
     covenant_id: Hash,
     perm_outpoint: (Hash, u32),
     perm_value: u64,
@@ -1009,8 +1050,17 @@ async fn build_withdraw_tx(
 
     let fee_estimate = node.get_fee_estimate().await.context("get_fee_estimate failed")?;
     let priority_feerate = fee_estimate.priority_bucket.feerate;
-    let mass_calc = kaspa_consensus_core::mass::MassCalculator::new(1, 10, STORAGE_MASS_PARAMETER);
-    let estimated_fee = compute_fee(mass_calc.calc_non_contextual_masses(&tx).compute_mass, priority_feerate);
+    let mass_calc = kaspa_consensus_core::mass::MassCalculator::new_with_consensus_params(params);
+    // Withdraw txs are multi-input/multi-output with imbalanced values (a small
+    // exit destination next to a much larger collateral change). Storage mass
+    // dominates compute mass in this shape, and block selectors price txs on
+    // normalized mass (storage / compute / transient reduced to a common scale
+    // via `MassCofactors`), so size the fee the same way consensus does.
+    let non_ctx = mass_calc.calc_non_contextual_masses(&tx);
+    let fee_signable = SignableTransaction::with_entries(tx.clone(), all_entries.clone());
+    let ctx = mass_calc.calc_contextual_masses(&fee_signable.as_verifiable()).context("withdraw storage mass incomputable")?;
+    let normalized_mass = kaspa_consensus_core::mass::Mass::new(non_ctx, ctx).normalized_max(&params.block_mass_limits.cofactors());
+    let estimated_fee = compute_fee(normalized_mass, priority_feerate);
 
     let collateral_change = collateral_amount.checked_sub(estimated_fee).context("Collateral too small for fee")?;
     let change_idx = tx.outputs.len() - 1;
@@ -1047,6 +1097,7 @@ async fn main() -> Result<()> {
     let proof_kind = parse_proof_kind(&args.proof_kind)?;
     let backend = parse_backend(&args.backend)?;
     let network_id: NetworkId = args.network.parse().with_context(|| format!("invalid --network: {}", args.network))?;
+    let params: kaspa_consensus_core::config::params::Params = network_id.into();
     let prefix: Prefix = network_id.network_type().into();
     let default_port = network_id.network_type().default_borsh_rpc_port();
     let url = parse_rpc(args.rpc.as_deref(), default_port);
@@ -1084,7 +1135,7 @@ async fn main() -> Result<()> {
     println!("  Deploy tx submitted.");
 
     println!("\nPhase 5: Waiting for deploy tx confirmation...");
-    await_tx_confirmation_task(deploy_wait).await?;
+    await_tx_confirmation_task(deploy_wait, &node, deploy.tx_id).await?;
     println!("  Deploy tx confirmed!");
 
     // Get fee estimate for action transactions
@@ -1125,7 +1176,7 @@ async fn main() -> Result<()> {
             return Err(e).context("submit entry tx");
         }
         println!("  Waiting for confirmation...");
-        await_tx_confirmation_task(confirm_wait).await?;
+        await_tx_confirmation_task(confirm_wait, &node, tx_id).await?;
         println!("  Entry tx confirmed!");
         tx_id
     };
@@ -1152,7 +1203,7 @@ async fn main() -> Result<()> {
             return Err(e).context("submit exit #1 tx");
         }
         println!("  Waiting for confirmation...");
-        await_tx_confirmation_task(confirm_wait).await?;
+        await_tx_confirmation_task(confirm_wait, &node, tx_id).await?;
         println!("  Exit #1 tx confirmed!");
         tx_id
     };
@@ -1190,7 +1241,7 @@ async fn main() -> Result<()> {
             return Err(e).context("submit transfer tx");
         }
         println!("  Waiting for confirmation...");
-        await_tx_confirmation_task(confirm_wait).await?;
+        await_tx_confirmation_task(confirm_wait, &node, tx_id).await?;
         println!("  Transfer tx confirmed!");
         tx_id
     };
@@ -1217,7 +1268,7 @@ async fn main() -> Result<()> {
             return Err(e).context("submit exit #2 tx");
         }
         println!("  Waiting for confirmation...");
-        await_tx_confirmation_task(confirm_wait).await?;
+        await_tx_confirmation_task(confirm_wait, &node, tx_id).await?;
         println!("  Exit #2 tx confirmed!");
         tx_id
     };
@@ -1280,7 +1331,7 @@ async fn main() -> Result<()> {
     println!("  Proof tx submitted.");
 
     println!("  Waiting for proof tx confirmation...");
-    await_tx_confirmation_task(proof_wait).await?;
+    await_tx_confirmation_task(proof_wait, &node, proof_tx_id).await?;
     println!("  Proof tx confirmed!");
 
     // ── Phase 15: Withdraw #1 ────────────────────────────────────────────
@@ -1292,6 +1343,7 @@ async fn main() -> Result<()> {
     let perm_redeem = prove.perm_redeem_script.as_ref().context("No permission redeem script — batch had no exits?")?;
     let w1 = build_withdraw_tx(
         &node,
+        &params,
         deploy.on_chain_covenant_id,
         (proof_tx_id, 1), // permission UTXO at proof tx output[1]
         deploy.output_value,
@@ -1310,7 +1362,7 @@ async fn main() -> Result<()> {
     println!("  Withdraw #1 tx submitted.");
 
     println!("  Waiting for withdraw #1 confirmation...");
-    await_tx_confirmation_task(w1_wait).await?;
+    await_tx_confirmation_task(w1_wait, &node, w1.tx_id).await?;
     println!("  Withdraw #1 confirmed!");
 
     // ── Phase 16: Withdraw #2 ────────────────────────────────────────────
@@ -1320,6 +1372,7 @@ async fn main() -> Result<()> {
 
     let w2 = build_withdraw_tx(
         &node,
+        &params,
         deploy.on_chain_covenant_id,
         (w1.tx_id, 1), // continuation permission UTXO at withdraw #1 output[1]
         deploy.output_value,
@@ -1338,7 +1391,7 @@ async fn main() -> Result<()> {
     println!("  Withdraw #2 tx submitted.");
 
     println!("  Waiting for withdraw #2 confirmation...");
-    await_tx_confirmation_task(w2_wait).await?;
+    await_tx_confirmation_task(w2_wait, &node, w2.tx_id).await?;
     println!("  Withdraw #2 confirmed!");
 
     // ── Summary ──────────────────────────────────────────────────────────
