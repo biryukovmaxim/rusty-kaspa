@@ -42,7 +42,9 @@ use kaspa_consensus::model::stores::block_transactions::{BlockTransactionsStoreR
 use kaspa_consensus::model::stores::ghostdag::{DbGhostdagStore, GhostdagStoreReader};
 use kaspa_consensus::model::stores::headers::{DbHeadersStore, HeaderStoreReader};
 use kaspa_consensus::model::stores::reachability::DbReachabilityStore;
+use kaspa_consensus::model::stores::selected_chain::{DbSelectedChainStore, SelectedChainStoreReader};
 use kaspa_consensus::model::stores::smt_metadata::DbSmtMetadataStore;
+use kaspa_consensus::model::stores::statuses::{DbStatusesStore, StatusesStoreReader};
 use kaspa_consensus::model::stores::utxo_set::DbUtxoSetStore;
 use kaspa_consensus::model::stores::virtual_state::{DbVirtualStateStore, LkgVirtualState, VirtualStateStoreReader};
 use kaspa_consensus::processes::transaction_validator::TransactionValidator;
@@ -76,6 +78,12 @@ struct Args {
     branch_keys: Vec<(u8, Hash)>,
     lane_keys: Vec<Hash>,
     score_range: Option<(u64, u64)>,
+    /// Walk chain forward from a starting block, dump each chain block's
+    /// expire_range and (if --check-lane provided) whether it would expire that lane.
+    chain_walk: Option<(Hash, u64)>, // (start_hash, steps)
+    /// Lane to check during chain walk: would `expire_stale_lanes` queue it at any
+    /// of the walked chain blocks?
+    check_lane: Option<Hash>,
 }
 
 fn parse_args() -> Args {
@@ -85,6 +93,8 @@ fn parse_args() -> Args {
     let mut branch_keys: Vec<(u8, Hash)> = Vec::new();
     let mut lane_keys: Vec<Hash> = Vec::new();
     let mut score_range: Option<(u64, u64)> = None;
+    let mut chain_walk: Option<(Hash, u64)> = None;
+    let mut check_lane: Option<Hash> = None;
 
     let argv: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -125,6 +135,19 @@ fn parse_args() -> Args {
                 score_range = Some((lo, hi));
                 i += 2;
             }
+            "--chain-walk" => {
+                // Format: <start_hash>:<steps>. Walks selected_chain forward `steps` blocks.
+                let raw = &argv[i + 1];
+                let (h, n) = raw.split_once(':').expect("--chain-walk expects <hash>:<steps>");
+                let start = Hash::from_str(h).expect("chain-walk hash must be 64-char hex");
+                let steps: u64 = n.parse().expect("chain-walk steps must be u64");
+                chain_walk = Some((start, steps));
+                i += 2;
+            }
+            "--check-lane" => {
+                check_lane = Some(Hash::from_str(&argv[i + 1]).expect("--check-lane must be 64-char hex"));
+                i += 2;
+            }
             "-h" | "--help" => {
                 eprintln!(
                     "Usage: dump_seq_commit --db <path> --block <hex> \\\n           [--network devnet|testnet|mainnet|simnet] \\\n           [--branch <depth>:<hex32> ...] [--lane <hex32> ...]"
@@ -151,7 +174,7 @@ fn parse_args() -> Args {
             std::process::exit(2);
         }
     };
-    Args { db, block, params, branch_keys, lane_keys, score_range }
+    Args { db, block, params, branch_keys, lane_keys, score_range, chain_walk, check_lane }
 }
 
 fn main() {
@@ -182,6 +205,9 @@ fn main() {
     let virtual_utxo_set = DbUtxoSetStore::new(db.clone(), cp(), DatabaseStorePrefixes::VirtualUtxoset.into());
     let reachability_store = Arc::new(RwLock::new(DbReachabilityStore::new(db.clone(), cp(), cp())));
     let reachability_service = MTReachabilityService::new(reachability_store);
+    let selected_chain_store = DbSelectedChainStore::new(db.clone(), cp());
+    let statuses_store = DbStatusesStore::new(db.clone(), cp());
+    let acceptance_data_store_for_walk = acceptance_data_store.clone();
 
     // ---- Block + parent ----
     let header = headers_store.get_header(args.block).unwrap_or_else(|e| panic!("header for {} not found: {e}", args.block));
@@ -499,10 +525,7 @@ fn main() {
             let canon = canonical_for_sp(bh);
             let canon_tag = if canon { "canonical" } else { "non-canonical" };
             let zero_tag = if bh == ZERO_HASH { " [ZERO_HASH=IBD-import]" } else { "" };
-            println!(
-                "  blue_score={bs:>10} block_hash={bh} [{canon_tag}]{zero_tag}  lane_keys.len={}",
-                lane_keys.len()
-            );
+            println!("  blue_score={bs:>10} block_hash={bh} [{canon_tag}]{zero_tag}  lane_keys.len={}", lane_keys.len());
             for lk in lane_keys {
                 println!("    {lk}");
             }
@@ -534,6 +557,103 @@ fn main() {
             if count == 0 {
                 println!("      (no versions found)");
             }
+        }
+        println!();
+    }
+
+    if let Some((start_hash, steps)) = args.chain_walk {
+        println!("[chain_walk]  start={start_hash}  steps={steps}");
+        let target_lane = args.check_lane;
+        if let Some(lk) = target_lane {
+            println!("  --check-lane = {lk}");
+            println!("  Will report which chain block (if any) would queue this lane for expire.");
+        }
+        let start_idx = match selected_chain_store.get_by_hash(start_hash) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("  ERROR: start_hash {start_hash} not on selected chain: {e}");
+                std::process::exit(4);
+            }
+        };
+        println!("  start chain_index = {start_idx}");
+        let tip_idx = selected_chain_store.get_tip().map(|(i, _)| i).unwrap_or(start_idx);
+        let stop_idx = (start_idx + steps).min(tip_idx);
+        println!("  walking idx [{start_idx}..={stop_idx}] (tip_idx={tip_idx})");
+        println!("  Format per chain block: idx | hash | bs | parent_bs | expire_range | accept_data | (lane_check)");
+
+        let mut prev_bs = parent_bs; // For first block in walk, "parent" is whatever has chain_index = start_idx
+        let f_local = f;
+        for idx in start_idx..=stop_idx {
+            let h = match selected_chain_store.get_by_index(idx) {
+                Ok(h) => h,
+                Err(_) => break,
+            };
+            let hdr = match headers_store.get_header(h) {
+                Ok(h) => h,
+                Err(_) => {
+                    println!("  idx={idx:<6} hash={h}  <header missing>");
+                    continue;
+                }
+            };
+            let cur_bs = hdr.blue_score;
+            let par_bs = if idx == start_idx { cur_bs } else { prev_bs };
+            let cur_active_min = cur_bs.saturating_sub(f_local);
+            let par_active_min = par_bs.saturating_sub(f_local);
+            let er = if cur_active_min > par_active_min { Some(par_active_min..=cur_active_min - 1) } else { None };
+            let er_str = match &er {
+                Some(r) => format!("[{}, {}]", r.start(), r.end()),
+                None => "(empty)".to_string(),
+            };
+            let accept_tag = match acceptance_data_store_for_walk.get(h) {
+                Ok(_) => "accept=YES".to_string(),
+                Err(StoreError::KeyNotFound(_)) => match statuses_store.get(h) {
+                    Ok(s) => format!("accept=NO  status={s:?}"),
+                    Err(_) => "accept=NO  status=?".to_string(),
+                },
+                Err(e) => format!("accept=ERR {e}"),
+            };
+
+            // Lane check: if target_lane provided, see if this chain block's
+            // expire_stale_lanes scan would have queued it.
+            let lane_check = if let Some(lk) = target_lane {
+                if let Some(r) = er.clone() {
+                    // Search score_index in this band for the target lane.
+                    let mut found_in_score = false;
+                    let mut found_canonical = false;
+                    for entry in smt_stores.score_index.get_leaf_updates(r) {
+                        let entry = entry.expect("score_index iter");
+                        if entry.data().iter().any(|x| *x == lk) {
+                            found_in_score = true;
+                            if is_smt_canonical(&reachability_service, entry.block_hash(), h) {
+                                found_canonical = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !found_in_score {
+                        "(lane not in score_index for this expire_range)".to_string()
+                    } else if !found_canonical {
+                        "(lane in score_index but not canonical for this block)".to_string()
+                    } else {
+                        // Now simulate get_lane to see if expire would be queued
+                        let read_bounds = SmtReadBounds::new(par_bs, cur_active_min);
+                        let alive =
+                            smt_stores.get_lane(lk, read_bounds, |bh| is_smt_canonical(&reachability_service, bh, h)).is_some();
+                        if alive {
+                            "(scanned; alive — NOT queued)".to_string()
+                        } else {
+                            "(scanned; would be queued for EXPIRE)".to_string()
+                        }
+                    }
+                } else {
+                    "(empty expire_range — no scan)".to_string()
+                }
+            } else {
+                String::new()
+            };
+
+            println!("  idx={idx:<6} hash={h} bs={cur_bs:<8} parent_bs={par_bs:<8} expire={er_str:<14} {accept_tag:<25} {lane_check}");
+            prev_bs = cur_bs;
         }
         println!();
     }

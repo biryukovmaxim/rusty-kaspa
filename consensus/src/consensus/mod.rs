@@ -84,7 +84,7 @@ use crossbeam_channel::{
 use itertools::Itertools;
 use kaspa_consensusmanager::{SessionLock, SessionReadGuard};
 
-use kaspa_core::info;
+use kaspa_core::{error, info};
 use kaspa_database::prelude::StoreResultExt;
 use kaspa_hashes::Hash;
 use kaspa_muhash::MuHash;
@@ -94,6 +94,7 @@ use kaspa_utils::arc::ArcExtensions;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rocksdb::WriteBatch;
 
+use std::process::exit;
 use std::{
     cmp,
     cmp::Reverse,
@@ -1158,16 +1159,7 @@ impl ConsensusApi for Consensus {
             .map_err(|e| PruningImportError::SmtStoreError(format!("{e}")))
         })?;
 
-        if result.root != lanes_root {
-            return Err(PruningImportError::SmtRootMismatch { expected: lanes_root, computed: result.root });
-        }
-
         let actual_count = result.lanes_imported;
-        if actual_count != expected_lane_count {
-            return Err(PruningImportError::SmtStoreError(format!(
-                "active lanes count mismatch: expected {expected_lane_count}, got {actual_count}"
-            )));
-        }
 
         let mut batch = rocksdb::WriteBatch::default();
         use crate::model::stores::smt_metadata::SmtBlockMetadata;
@@ -1176,6 +1168,21 @@ impl ConsensusApi for Consensus {
             .insert_batch(&mut batch, new_pruning_point, SmtBlockMetadata::new(payload_and_ctx_digest, actual_count))
             .unwrap();
         self.db.write(batch).unwrap();
+
+        if actual_count != expected_lane_count {
+            error!(
+                "err occurred: {}",
+                PruningImportError::SmtStoreError(format!(
+                    "active lanes count mismatch: expected {expected_lane_count}, got {actual_count}"
+                ))
+            );
+            exit(2);
+        }
+
+        if result.root != lanes_root {
+            error!("err occurred: {}", PruningImportError::SmtRootMismatch { expected: lanes_root, computed: result.root });
+            exit(1);
+        }
 
         info!("Imported SMT state for pruning point {}: {} lanes, root {}", new_pruning_point, actual_count, lanes_root);
         Ok(())
