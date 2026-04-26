@@ -50,19 +50,16 @@ use kaspa_consensus::processes::transaction_validator::tx_validation_in_utxo_con
 use kaspa_consensus_core::acceptance_data::{AcceptanceData, AcceptedTxEntry, MergesetBlockAcceptanceData};
 use kaspa_consensus_core::config::params::{DEVNET_PARAMS, MAINNET_PARAMS, Params, SIMNET_PARAMS, TESTNET_PARAMS};
 use kaspa_consensus_core::mass::MassCalculator;
-use kaspa_consensus_core::tx::PopulatedTransaction;
+use kaspa_consensus_core::tx::{PopulatedTransaction, VerifiableTransaction};
 use kaspa_consensus_core::utxo::utxo_view::{UtxoView, UtxoViewComposition};
 use kaspa_database::prelude::{CachePolicy, ConnBuilder, StoreError};
 use kaspa_database::registry::DatabaseStorePrefixes;
 use kaspa_hashes::{Hash, ZERO_HASH};
 use kaspa_seq_commit::hashing::{
-    activity_digest_lane, activity_leaf, lane_key, lane_tip_next, mergeset_context_hash,
-    miner_payload_leaf, miner_payload_root, payload_and_context_digest, seq_commit, seq_commit_timestamp,
-    seq_state_root,
+    activity_digest_lane, activity_leaf, lane_key, lane_tip_next, mergeset_context_hash, miner_payload_leaf, miner_payload_root,
+    payload_and_context_digest, seq_commit, seq_commit_timestamp, seq_state_root,
 };
-use kaspa_seq_commit::types::{
-    LaneTipInput, MergesetContext, MinerPayloadLeafInput, SeqCommitInput, SeqState,
-};
+use kaspa_seq_commit::types::{LaneTipInput, MergesetContext, MinerPayloadLeafInput, SeqCommitInput, SeqState};
 use kaspa_smt::store::{BranchKey, Node, SmtStore};
 use kaspa_smt::tree::compute_root_update;
 use kaspa_smt_store::processor::{SmtReadBounds, SmtStores};
@@ -76,12 +73,16 @@ struct Args {
     db: PathBuf,
     block: Hash,
     params: &'static Params,
+    branch_keys: Vec<(u8, Hash)>,
+    lane_keys: Vec<Hash>,
 }
 
 fn parse_args() -> Args {
     let mut db: Option<PathBuf> = None;
     let mut block: Option<String> = None;
     let mut network: String = String::from("devnet");
+    let mut branch_keys: Vec<(u8, Hash)> = Vec::new();
+    let mut lane_keys: Vec<Hash> = Vec::new();
 
     let argv: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -99,8 +100,23 @@ fn parse_args() -> Args {
                 network = argv[i + 1].clone();
                 i += 2;
             }
+            "--branch" => {
+                // Format: <depth>:<64-hex-node_key>. Repeat to dump multiple keys.
+                let raw = &argv[i + 1];
+                let (d, k) = raw.split_once(':').expect("--branch expects <depth>:<hex32>");
+                let depth: u8 = d.parse().expect("branch depth must be u8");
+                let node_key = Hash::from_str(k).expect("branch node_key must be 64-char hex");
+                branch_keys.push((depth, node_key));
+                i += 2;
+            }
+            "--lane" => {
+                lane_keys.push(Hash::from_str(&argv[i + 1]).expect("--lane must be 64-char hex"));
+                i += 2;
+            }
             "-h" | "--help" => {
-                eprintln!("Usage: dump_seq_commit --db <path> --block <hex> [--network devnet|testnet|mainnet|simnet]");
+                eprintln!(
+                    "Usage: dump_seq_commit --db <path> --block <hex> \\\n           [--network devnet|testnet|mainnet|simnet] \\\n           [--branch <depth>:<hex32> ...] [--lane <hex32> ...]"
+                );
                 std::process::exit(0);
             }
             other => {
@@ -123,7 +139,7 @@ fn parse_args() -> Args {
             std::process::exit(2);
         }
     };
-    Args { db, block, params }
+    Args { db, block, params, branch_keys, lane_keys }
 }
 
 fn main() {
@@ -151,15 +167,12 @@ fn main() {
     let smt_metadata_store = Arc::new(DbSmtMetadataStore::new(db.clone(), cp()));
     let smt_stores = Arc::new(SmtStores::new(db.clone(), 16, 16));
     let virtual_state_store = DbVirtualStateStore::new(db.clone(), LkgVirtualState::default());
-    let virtual_utxo_set =
-        DbUtxoSetStore::new(db.clone(), cp(), DatabaseStorePrefixes::VirtualUtxoset.into());
+    let virtual_utxo_set = DbUtxoSetStore::new(db.clone(), cp(), DatabaseStorePrefixes::VirtualUtxoset.into());
     let reachability_store = Arc::new(RwLock::new(DbReachabilityStore::new(db.clone(), cp(), cp())));
     let reachability_service = MTReachabilityService::new(reachability_store);
 
     // ---- Block + parent ----
-    let header = headers_store
-        .get_header(args.block)
-        .unwrap_or_else(|e| panic!("header for {} not found: {e}", args.block));
+    let header = headers_store.get_header(args.block).unwrap_or_else(|e| panic!("header for {} not found: {e}", args.block));
     let ghostdag = ghostdag_store.get_data(args.block).expect("ghostdag data missing for block");
     let selected_parent = ghostdag.selected_parent;
     let parent_header = headers_store.get_header(selected_parent).expect("parent header missing");
@@ -223,6 +236,7 @@ fn main() {
                 &headers_store,
                 &reachability_service,
                 &header,
+                header.daa_score, // pov_daa_score = current block's daa
                 selected_parent,
                 &merged,
             )
@@ -276,12 +290,8 @@ fn main() {
 
     // ---- parent_smt_metadata: canonical (parent_bs, 0) ----
     let canonical_for_sp = |bh: Hash| is_smt_canonical(&reachability_service, bh, selected_parent);
-    let active_lanes_count = smt_metadata_store
-        .get(selected_parent)
-        .map(|m| m.active_lanes_count)
-        .unwrap_or(0);
-    let parent_lanes_root =
-        smt_stores.get_lanes_root(SmtReadBounds::new(parent_bs, 0), |bh| canonical_for_sp(bh));
+    let active_lanes_count = smt_metadata_store.get(selected_parent).map(|m| m.active_lanes_count).unwrap_or(0);
+    let parent_lanes_root = smt_stores.get_lanes_root(SmtReadBounds::new(parent_bs, 0), |bh| canonical_for_sp(bh));
     println!("[parent_smt_metadata]");
     println!("  active_lanes_count        = {active_lanes_count}");
     println!("  parent_lanes_root         = {parent_lanes_root}");
@@ -306,18 +316,11 @@ fn main() {
         let existing = smt_stores.get_lane(lk, lane_bounds, |bh| canonical_for_sp(bh));
         let is_new = existing.is_none();
         let (existing_str, parent_ref) = match &existing {
-            Some(v) => (
-                format!("blue_score={} block_hash={} tip={}", v.blue_score(), v.block_hash(), v.data()),
-                *v.data(),
-            ),
+            Some(v) => (format!("blue_score={} block_hash={} tip={}", v.blue_score(), v.block_hash(), v.data()), *v.data()),
             None => ("None".to_string(), parent_seq_commit),
         };
-        let new_tip = lane_tip_next(&LaneTipInput {
-            parent_ref: &parent_ref,
-            lane_key: &lk,
-            activity_digest: &ad,
-            context_hash: &context_hash,
-        });
+        let new_tip =
+            lane_tip_next(&LaneTipInput { parent_ref: &parent_ref, lane_key: &lk, activity_digest: &ad, context_hash: &context_hash });
         println!("  lane_id={}", hex(lane_id));
         println!("    lane_key             = {lk}");
         println!("    activity_digest      = {ad}");
@@ -332,11 +335,7 @@ fn main() {
 
     // ---- expire_stale_lanes ----
     let parent_active_min = parent_bs.saturating_sub(f);
-    let expired_range = if current_active_min > parent_active_min {
-        Some(parent_active_min..=current_active_min - 1)
-    } else {
-        None
-    };
+    let expired_range = if current_active_min > parent_active_min { Some(parent_active_min..=current_active_min - 1) } else { None };
     println!("[expire_stale_lanes]");
     let mut expired: Vec<Hash> = Vec::new();
     if let Some(r) = expired_range {
@@ -393,13 +392,11 @@ fn main() {
         (parent_lanes_root, kaspa_smt::tree::SmtNodeChanges::new())
     } else {
         let leaves = kaspa_smt::store::SortedLeafUpdates::from_sorted_map(&leaf_map, |_k, v| *v);
-        compute_root_update::<SeqCommitActiveNode, _>(&logging_reader, parent_lanes_root, leaves)
-            .expect("compute_root_update failed")
+        compute_root_update::<SeqCommitActiveNode, _>(&logging_reader, parent_lanes_root, leaves).expect("compute_root_update failed")
     };
     let new_lane_count = updates.iter().filter(|u| u.is_new).count() as u64;
     let expired_count = expired.len() as u64;
-    let active_lanes_after =
-        (active_lanes_count + new_lane_count).saturating_sub(expired_count);
+    let active_lanes_after = (active_lanes_count + new_lane_count).saturating_sub(expired_count);
     let state_root = seq_state_root(&SeqState { lanes_root: &lanes_root, payload_and_ctx_digest: &pd });
     let commit = seq_commit(&SeqCommitInput { parent_seq_commit: &parent_seq_commit, state_root: &state_root });
 
@@ -434,8 +431,7 @@ fn main() {
     println!();
 
     println!("[node_changes]  {} branch entries written by compute_root_update", node_changes.len());
-    let mut writes: Vec<(BranchKey, Option<Node>)> =
-        node_changes.iter().map(|(k, v)| (*k, *v)).collect();
+    let mut writes: Vec<(BranchKey, Option<Node>)> = node_changes.iter().map(|(k, v)| (*k, *v)).collect();
     writes.sort_by(|a, b| (a.0.depth, a.0.node_key).cmp(&(b.0.depth, b.0.node_key)));
     for (key, value) in &writes {
         let v = match value {
@@ -446,6 +442,63 @@ fn main() {
         println!("  depth={:>3} node_key={} -> {v}", key.depth, key.node_key);
     }
     println!();
+
+    // ---- History dumpers (--branch / --lane) ----
+    if !args.branch_keys.is_empty() {
+        println!("[branch_history]  {} key(s) requested", args.branch_keys.len());
+        for (depth, node_key) in &args.branch_keys {
+            println!();
+            println!("  depth={depth} node_key={node_key}");
+            println!("    All versions (newest blue_score first), full history (no canonicality filter):");
+            let mut count = 0usize;
+            for entry in smt_stores.branch_version.get_at(*depth, *node_key, u64::MAX, 0) {
+                let entry = entry.expect("branch_version iter error");
+                let bh = entry.block_hash();
+                let bs = entry.blue_score();
+                let canon = canonical_for_sp(bh);
+                let v = match *entry.data() {
+                    Some(Node::Internal(h)) => format!("Internal({h})"),
+                    Some(Node::Collapsed(cl)) => {
+                        format!("Collapsed(lane_key={}, leaf_hash={})", cl.lane_key, cl.leaf_hash)
+                    }
+                    None => "Tombstone".to_string(),
+                };
+                let canon_tag = if canon { "canonical" } else { "non-canonical" };
+                let zero_tag = if bh == ZERO_HASH { " [ZERO_HASH=IBD-import]" } else { "" };
+                println!("      blue_score={bs:>10} block_hash={bh} [{canon_tag}]{zero_tag} -> {v}");
+                count += 1;
+            }
+            if count == 0 {
+                println!("      (no versions found)");
+            }
+        }
+        println!();
+    }
+
+    if !args.lane_keys.is_empty() {
+        println!("[lane_history]  {} lane(s) requested", args.lane_keys.len());
+        for lk in &args.lane_keys {
+            println!();
+            println!("  lane_key={lk}");
+            println!("    All versions (newest blue_score first), full history (no canonicality filter):");
+            let mut count = 0usize;
+            for entry in smt_stores.lane_version.get_at(*lk, u64::MAX, 0) {
+                let entry = entry.expect("lane_version iter error");
+                let bh = entry.block_hash();
+                let bs = entry.blue_score();
+                let canon = canonical_for_sp(bh);
+                let tip = entry.data();
+                let canon_tag = if canon { "canonical" } else { "non-canonical" };
+                let zero_tag = if bh == ZERO_HASH { " [ZERO_HASH=IBD-import]" } else { "" };
+                println!("      blue_score={bs:>10} block_hash={bh} [{canon_tag}]{zero_tag} -> tip={tip}");
+                count += 1;
+            }
+            if count == 0 {
+                println!("      (no versions found)");
+            }
+        }
+        println!();
+    }
 
     println!("{SECTION}");
     println!("Done.");
@@ -465,10 +518,7 @@ impl<F: Fn(Hash) -> bool> SmtStore for LoggingSmtReader<'_, F> {
     type Error = StoreError;
     fn get_node(&self, key: &BranchKey) -> Result<Option<Node>, StoreError> {
         let entity = kaspa_smt_store::cache::BranchEntity { depth: key.depth, node_key: key.node_key };
-        let result = self
-            .stores
-            .get_node(entity, self.bounds, |bh| (self.is_canonical)(bh))
-            .and_then(|v| *v.data());
+        let result = self.stores.get_node(entity, self.bounds, |bh| (self.is_canonical)(bh)).and_then(|v| *v.data());
         self.reads.borrow_mut().push((*key, result));
         Ok(result)
     }
@@ -504,6 +554,7 @@ fn recompute_acceptance(
     headers_store: &Arc<DbHeadersStore>,
     reachability_service: &MTReachabilityService<DbReachabilityStore>,
     header: &kaspa_consensus_core::header::Header,
+    pov_daa_score: u64,
     selected_parent: Hash,
     merged: &[Hash],
 ) -> AcceptanceData {
@@ -523,11 +574,8 @@ fn recompute_acceptance(
     let sp_view = virtual_utxo_set.compose(virtual_state.utxo_diff.as_reversed());
 
     // Build TransactionValidator from network params.
-    let mass_calculator = MassCalculator::new(
-        params.mass_per_tx_byte,
-        params.mass_per_script_pub_key_byte,
-        params.storage_mass_parameter,
-    );
+    let mass_calculator =
+        MassCalculator::new(params.mass_per_tx_byte, params.mass_per_script_pub_key_byte, params.storage_mass_parameter);
     let counters = Arc::new(TxScriptCacheCounters::default());
     let tv = TransactionValidator::new(
         params.max_tx_inputs,
@@ -554,97 +602,91 @@ fn recompute_acceptance(
         None
     };
 
-    // Walk the mergeset, applying accepted-tx diffs to a running view so each
-    // subsequent merged block sees the parent + earlier-accepted-mergeset txs.
+    // Mirror `calculate_utxo_state`:
+    //   for each merged block (selected_parent first):
+    //     composed_view = sp_view + running mergeset_diff   (rebuilt once per block)
+    //     validate all non-coinbase txs against composed_view (parallel in real code,
+    //       sequential here — order of independent txs doesn't matter)
+    //     bulk-apply accepted txs to mergeset_diff with pov_daa_score
+    //   selected_parent's coinbase is added explicitly with new_coinbase semantics
+    //   selected_parent's other txs use SkipScriptChecks (already verified by SP)
+    use kaspa_consensus_core::tx::ValidatedTransaction;
     use kaspa_consensus_core::utxo::utxo_diff::UtxoDiff;
+
     let mut diff = UtxoDiff::default();
     let mut out: AcceptanceData = Vec::with_capacity(merged.len());
     let mut total_accepted = 0usize;
     let mut total_seen = 0usize;
     let mut total_rejected: BTreeMap<String, usize> = BTreeMap::new();
 
-    // The selected parent's coinbase tx is always accepted.
-    let sp_txs = block_transactions_store.get(selected_parent).expect("sp txs missing");
-    let sp_coinbase = &sp_txs[0];
-    let sp_coinbase_id = kaspa_consensus_core::hashing::tx::id(sp_coinbase);
-
     for (i, mh) in merged.iter().enumerate() {
         let mhdr = headers_store.get_header(*mh).expect("merged header missing");
         let block_txs = block_transactions_store.get(*mh).expect("merged txs missing");
+        let is_selected_parent = i == 0;
+        let validation_flags = if is_selected_parent { TxValidationFlags::SkipScriptChecks } else { TxValidationFlags::Full };
 
-        let mut accepted: Vec<AcceptedTxEntry> = Vec::new();
-        if i == 0 {
-            // Selected parent: prepend its coinbase exactly like calculate_utxo_state does.
-            accepted.push(AcceptedTxEntry { transaction_id: sp_coinbase_id, index_within_block: 0 });
-        }
-
+        // 1) Validate every non-coinbase tx of this block against the composed view
+        //    that does NOT include any of this block's own outputs.
+        let mut accepted_in_block: Vec<(usize, ValidatedTransaction<'_>)> = Vec::new();
+        let composed = (&sp_view).compose(&diff);
         for (idx, tx) in block_txs.iter().enumerate().skip(1) {
             total_seen += 1;
-            // Validate in a scope so the immutable borrow of `diff` ends before
-            // we mutate it on success.
-            enum Outcome {
-                Accept,
-                Reject(String),
-            }
-            let outcome = {
-                let composed = (&sp_view).compose(&diff);
-                let mut entries = Vec::with_capacity(tx.inputs.len());
-                let mut missing = false;
-                for input in tx.inputs.iter() {
-                    if let Some(e) = composed.get(&input.previous_outpoint) {
-                        entries.push(e);
-                    } else {
-                        missing = true;
-                        break;
-                    }
-                }
-                if missing {
-                    Outcome::Reject("MissingTxOutpoints".into())
+            let mut entries = Vec::with_capacity(tx.inputs.len());
+            let mut missing = false;
+            for input in tx.inputs.iter() {
+                if let Some(e) = composed.get(&input.previous_outpoint) {
+                    entries.push(e);
                 } else {
-                    let populated = PopulatedTransaction::new(tx, entries);
-                    match tv.validate_populated_transaction_and_get_fee(
-                        &populated,
-                        mhdr.daa_score,
-                        mhdr.daa_score,
-                        TxValidationFlags::Full,
-                        None,
-                        seq_commit_accessor.as_ref().map(|v| v as _),
-                    ) {
-                        Ok(_fee) => Outcome::Accept,
-                        Err(e) => Outcome::Reject(classify_err(&e)),
-                    }
+                    missing = true;
+                    break;
                 }
-            };
-            match outcome {
-                Outcome::Accept => {
-                    accepted.push(AcceptedTxEntry {
-                        transaction_id: kaspa_consensus_core::hashing::tx::id(tx),
-                        index_within_block: idx as u32,
-                    });
-                    // Apply this tx to the running diff. Re-populate inputs from the
-                    // current composed view (no borrow held now).
-                    let composed = (&sp_view).compose(&diff);
-                    let entries: Vec<_> = tx
-                        .inputs
-                        .iter()
-                        .map(|input| composed.get(&input.previous_outpoint).expect("validated tx must have inputs"))
-                        .collect();
-                    drop(composed);
-                    let populated = PopulatedTransaction::new(tx, entries);
-                    let validated = kaspa_consensus_core::tx::ValidatedTransaction::new(populated, 0);
-                    diff.add_transaction(&validated, mhdr.daa_score).expect("add_transaction");
+            }
+            if missing {
+                *total_rejected.entry("MissingTxOutpoints".into()).or_insert(0) += 1;
+                continue;
+            }
+            let populated = PopulatedTransaction::new(tx, entries);
+            match tv.validate_populated_transaction_and_get_fee(
+                &populated,
+                pov_daa_score,
+                mhdr.daa_score,
+                validation_flags,
+                None,
+                seq_commit_accessor.as_ref().map(|v| v as _),
+            ) {
+                Ok(fee) => {
+                    accepted_in_block.push((idx, ValidatedTransaction::new(populated, fee)));
                     total_accepted += 1;
                 }
-                Outcome::Reject(label) => {
-                    *total_rejected.entry(label).or_insert(0) += 1;
+                Err(e) => {
+                    *total_rejected.entry(classify_err(&e)).or_insert(0) += 1;
                 }
             }
         }
+        drop(composed);
 
-        out.push(MergesetBlockAcceptanceData {
-            block_hash: *mh,
-            accepted_transactions: accepted,
-        });
+        // 2) Build acceptance entries; for selected_parent prepend the coinbase.
+        let mut accepted: Vec<AcceptedTxEntry> = Vec::new();
+        if is_selected_parent {
+            let coinbase = &block_txs[0];
+            let coinbase_id = kaspa_consensus_core::hashing::tx::id(coinbase);
+            accepted.push(AcceptedTxEntry { transaction_id: coinbase_id, index_within_block: 0 });
+            // Add SP coinbase to running diff exactly like calculate_utxo_state does
+            // (`ValidatedTransaction::new_coinbase` + add_transaction(pov_daa_score)).
+            let validated_cb = ValidatedTransaction::new_coinbase(coinbase);
+            diff.add_transaction(&validated_cb, pov_daa_score).expect("coinbase add");
+        }
+        for (idx, vtx) in &accepted_in_block {
+            accepted.push(AcceptedTxEntry { transaction_id: vtx.id(), index_within_block: *idx as u32 });
+        }
+
+        // 3) Apply accepted-tx diffs to the running view AFTER all validations,
+        //    using pov_daa_score so output maturity matches real consensus.
+        for (_, vtx) in &accepted_in_block {
+            diff.add_transaction(vtx, pov_daa_score).expect("add_transaction");
+        }
+
+        out.push(MergesetBlockAcceptanceData { block_hash: *mh, accepted_transactions: accepted });
     }
 
     println!("{SUB}");
