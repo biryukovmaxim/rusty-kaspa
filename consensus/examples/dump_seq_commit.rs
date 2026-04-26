@@ -1,47 +1,33 @@
-//! Diagnostic: dump the full breakdown of `recompute_seq_commit` for a given block
-//! against an existing kaspad consensus RocksDB snapshot.
+//! Diagnostic: recompute `seq_commit` for a block against an existing kaspad
+//! consensus RocksDB snapshot, and dump every input and intermediate value so
+//! two DB snapshots can be diffed line-by-line.
 //!
-//! Reproduces every intermediate value `verify_expected_utxo_state ->
-//! recompute_seq_commit -> {collect_mergeset_seq_data, resolve_lane_updates,
-//! get_parent_smt_metadata, build_seq_commit}` would compute, with side-by-side
-//! probes against three SMT read-bound variants per lookup so the divergence
-//! point is visible at a glance.
+//! Designed for the case where the syncee disqualified a block with
+//! `BadAcceptedIDMerkleRoot`. If the block has committed `acceptance_data` in
+//! the DB, that's used. Otherwise the example re-runs UTXO validation against
+//! the parent's UTXO view (taken from `virtual_stores.utxo_set` reversed by
+//! `virtual_state.utxo_diff`) so we can reproduce *exactly* the syncee's
+//! computation that produced the wrong commit.
 //!
-//! The DB must NOT be opened by another process (kaspad). RocksDB takes a file
-//! lock — close kaspad first. The example does not write to the DB but uses the
-//! standard read-write open path (RocksDB rejects concurrent rw opens).
+//! Two snapshots will diverge somewhere in:
+//!   - the accepted-tx set (per-merged-block list of accepted tx ids),
+//!   - the per-lane existing-tip lookups (lane_version store contents),
+//!   - the branch-walk reads inside `compute_root_update` (branch_version
+//!     store contents at the visited (depth, node_key) addresses).
+//! All three are dumped explicitly.
 //!
-//! Usage (either form):
-//!   # Auto-resolve the active consensus DB from kaspad's datadir layout
-//!   # ({datadir}/meta + {datadir}/consensus/consensus-NNN):
+//! The DB must NOT be opened by another process. RocksDB takes a file lock —
+//! close kaspad first. The example does not write through the public store
+//! APIs, but `ConnBuilder::default()` opens read-write so RocksDB may replay
+//! WAL / append to LOG; logical state is unchanged.
+//!
+//! Usage:
 //!   cargo run --release --example dump_seq_commit -p kaspa-consensus -- \
-//!     --datadir /path/to/datadir \
+//!     --db /path/to/datadir/consensus/consensus-NNN \
 //!     --block <64-hex-hash> \
-//!     --finality-depth 432000
-//!
-//!   # Or pass the inner consensus DB path directly:
-//!   cargo run --release --example dump_seq_commit -p kaspa-consensus -- \
-//!     --db /path/to/datadir/consensus/consensus-002 \
-//!     --block <64-hex-hash> \
-//!     --finality-depth 432000
-//!
-//! `--finality-depth` should match the network's `params.finality_depth()`.
-//! Devnet default = 432000, testnet-11 = 86400 — check
-//! `consensus/core/src/config/params.rs` for the value of the network you're
-//! investigating.
-//!
-//! Output:
-//!   - Header / parent header / context hash / mergeset listing.
-//!   - If acceptance data exists for the block (it is committed only for blocks
-//!     that passed UTXO validation), the full per-lane and per-bound breakdown
-//!     plus the recomputed `seq_commit`. Compare against
-//!     `header.accepted_id_merkle_root`.
-//!   - If acceptance data is missing (the block was disqualified), only the
-//!     header/mergeset surface and the `parent_lanes_root` probes are printed.
-//!     In that case run the same example on the working DB to get the full
-//!     dump and diff manually, or on the last-passing chain block on the
-//!     failing DB to see whether the SMT state is already drifted there.
+//!     [--network devnet|testnet|mainnet|simnet]   (default: devnet)
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -50,14 +36,25 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use kaspa_consensus::model::services::reachability::{MTReachabilityService, ReachabilityService};
+use kaspa_consensus::model::services::seq_commit_accessor::SeqCommitAccessor;
 use kaspa_consensus::model::stores::acceptance_data::{AcceptanceDataStoreReader, DbAcceptanceDataStore};
 use kaspa_consensus::model::stores::block_transactions::{BlockTransactionsStoreReader, DbBlockTransactionsStore};
 use kaspa_consensus::model::stores::ghostdag::{DbGhostdagStore, GhostdagStoreReader};
 use kaspa_consensus::model::stores::headers::{DbHeadersStore, HeaderStoreReader};
 use kaspa_consensus::model::stores::reachability::DbReachabilityStore;
 use kaspa_consensus::model::stores::smt_metadata::DbSmtMetadataStore;
+use kaspa_consensus::model::stores::utxo_set::DbUtxoSetStore;
+use kaspa_consensus::model::stores::virtual_state::{DbVirtualStateStore, LkgVirtualState, VirtualStateStoreReader};
+use kaspa_consensus::processes::transaction_validator::TransactionValidator;
+use kaspa_consensus::processes::transaction_validator::tx_validation_in_utxo_context::TxValidationFlags;
+use kaspa_consensus_core::acceptance_data::{AcceptanceData, AcceptedTxEntry, MergesetBlockAcceptanceData};
+use kaspa_consensus_core::config::params::{DEVNET_PARAMS, MAINNET_PARAMS, Params, SIMNET_PARAMS, TESTNET_PARAMS};
+use kaspa_consensus_core::mass::MassCalculator;
+use kaspa_consensus_core::tx::PopulatedTransaction;
+use kaspa_consensus_core::utxo::utxo_view::{UtxoView, UtxoViewComposition};
 use kaspa_database::prelude::{CachePolicy, ConnBuilder, StoreError};
-use kaspa_hashes::{Hash, SeqCommitActiveNode, ZERO_HASH};
+use kaspa_database::registry::DatabaseStorePrefixes;
+use kaspa_hashes::{Hash, ZERO_HASH};
 use kaspa_seq_commit::hashing::{
     activity_digest_lane, activity_leaf, lane_key, lane_tip_next, mergeset_context_hash,
     miner_payload_leaf, miner_payload_root, payload_and_context_digest, seq_commit, seq_commit_timestamp,
@@ -66,8 +63,10 @@ use kaspa_seq_commit::hashing::{
 use kaspa_seq_commit::types::{
     LaneTipInput, MergesetContext, MinerPayloadLeafInput, SeqCommitInput, SeqState,
 };
-use kaspa_smt::SmtHasher;
-use kaspa_smt_store::processor::{SmtProcessor, SmtReadBounds, SmtStores};
+use kaspa_smt::store::{BranchKey, Node, SmtStore};
+use kaspa_smt::tree::compute_root_update;
+use kaspa_smt_store::processor::{SmtReadBounds, SmtStores};
+use kaspa_txscript::caches::TxScriptCacheCounters;
 
 const SECTION: &str = "============================================================";
 const SUB: &str = "------------------------------------------------------------";
@@ -76,13 +75,13 @@ const SUB: &str = "------------------------------------------------------------"
 struct Args {
     db: PathBuf,
     block: Hash,
-    finality_depth: u64,
+    params: &'static Params,
 }
 
 fn parse_args() -> Args {
     let mut db: Option<PathBuf> = None;
     let mut block: Option<String> = None;
-    let mut finality_depth: Option<u64> = None;
+    let mut network: String = String::from("devnet");
 
     let argv: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -96,14 +95,12 @@ fn parse_args() -> Args {
                 block = Some(argv[i + 1].clone());
                 i += 2;
             }
-            "--finality-depth" | "-F" => {
-                finality_depth = Some(argv[i + 1].parse().expect("finality-depth must be u64"));
+            "--network" | "-n" => {
+                network = argv[i + 1].clone();
                 i += 2;
             }
             "-h" | "--help" => {
-                eprintln!(
-                    "Usage: dump_seq_commit --db <path> --block <hex> --finality-depth <u64>"
-                );
+                eprintln!("Usage: dump_seq_commit --db <path> --block <hex> [--network devnet|testnet|mainnet|simnet]");
                 std::process::exit(0);
             }
             other => {
@@ -115,30 +112,36 @@ fn parse_args() -> Args {
 
     let db = db.expect("--db is required");
     let block_hex = block.expect("--block is required");
-    let finality_depth = finality_depth.expect("--finality-depth is required");
     let block = Hash::from_str(&block_hex).expect("--block must be a 64-char hex hash");
-
-    Args { db, block, finality_depth }
+    let params: &'static Params = match network.as_str() {
+        "devnet" => &DEVNET_PARAMS,
+        "testnet" => &TESTNET_PARAMS,
+        "mainnet" => &MAINNET_PARAMS,
+        "simnet" => &SIMNET_PARAMS,
+        other => {
+            eprintln!("Unknown network: {other}");
+            std::process::exit(2);
+        }
+    };
+    Args { db, block, params }
 }
 
 fn main() {
     let args = parse_args();
+    let f = args.params.finality_depth();
     println!("{SECTION}");
     println!("dump_seq_commit");
     println!("  db                = {}", args.db.display());
     println!("  block             = {}", args.block);
-    println!("  finality_depth F  = {}", args.finality_depth);
+    println!("  network           = {} (finality_depth={})", args.params.net, f);
     println!("{SECTION}\n");
 
-    // Open the DB. ConnBuilder defaults to read-write open; if kaspad is running
-    // on the same dir RocksDB will refuse the lock.
     let db = ConnBuilder::default()
         .with_db_path(args.db.clone())
         .with_files_limit(512)
         .build()
         .expect("failed to open DB (is kaspad running on this datadir?)");
 
-    // Minimal cache everywhere — examples shouldn't keep gigabytes resident.
     let cp = || CachePolicy::Empty;
 
     let headers_store = Arc::new(DbHeadersStore::new(db.clone(), cp(), cp()));
@@ -147,29 +150,23 @@ fn main() {
     let acceptance_data_store = Arc::new(DbAcceptanceDataStore::new(db.clone(), cp()));
     let smt_metadata_store = Arc::new(DbSmtMetadataStore::new(db.clone(), cp()));
     let smt_stores = Arc::new(SmtStores::new(db.clone(), 16, 16));
+    let virtual_state_store = DbVirtualStateStore::new(db.clone(), LkgVirtualState::default());
+    let virtual_utxo_set =
+        DbUtxoSetStore::new(db.clone(), cp(), DatabaseStorePrefixes::VirtualUtxoset.into());
     let reachability_store = Arc::new(RwLock::new(DbReachabilityStore::new(db.clone(), cp(), cp())));
     let reachability_service = MTReachabilityService::new(reachability_store);
 
-    let header = match headers_store.get_header(args.block) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("ERROR: header for {} not found: {e}", args.block);
-            std::process::exit(1);
-        }
-    };
-    let ghostdag = ghostdag_store
-        .get_data(args.block)
-        .expect("ghostdag data missing for block");
+    // ---- Block + parent ----
+    let header = headers_store
+        .get_header(args.block)
+        .unwrap_or_else(|e| panic!("header for {} not found: {e}", args.block));
+    let ghostdag = ghostdag_store.get_data(args.block).expect("ghostdag data missing for block");
     let selected_parent = ghostdag.selected_parent;
-    let parent_header = headers_store
-        .get_header(selected_parent)
-        .expect("parent header missing");
+    let parent_header = headers_store.get_header(selected_parent).expect("parent header missing");
 
     let current_bs = ghostdag.blue_score;
     let parent_bs = parent_header.blue_score;
-    let f = args.finality_depth;
     let current_active_min = current_bs.saturating_sub(f);
-    let parent_active_min = parent_bs.saturating_sub(f);
 
     println!("[block]");
     println!("  hash                       = {}", header.hash);
@@ -188,7 +185,6 @@ fn main() {
     println!("  accepted_id_merkle_root    = {}  <-- parent_seq_commit input", parent_header.accepted_id_merkle_root);
     println!();
 
-    // ---- Mergeset context ----
     let parent_seq_commit = parent_header.accepted_id_merkle_root;
     let context_hash = mergeset_context_hash(&MergesetContext {
         timestamp: seq_commit_timestamp(parent_header.timestamp),
@@ -200,7 +196,6 @@ fn main() {
     println!("  context_hash               = {context_hash}");
     println!();
 
-    // ---- Mergeset enumeration ----
     let merged: Vec<Hash> = std::iter::once(selected_parent)
         .chain(ghostdag.consensus_ordered_mergeset_without_selected_parent(&*ghostdag_store))
         .collect();
@@ -212,216 +207,90 @@ fn main() {
     }
     println!();
 
-    // ---- Try to read acceptance data ----
-    let acceptance = match acceptance_data_store.get(args.block) {
-        Ok(a) => Some(a),
-        Err(StoreError::KeyNotFound(_)) => None,
+    // ---- Acceptance: stored, or re-validate against virtual ----
+    let acceptance: AcceptanceData = match acceptance_data_store.get(args.block) {
+        Ok(a) => {
+            println!("[acceptance_data] STORED — using committed acceptance from DB");
+            (*a).clone()
+        }
+        Err(StoreError::KeyNotFound(_)) => {
+            println!("[acceptance_data] MISSING — re-validating against virtual state");
+            recompute_acceptance(
+                args.params,
+                &virtual_state_store,
+                &virtual_utxo_set,
+                &block_transactions_store,
+                &headers_store,
+                &reachability_service,
+                &header,
+                selected_parent,
+                &merged,
+            )
+        }
         Err(e) => panic!("acceptance_data_store error: {e}"),
     };
-
-    if acceptance.is_none() {
-        println!("{SUB}");
-        println!("Acceptance data for {} is NOT in the DB.", args.block);
-        println!("This block was disqualified before utxo state could be committed,");
-        println!("so we cannot reproduce the per-lane breakdown from this DB alone.");
-        println!("Falling back to the parent_lanes_root probes; for the full dump,");
-        println!("run the same example on a DB where the block was committed");
-        println!("(e.g., the working snapshot), or on the last-passing block before");
-        println!("the cascade on this DB.");
-        println!("{SUB}\n");
-    }
-
-    // ---- Parent SMT metadata: probe with three different read-bounds ----
-    println!("[parent_smt_metadata]");
-    let active_lanes_count = smt_metadata_store
-        .get(selected_parent)
-        .map(|m| m.active_lanes_count)
-        .unwrap_or(0);
-    println!("  active_lanes_count (DB metadata) = {active_lanes_count}");
-
-    let canonical_for_sp = |bh: Hash| is_smt_canonical(&reachability_service, bh, selected_parent);
-
-    let probe_root = |label: &str, bounds: SmtReadBounds| {
-        let r = smt_stores.get_lanes_root(bounds, |bh| canonical_for_sp(bh));
-        println!(
-            "  parent_lanes_root [{label:<20}] target={:>10}  min={:>10}  -> {r}",
-            bounds.target_blue_score, bounds.min_blue_score
-        );
-        r
-    };
-    let r_buggy = probe_root("buggy: (parent_bs, parent-F)", SmtReadBounds::for_pov(parent_bs, f));
-    let r_canonical = probe_root("canonical: (parent_bs, 0)", SmtReadBounds::new(parent_bs, 0));
-    let _r_current_pov = probe_root("current-pov:(current,curr-F)", SmtReadBounds::for_pov(current_bs, f));
+    println!("  mergeset entries          = {}", acceptance.len());
+    let total_accepted: usize = acceptance.iter().map(|a| a.accepted_transactions.len()).sum();
+    println!("  total accepted txs        = {}", total_accepted);
     println!();
 
-    let acceptance = match acceptance {
-        Some(a) => a,
-        None => {
-            // Skeleton recompute without acceptance data:
-            //   - payload_root depends only on the mergeset coinbase payloads
-            //     and headers, which we have unconditionally.
-            //   - For lanes_root we use three baselines:
-            //       (1) parent_lanes_root unchanged (no lane updates, no expirations)
-            //       (2) after running expire_stale_lanes only (still no updates)
-            //       (3) empty SMT root (sanity reference)
-            //   The resulting seq_commits bracket what the producer's value can
-            //   be once the missing accepted-tx lane updates are folded in.
-            println!("[skeleton recompute]  (no acceptance data — best-effort)");
-            println!("  Walking the mergeset (selected_parent + ordered merged blocks) for");
-            println!("  miner payload leaves only. Lane activities are unknown.");
-
-            let mut miner_payload_leaves: Vec<Hash> = Vec::with_capacity(merged.len());
-            for mh in &merged {
-                let mhdr = headers_store.get_header(*mh).expect("merged header missing");
-                let block_txs = block_transactions_store.get(*mh).expect("merged block txs missing");
-                let coinbase_payload = &block_txs[0].payload;
-                let mpl = miner_payload_leaf(MinerPayloadLeafInput {
-                    block_hash: mh,
-                    blue_work_be_bytes: &mhdr.blue_work.to_be_bytes(),
-                    payload: coinbase_payload,
-                });
-                miner_payload_leaves.push(mpl);
-            }
-            let payload_root = miner_payload_root(miner_payload_leaves.into_iter());
-            let pd = payload_and_context_digest(&context_hash, &payload_root);
-            println!("  payload_root              = {payload_root}");
-            println!("  payload_and_ctx_digest    = {pd}");
-            println!();
-
-            // Run expire_stale_lanes against three bound choices to see how many
-            // lanes would be expired regardless of incoming updates.
-            let bounds_buggy = SmtReadBounds::new(parent_bs, current_active_min);
-            let bounds_canonical = SmtReadBounds::for_pov(current_bs, f);
-            let expired_range = if current_active_min > parent_active_min {
-                Some(parent_active_min..=current_active_min - 1)
-            } else {
-                None
-            };
-            let count_expired = |label: &str, bounds: SmtReadBounds| -> Vec<Hash> {
-                let mut out = Vec::new();
-                let Some(r) = expired_range.clone() else {
-                    println!("  expire_stale_lanes [{label:<14}] = no scan band");
-                    return out;
-                };
-                let mut seen: std::collections::BTreeSet<Hash> = std::collections::BTreeSet::new();
-                for entry in smt_stores.score_index.get_leaf_updates(r) {
-                    let entry = entry.expect("score_index iter error");
-                    if !canonical_for_sp(entry.block_hash()) {
-                        continue;
-                    }
-                    for lk in entry.data().iter() {
-                        if !seen.insert(*lk) {
-                            continue;
-                        }
-                        if smt_stores.get_lane(*lk, bounds, |bh| canonical_for_sp(bh)).is_none() {
-                            out.push(*lk);
-                        }
-                    }
-                }
-                println!("  expire_stale_lanes [{label:<14}] = {} lanes expire", out.len());
-                out
-            };
-            let expired_buggy = count_expired("buggy: parent", bounds_buggy);
-            let expired_canonical = count_expired("canonical: cur", bounds_canonical);
-            println!();
-
-            let compute_skeleton = |label: &str, parent_root: Hash, bounds: SmtReadBounds, expired: &[Hash]| {
-                let mut proc = SmtProcessor::new(&smt_stores, current_bs, bounds, parent_root);
-                for lk in expired {
-                    proc.expire_lane(*lk);
-                }
-                let build = proc.build(|bh| canonical_for_sp(bh)).expect("smt build failed");
-                let state_root = seq_state_root(&SeqState { lanes_root: &build.root, payload_and_ctx_digest: &pd });
-                let commit = seq_commit(&SeqCommitInput { parent_seq_commit: &parent_seq_commit, state_root: &state_root });
-                println!("[skeleton / {label}]");
-                println!("  parent_lanes_root         = {parent_root}");
-                println!("  bounds                    = target={} min={}", bounds.target_blue_score, bounds.min_blue_score);
-                println!("  expired_count             = {}", expired.len());
-                println!("  lanes_root after expire   = {}", build.root);
-                println!("  state_root                = {state_root}");
-                println!("  seq_commit (no updates)   = {commit}");
-                if commit == header.accepted_id_merkle_root {
-                    println!("  *** MATCHES header.accepted_id_merkle_root ***");
-                    println!("      => zero lane updates would already produce the header's value.");
-                } else {
-                    println!("  != header.accepted_id_merkle_root ({})", header.accepted_id_merkle_root);
-                }
-                println!();
-                commit
-            };
-
-            compute_skeleton("buggy: parent_root buggy + expired_buggy", r_buggy, bounds_buggy, &expired_buggy);
-            compute_skeleton("canonical: parent_root canonical + expired_canonical", r_canonical, bounds_canonical, &expired_canonical);
-
-            let empty_root = SeqCommitActiveNode::empty_root();
-            let pd_empty_state_root = seq_state_root(&SeqState { lanes_root: &empty_root, payload_and_ctx_digest: &pd });
-            let pd_empty_commit = seq_commit(&SeqCommitInput { parent_seq_commit: &parent_seq_commit, state_root: &pd_empty_state_root });
-            println!("[skeleton / sanity: empty SMT]");
-            println!("  empty_root                = {empty_root}");
-            println!("  seq_commit (empty SMT)    = {pd_empty_commit}");
-            if pd_empty_commit == header.accepted_id_merkle_root {
-                println!("  *** matches header (the parent SMT view was empty) ***");
-            }
-            println!();
-
-            println!("{SECTION}");
-            println!("Done (skeleton-only).");
-            println!("  - To compare with the value the syncee actually computed in the log");
-            println!("    (e.g. 4305ba2e...77262d for c026adb3...), match the seq_commits above.");
-            println!("  - For the FULL per-lane breakdown, run on the working DB with the same");
-            println!("    --block, or on the selected_parent {} of the failing block on this DB.", selected_parent);
-            println!("{SECTION}");
-            return;
+    println!("[accepted_per_merged_block]");
+    for ba in acceptance.iter() {
+        println!("  block={} accepted_count={}", ba.block_hash, ba.accepted_transactions.len());
+        for tx in ba.accepted_transactions.iter() {
+            println!("    tx_id={} idx_within_block={}", tx.transaction_id, tx.index_within_block);
         }
-    };
-    println!("[acceptance_data]  {} mergeset entries", acceptance.len());
+    }
+    println!();
 
     // ---- collect_mergeset_seq_data ----
     let mut lane_activities: BTreeMap<[u8; 20], Vec<Hash>> = BTreeMap::new();
     let mut miner_payload_leaves: Vec<Hash> = Vec::new();
     let mut global_merge_idx: u32 = 0;
-
-    for block_acc in acceptance.iter() {
-        let merged_block = block_acc.block_hash;
-        let mhdr = headers_store.get_header(merged_block).expect("merged header missing");
-        let block_txs = block_transactions_store.get(merged_block).expect("merged block txs missing");
-
+    for ba in acceptance.iter() {
+        let mh = ba.block_hash;
+        let mhdr = headers_store.get_header(mh).expect("merged header missing");
+        let block_txs = block_transactions_store.get(mh).expect("merged block txs missing");
         let coinbase_payload = &block_txs[0].payload;
-        let mpl = miner_payload_leaf(MinerPayloadLeafInput {
-            block_hash: &merged_block,
+        miner_payload_leaves.push(miner_payload_leaf(MinerPayloadLeafInput {
+            block_hash: &mh,
             blue_work_be_bytes: &mhdr.blue_work.to_be_bytes(),
             payload: coinbase_payload,
-        });
-        miner_payload_leaves.push(mpl);
-
-        for accepted_tx in block_acc.accepted_transactions.iter() {
-            let tx = &block_txs[accepted_tx.index_within_block as usize];
+        }));
+        for at in ba.accepted_transactions.iter() {
+            let tx = &block_txs[at.index_within_block as usize];
             let lane_id: [u8; 20] = *tx.subnetwork_id.as_bytes();
-            let al = activity_leaf(&accepted_tx.transaction_id, tx.version, global_merge_idx);
+            let al = activity_leaf(&at.transaction_id, tx.version, global_merge_idx);
             lane_activities.entry(lane_id).or_default().push(al);
             global_merge_idx += 1;
         }
     }
 
-    println!("  total accepted txs           = {global_merge_idx}");
-    println!("  miner_payload_leaves.len()  = {}", miner_payload_leaves.len());
-    println!("  distinct lanes               = {}", lane_activities.len());
-    println!();
-
     let payload_root = miner_payload_root(miner_payload_leaves.clone().into_iter());
     let pd = payload_and_context_digest(&context_hash, &payload_root);
     println!("[payload]");
+    println!("  miner_payload_leaves      = {}", miner_payload_leaves.len());
     println!("  payload_root              = {payload_root}");
     println!("  payload_and_ctx_digest    = {pd}");
     println!();
 
-    // ---- resolve_lane_updates: per-lane lookup with three bound variants ----
-    println!("[lane_updates]");
-    println!(
-        "  Format per lane: lane_id, activity_digest, then the 'existing tip' returned by"
-    );
-    println!("  three different bound variants. Differences here mean the SMT seek window");
-    println!("  is materially changing the result.");
+    // ---- parent_smt_metadata: canonical (parent_bs, 0) ----
+    let canonical_for_sp = |bh: Hash| is_smt_canonical(&reachability_service, bh, selected_parent);
+    let active_lanes_count = smt_metadata_store
+        .get(selected_parent)
+        .map(|m| m.active_lanes_count)
+        .unwrap_or(0);
+    let parent_lanes_root =
+        smt_stores.get_lanes_root(SmtReadBounds::new(parent_bs, 0), |bh| canonical_for_sp(bh));
+    println!("[parent_smt_metadata]");
+    println!("  active_lanes_count        = {active_lanes_count}");
+    println!("  parent_lanes_root         = {parent_lanes_root}");
+    println!();
+
+    // ---- resolve_lane_updates: canonical bounds = (current_bs, current_bs - F) ----
+    let lane_bounds = SmtReadBounds::for_pov(current_bs, f);
+    println!("[lane_updates]  bounds=(target={}, min={})", lane_bounds.target_blue_score, lane_bounds.min_blue_score);
+    println!("  Per-lane: lane_id, activity_digest, existing tip (or None), parent_ref, new_tip, is_new.");
     println!();
 
     struct ResolvedUpdate {
@@ -429,85 +298,49 @@ fn main() {
         new_tip: Hash,
         is_new: bool,
     }
-
-    let mut updates_buggy: Vec<ResolvedUpdate> = Vec::with_capacity(lane_activities.len());
-    let mut updates_canonical: Vec<ResolvedUpdate> = Vec::with_capacity(lane_activities.len());
-    let bounds_buggy = SmtReadBounds::new(parent_bs, current_active_min); // [current-F, parent]
-    let bounds_canonical = SmtReadBounds::for_pov(current_bs, f); // [current-F, current]
-    let bounds_full = SmtReadBounds::new(current_bs, 0); // [0, current]
+    let mut updates: Vec<ResolvedUpdate> = Vec::with_capacity(lane_activities.len());
 
     for (lane_id, activity_leaves) in &lane_activities {
         let lk = lane_key(lane_id);
         let ad = activity_digest_lane(activity_leaves.iter().copied());
-
-        let probe = |bounds: SmtReadBounds| -> Option<(u64, Hash, Hash)> {
-            smt_stores
-                .get_lane(lk, bounds, |bh| canonical_for_sp(bh))
-                .map(|v| (v.blue_score(), v.block_hash(), *v.data()))
+        let existing = smt_stores.get_lane(lk, lane_bounds, |bh| canonical_for_sp(bh));
+        let is_new = existing.is_none();
+        let (existing_str, parent_ref) = match &existing {
+            Some(v) => (
+                format!("blue_score={} block_hash={} tip={}", v.blue_score(), v.block_hash(), v.data()),
+                *v.data(),
+            ),
+            None => ("None".to_string(), parent_seq_commit),
         };
-
-        let r_buggy = probe(bounds_buggy);
-        let r_canonical = probe(bounds_canonical);
-        let r_full = probe(bounds_full);
-
+        let new_tip = lane_tip_next(&LaneTipInput {
+            parent_ref: &parent_ref,
+            lane_key: &lk,
+            activity_digest: &ad,
+            context_hash: &context_hash,
+        });
         println!("  lane_id={}", hex(lane_id));
         println!("    lane_key             = {lk}");
         println!("    activity_digest      = {ad}");
         println!("    activity_leaves.len  = {}", activity_leaves.len());
-        let fmt = |label: &str, opt: &Option<(u64, Hash, Hash)>| match opt {
-            Some((bs, bh, t)) => format!(
-                "    existing [{label:<14}] = blue_score={bs} block_hash={bh} tip={t}"
-            ),
-            None => format!("    existing [{label:<14}] = None"),
-        };
-        println!("{}", fmt("buggy: parent", &r_buggy));
-        println!("{}", fmt("canonical: cur", &r_canonical));
-        println!("{}", fmt("full history", &r_full));
-
-        // Build resolved-update for both buggy and canonical bound choices.
-        let mk_update = |existing: Option<(u64, Hash, Hash)>| {
-            let is_new = existing.is_none();
-            let parent_ref = existing.map(|(_, _, t)| t).unwrap_or(parent_seq_commit);
-            let new_tip = lane_tip_next(&LaneTipInput {
-                parent_ref: &parent_ref,
-                lane_key: &lk,
-                activity_digest: &ad,
-                context_hash: &context_hash,
-            });
-            ResolvedUpdate { lane_key: lk, new_tip, is_new }
-        };
-        let u_b = mk_update(r_buggy);
-        let u_c = mk_update(r_canonical);
-        println!(
-            "    new_tip [buggy]      = {}  is_new={}",
-            u_b.new_tip, u_b.is_new
-        );
-        println!(
-            "    new_tip [canonical]  = {}  is_new={}",
-            u_c.new_tip, u_c.is_new
-        );
-        if u_b.new_tip != u_c.new_tip {
-            println!("    *** new_tip DIFFERS between buggy and canonical bounds ***");
-        }
-        updates_buggy.push(u_b);
-        updates_canonical.push(u_c);
-        println!();
+        println!("    existing             = {existing_str}");
+        println!("    parent_ref           = {parent_ref}");
+        println!("    new_tip              = {new_tip}");
+        println!("    is_new               = {is_new}");
+        updates.push(ResolvedUpdate { lane_key: lk, new_tip, is_new });
     }
+    println!();
 
-    // ---- expire_stale_lanes (just enumerate; report count under each bounds choice) ----
+    // ---- expire_stale_lanes ----
+    let parent_active_min = parent_bs.saturating_sub(f);
     let expired_range = if current_active_min > parent_active_min {
         Some(parent_active_min..=current_active_min - 1)
     } else {
         None
     };
     println!("[expire_stale_lanes]");
-    match &expired_range {
-        Some(r) => println!("  scan score-index in [{}, {}]", r.start(), r.end()),
-        None => println!("  no scan (current_active_min <= parent_active_min)"),
-    }
-    let mut expired_buggy: Vec<Hash> = Vec::new();
-    let mut expired_canonical: Vec<Hash> = Vec::new();
+    let mut expired: Vec<Hash> = Vec::new();
     if let Some(r) = expired_range {
+        println!("  scan score-index in [{}, {}]", r.start(), r.end());
         let mut seen: std::collections::BTreeSet<Hash> = std::collections::BTreeSet::new();
         for entry in smt_stores.score_index.get_leaf_updates(r) {
             let entry = entry.expect("score_index iter error");
@@ -518,85 +351,130 @@ fn main() {
                 if !seen.insert(*lk) {
                     continue;
                 }
-                let alive_buggy = smt_stores
-                    .get_lane(*lk, bounds_buggy, |bh| canonical_for_sp(bh))
-                    .is_some();
-                let alive_canonical = smt_stores
-                    .get_lane(*lk, bounds_canonical, |bh| canonical_for_sp(bh))
-                    .is_some();
-                if !alive_buggy {
-                    expired_buggy.push(*lk);
-                }
-                if !alive_canonical {
-                    expired_canonical.push(*lk);
-                }
-                if alive_buggy != alive_canonical {
-                    println!(
-                        "  lane_key={lk} divergence: alive_buggy={alive_buggy} alive_canonical={alive_canonical}"
-                    );
+                if smt_stores.get_lane(*lk, lane_bounds, |bh| canonical_for_sp(bh)).is_none() {
+                    expired.push(*lk);
                 }
             }
         }
+    } else {
+        println!("  no scan band");
     }
-    println!("  expired_count [buggy]      = {}", expired_buggy.len());
-    println!("  expired_count [canonical]  = {}", expired_canonical.len());
+    println!("  expired_count             = {}", expired.len());
     println!();
 
-    // ---- build_seq_commit: run SmtProcessor for each bounds choice ----
-    let run_build = |label: &str, parent_root: Hash, bounds: SmtReadBounds, updates: &[ResolvedUpdate], expired: &[Hash]| -> (Hash, u64) {
-        let mut proc = SmtProcessor::new(&smt_stores, current_bs, bounds, parent_root);
-        for lk in expired {
-            proc.expire_lane(*lk);
-        }
-        for u in updates {
-            proc.update_lane(u.lane_key, u.new_tip);
-        }
-        let build = proc.build(|bh| canonical_for_sp(bh)).expect("smt build failed");
-        let new_lane_count = updates.iter().filter(|u| u.is_new).count() as u64;
-        let expired_count = expired.len() as u64;
-        let active_after = active_lanes_count + new_lane_count - expired_count.min(active_lanes_count + new_lane_count);
-        let state_root = seq_state_root(&SeqState { lanes_root: &build.root, payload_and_ctx_digest: &pd });
-        let commit = seq_commit(&SeqCommitInput { parent_seq_commit: &parent_seq_commit, state_root: &state_root });
+    // ---- build_seq_commit, with branch-read logging ----
+    println!("[build_seq_commit]  bounds=(target={}, min={})", lane_bounds.target_blue_score, lane_bounds.min_blue_score);
 
-        println!("[build_seq_commit / {label}]");
-        println!("  parent_lanes_root         = {parent_root}");
-        println!("  bounds                    = target={} min={}", bounds.target_blue_score, bounds.min_blue_score);
-        println!("  expired_count             = {}", expired.len());
-        println!("  new_lane_count            = {new_lane_count}");
-        println!("  active_lanes_count after  = {active_after}");
-        println!("  lanes_root                = {}", build.root);
-        println!("  state_root                = {state_root}");
-        println!("  seq_commit                = {commit}");
-        if commit == header.accepted_id_merkle_root {
-            println!("  *** MATCHES header.accepted_id_merkle_root ***");
-        } else {
-            println!("  !!! does NOT match header.accepted_id_merkle_root ({}) !!!", header.accepted_id_merkle_root);
-        }
-        println!();
-        (commit, build.root.as_slice()[0] as u64) // dummy second return to stay typed
+    // Build the leaf updates that compute_root_update consumes.
+    use kaspa_hashes::SeqCommitActiveNode;
+    use kaspa_seq_commit::hashing::smt_leaf_hash;
+    use kaspa_seq_commit::types::SmtLeafInput;
+    let mut leaf_map: BTreeMap<Hash, Hash> = BTreeMap::new();
+    // Expirations first; updates overwrite expirations on the same lane_key.
+    for lk in &expired {
+        // BlockLaneChanges encodes expirations as ZERO_HASH leaves
+        // (see SmtProcessor's to_leaf_updates).
+        leaf_map.insert(*lk, ZERO_HASH);
+    }
+    for u in &updates {
+        let leaf = smt_leaf_hash(&SmtLeafInput { lane_tip: &u.new_tip, blue_score: current_bs });
+        leaf_map.insert(u.lane_key, leaf);
+    }
+
+    let logging_reader = LoggingSmtReader {
+        stores: &smt_stores,
+        bounds: lane_bounds,
+        is_canonical: &canonical_for_sp,
+        reads: RefCell::new(Vec::new()),
     };
 
-    println!("{SUB}");
-    println!("Recompute under each bounds choice (full pipeline):");
-    println!("{SUB}\n");
+    let (lanes_root, node_changes) = if leaf_map.is_empty() {
+        println!("  no leaf updates — short-circuit; lanes_root = parent_lanes_root");
+        (parent_lanes_root, kaspa_smt::tree::SmtNodeChanges::new())
+    } else {
+        let leaves = kaspa_smt::store::SortedLeafUpdates::from_sorted_map(&leaf_map, |_k, v| *v);
+        compute_root_update::<SeqCommitActiveNode, _>(&logging_reader, parent_lanes_root, leaves)
+            .expect("compute_root_update failed")
+    };
+    let new_lane_count = updates.iter().filter(|u| u.is_new).count() as u64;
+    let expired_count = expired.len() as u64;
+    let active_lanes_after =
+        (active_lanes_count + new_lane_count).saturating_sub(expired_count);
+    let state_root = seq_state_root(&SeqState { lanes_root: &lanes_root, payload_and_ctx_digest: &pd });
+    let commit = seq_commit(&SeqCommitInput { parent_seq_commit: &parent_seq_commit, state_root: &state_root });
 
-    let _ = run_build("buggy: parent_root buggy + lane_buggy", r_buggy, bounds_buggy, &updates_buggy, &expired_buggy);
-    let _ = run_build("canonical (current-pov)", r_canonical, bounds_canonical, &updates_canonical, &expired_canonical);
-    let _ = run_build("parent_root full + lane_canonical", r_canonical, bounds_canonical, &updates_canonical, &expired_canonical);
-    // Bonus: empty-leaf reference root, in case the parent_lanes_root probe returned empty
-    let empty_root = SeqCommitActiveNode::empty_root();
-    println!(
-        "[reference] empty SMT root = {empty_root}  (returned by get_lanes_root when no in-window root entry exists)\n"
-    );
+    println!("  parent_lanes_root         = {parent_lanes_root}");
+    println!("  expired_count             = {expired_count}");
+    println!("  new_lane_count            = {new_lane_count}");
+    println!("  active_lanes_count after  = {active_lanes_after}");
+    println!("  lanes_root                = {lanes_root}");
+    println!("  state_root                = {state_root}");
+    println!("  seq_commit                = {commit}");
+    if commit == header.accepted_id_merkle_root {
+        println!("  *** MATCHES header.accepted_id_merkle_root ***");
+    } else {
+        println!("  !!! does NOT match header.accepted_id_merkle_root ({}) !!!", header.accepted_id_merkle_root);
+    }
+    println!();
+
+    // ---- Branch reads dump (sorted by depth, node_key — comparable across DBs) ----
+    let mut reads = logging_reader.reads.into_inner();
+    reads.sort_by(|a, b| (a.0.depth, a.0.node_key).cmp(&(b.0.depth, b.0.node_key)));
+    println!("[branch_reads]  {} branch entries read by compute_root_update", reads.len());
+    println!("  Sorted by (depth asc, node_key asc) so two DBs can be diffed line-by-line.");
+    println!("  Format: depth=NN node_key=<hex32> -> <Internal hash | Collapsed (lane_key, leaf_hash) | None>");
+    for (key, value) in &reads {
+        let v = match value {
+            Some(Node::Internal(h)) => format!("Internal({h})"),
+            Some(Node::Collapsed(cl)) => format!("Collapsed(lane_key={}, leaf_hash={})", cl.lane_key, cl.leaf_hash),
+            None => "None".to_string(),
+        };
+        println!("  depth={:>3} node_key={} -> {v}", key.depth, key.node_key);
+    }
+    println!();
+
+    println!("[node_changes]  {} branch entries written by compute_root_update", node_changes.len());
+    let mut writes: Vec<(BranchKey, Option<Node>)> =
+        node_changes.iter().map(|(k, v)| (*k, *v)).collect();
+    writes.sort_by(|a, b| (a.0.depth, a.0.node_key).cmp(&(b.0.depth, b.0.node_key)));
+    for (key, value) in &writes {
+        let v = match value {
+            Some(Node::Internal(h)) => format!("Internal({h})"),
+            Some(Node::Collapsed(cl)) => format!("Collapsed(lane_key={}, leaf_hash={})", cl.lane_key, cl.leaf_hash),
+            None => "Deleted".to_string(),
+        };
+        println!("  depth={:>3} node_key={} -> {v}", key.depth, key.node_key);
+    }
+    println!();
 
     println!("{SECTION}");
     println!("Done.");
     println!("{SECTION}");
 }
 
-/// Mirrors `VirtualStateProcessor::is_smt_canonical`:
-/// `bh == ZERO_HASH || bh is chain ancestor of selected_parent`. Errors from
-/// reachability (e.g., pruned reachability data) are treated as non-canonical.
+/// SmtStore wrapper that records every (BranchKey, value) it answers.
+/// Used to capture the exact branch_version reads `compute_root_update` makes.
+struct LoggingSmtReader<'a, F: Fn(Hash) -> bool> {
+    stores: &'a SmtStores,
+    bounds: SmtReadBounds,
+    is_canonical: &'a F,
+    reads: RefCell<Vec<(BranchKey, Option<Node>)>>,
+}
+
+impl<F: Fn(Hash) -> bool> SmtStore for LoggingSmtReader<'_, F> {
+    type Error = StoreError;
+    fn get_node(&self, key: &BranchKey) -> Result<Option<Node>, StoreError> {
+        let entity = kaspa_smt_store::cache::BranchEntity { depth: key.depth, node_key: key.node_key };
+        let result = self
+            .stores
+            .get_node(entity, self.bounds, |bh| (self.is_canonical)(bh))
+            .and_then(|v| *v.data());
+        self.reads.borrow_mut().push((*key, result));
+        Ok(result)
+    }
+}
+
+/// Mirrors `VirtualStateProcessor::is_smt_canonical`.
 fn is_smt_canonical<R: ReachabilityService>(svc: &R, bh: Hash, selected_parent: Hash) -> bool {
     bh == ZERO_HASH || matches!(svc.try_is_chain_ancestor_of(bh, selected_parent), Ok(true))
 }
@@ -607,4 +485,189 @@ fn hex(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+/// Recompute `acceptance_data` from scratch by re-running tx validation against
+/// the parent's UTXO view.
+///
+/// **Assumption:** `virtual_state.ghostdag_data.selected_parent == selected_parent`.
+/// In other words, the parent of the block under inspection IS the current
+/// selected tip. That holds on a syncee that disqualified `block` (the chain
+/// stays at the parent). On a node that already accepted `block`, this won't
+/// hold and the function panics — but in that case `acceptance_data_store` has
+/// the committed acceptance and the caller takes the stored path.
+fn recompute_acceptance(
+    params: &Params,
+    virtual_state_store: &DbVirtualStateStore,
+    virtual_utxo_set: &DbUtxoSetStore,
+    block_transactions_store: &DbBlockTransactionsStore,
+    headers_store: &Arc<DbHeadersStore>,
+    reachability_service: &MTReachabilityService<DbReachabilityStore>,
+    header: &kaspa_consensus_core::header::Header,
+    selected_parent: Hash,
+    merged: &[Hash],
+) -> AcceptanceData {
+    let virtual_state = virtual_state_store.get().expect("virtual state missing");
+    if virtual_state.ghostdag_data.selected_parent != selected_parent {
+        eprintln!(
+            "ERROR: virtual.selected_parent={} != block.selected_parent={}.\n\
+             Cannot reconstruct parent UTXO view without walking diffs.\n\
+             Run this on a DB where the block was disqualified (its parent is the chain tip),\n\
+             or on a DB where it was accepted (acceptance_data is then read from store directly).",
+            virtual_state.ghostdag_data.selected_parent, selected_parent
+        );
+        std::process::exit(3);
+    }
+
+    // SP UTXO view = virtual UTXO + reversed virtual.utxo_diff
+    let sp_view = virtual_utxo_set.compose(virtual_state.utxo_diff.as_reversed());
+
+    // Build TransactionValidator from network params.
+    let mass_calculator = MassCalculator::new(
+        params.mass_per_tx_byte,
+        params.mass_per_script_pub_key_byte,
+        params.storage_mass_parameter,
+    );
+    let counters = Arc::new(TxScriptCacheCounters::default());
+    let tv = TransactionValidator::new(
+        params.max_tx_inputs,
+        params.max_tx_outputs,
+        params.max_signature_script_len,
+        params.max_script_public_key_len,
+        params.coinbase_payload_script_public_key_max_len,
+        params.coinbase_maturity(),
+        params.ghostdag_k(),
+        counters,
+        mass_calculator,
+        params.covenants_activation,
+        params.mass_per_sig_op,
+    );
+    let seq_commit_accessor = if params.covenants_activation.is_active(header.daa_score) {
+        Some(SeqCommitAccessor::new(
+            selected_parent,
+            reachability_service,
+            headers_store,
+            params.covenants_activation,
+            params.finality_depth(),
+        ))
+    } else {
+        None
+    };
+
+    // Walk the mergeset, applying accepted-tx diffs to a running view so each
+    // subsequent merged block sees the parent + earlier-accepted-mergeset txs.
+    use kaspa_consensus_core::utxo::utxo_diff::UtxoDiff;
+    let mut diff = UtxoDiff::default();
+    let mut out: AcceptanceData = Vec::with_capacity(merged.len());
+    let mut total_accepted = 0usize;
+    let mut total_seen = 0usize;
+    let mut total_rejected: BTreeMap<String, usize> = BTreeMap::new();
+
+    // The selected parent's coinbase tx is always accepted.
+    let sp_txs = block_transactions_store.get(selected_parent).expect("sp txs missing");
+    let sp_coinbase = &sp_txs[0];
+    let sp_coinbase_id = kaspa_consensus_core::hashing::tx::id(sp_coinbase);
+
+    for (i, mh) in merged.iter().enumerate() {
+        let mhdr = headers_store.get_header(*mh).expect("merged header missing");
+        let block_txs = block_transactions_store.get(*mh).expect("merged txs missing");
+
+        let mut accepted: Vec<AcceptedTxEntry> = Vec::new();
+        if i == 0 {
+            // Selected parent: prepend its coinbase exactly like calculate_utxo_state does.
+            accepted.push(AcceptedTxEntry { transaction_id: sp_coinbase_id, index_within_block: 0 });
+        }
+
+        for (idx, tx) in block_txs.iter().enumerate().skip(1) {
+            total_seen += 1;
+            // Validate in a scope so the immutable borrow of `diff` ends before
+            // we mutate it on success.
+            enum Outcome {
+                Accept,
+                Reject(String),
+            }
+            let outcome = {
+                let composed = (&sp_view).compose(&diff);
+                let mut entries = Vec::with_capacity(tx.inputs.len());
+                let mut missing = false;
+                for input in tx.inputs.iter() {
+                    if let Some(e) = composed.get(&input.previous_outpoint) {
+                        entries.push(e);
+                    } else {
+                        missing = true;
+                        break;
+                    }
+                }
+                if missing {
+                    Outcome::Reject("MissingTxOutpoints".into())
+                } else {
+                    let populated = PopulatedTransaction::new(tx, entries);
+                    match tv.validate_populated_transaction_and_get_fee(
+                        &populated,
+                        mhdr.daa_score,
+                        mhdr.daa_score,
+                        TxValidationFlags::Full,
+                        None,
+                        seq_commit_accessor.as_ref().map(|v| v as _),
+                    ) {
+                        Ok(_fee) => Outcome::Accept,
+                        Err(e) => Outcome::Reject(classify_err(&e)),
+                    }
+                }
+            };
+            match outcome {
+                Outcome::Accept => {
+                    accepted.push(AcceptedTxEntry {
+                        transaction_id: kaspa_consensus_core::hashing::tx::id(tx),
+                        index_within_block: idx as u32,
+                    });
+                    // Apply this tx to the running diff. Re-populate inputs from the
+                    // current composed view (no borrow held now).
+                    let composed = (&sp_view).compose(&diff);
+                    let entries: Vec<_> = tx
+                        .inputs
+                        .iter()
+                        .map(|input| composed.get(&input.previous_outpoint).expect("validated tx must have inputs"))
+                        .collect();
+                    drop(composed);
+                    let populated = PopulatedTransaction::new(tx, entries);
+                    let validated = kaspa_consensus_core::tx::ValidatedTransaction::new(populated, 0);
+                    diff.add_transaction(&validated, mhdr.daa_score).expect("add_transaction");
+                    total_accepted += 1;
+                }
+                Outcome::Reject(label) => {
+                    *total_rejected.entry(label).or_insert(0) += 1;
+                }
+            }
+        }
+
+        out.push(MergesetBlockAcceptanceData {
+            block_hash: *mh,
+            accepted_transactions: accepted,
+        });
+    }
+
+    println!("{SUB}");
+    println!("Re-validation summary:");
+    println!("  txs seen (excl. coinbase)   = {total_seen}");
+    println!("  txs accepted                = {total_accepted}");
+    println!("  txs rejected                = {}", total_seen - total_accepted);
+    if !total_rejected.is_empty() {
+        let mut entries: Vec<(&String, &usize)> = total_rejected.iter().collect();
+        entries.sort_by(|a, b| b.1.cmp(a.1));
+        println!("  rejection breakdown:");
+        for (k, v) in entries {
+            println!("    {k:<40} {v:>6}");
+        }
+    }
+    println!("{SUB}\n");
+
+    out
+}
+
+/// Map any error to a short stable label by stripping the variant name from its
+/// `Debug` rendering. Avoids hard-coding the exact `TxRuleError` variant set.
+fn classify_err<E: std::fmt::Debug>(e: &E) -> String {
+    let s = format!("{e:?}");
+    s.split(|c: char| c == '(' || c == ' ' || c == '{').next().unwrap_or("Unknown").to_string()
 }
