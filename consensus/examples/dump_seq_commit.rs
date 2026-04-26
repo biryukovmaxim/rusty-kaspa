@@ -75,6 +75,7 @@ struct Args {
     params: &'static Params,
     branch_keys: Vec<(u8, Hash)>,
     lane_keys: Vec<Hash>,
+    score_range: Option<(u64, u64)>,
 }
 
 fn parse_args() -> Args {
@@ -83,6 +84,7 @@ fn parse_args() -> Args {
     let mut network: String = String::from("devnet");
     let mut branch_keys: Vec<(u8, Hash)> = Vec::new();
     let mut lane_keys: Vec<Hash> = Vec::new();
+    let mut score_range: Option<(u64, u64)> = None;
 
     let argv: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -113,6 +115,16 @@ fn parse_args() -> Args {
                 lane_keys.push(Hash::from_str(&argv[i + 1]).expect("--lane must be 64-char hex"));
                 i += 2;
             }
+            "--score-range" => {
+                // Format: <min>:<max>. Dumps every score_index LeafUpdate entry
+                // (the kind expire_stale_lanes scans) within the inclusive band.
+                let raw = &argv[i + 1];
+                let (lo, hi) = raw.split_once(':').expect("--score-range expects <min>:<max>");
+                let lo: u64 = lo.parse().expect("score-range min must be u64");
+                let hi: u64 = hi.parse().expect("score-range max must be u64");
+                score_range = Some((lo, hi));
+                i += 2;
+            }
             "-h" | "--help" => {
                 eprintln!(
                     "Usage: dump_seq_commit --db <path> --block <hex> \\\n           [--network devnet|testnet|mainnet|simnet] \\\n           [--branch <depth>:<hex32> ...] [--lane <hex32> ...]"
@@ -139,7 +151,7 @@ fn parse_args() -> Args {
             std::process::exit(2);
         }
     };
-    Args { db, block, params, branch_keys, lane_keys }
+    Args { db, block, params, branch_keys, lane_keys, score_range }
 }
 
 fn main() {
@@ -472,6 +484,32 @@ fn main() {
                 println!("      (no versions found)");
             }
         }
+        println!();
+    }
+
+    if let Some((lo, hi)) = args.score_range {
+        println!("[score_index_history]  range=[{lo}, {hi}]  kind=LeafUpdate (what expire_stale_lanes scans)");
+        let mut total_entries = 0usize;
+        let mut total_lanes = 0usize;
+        for entry in smt_stores.score_index.get_leaf_updates(lo..=hi) {
+            let entry = entry.expect("score_index iter error");
+            let bh = entry.block_hash();
+            let bs = entry.blue_score();
+            let lane_keys: &[Hash] = entry.data();
+            let canon = canonical_for_sp(bh);
+            let canon_tag = if canon { "canonical" } else { "non-canonical" };
+            let zero_tag = if bh == ZERO_HASH { " [ZERO_HASH=IBD-import]" } else { "" };
+            println!(
+                "  blue_score={bs:>10} block_hash={bh} [{canon_tag}]{zero_tag}  lane_keys.len={}",
+                lane_keys.len()
+            );
+            for lk in lane_keys {
+                println!("    {lk}");
+            }
+            total_entries += 1;
+            total_lanes += lane_keys.len();
+        }
+        println!("  -- summary: {total_entries} score_index entries covering {total_lanes} lane refs --");
         println!();
     }
 
