@@ -21,6 +21,7 @@
 //!     [--network devnet|testnet|mainnet|simnet]   (default: devnet)
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -50,11 +51,25 @@ const SECTION: &str = "=========================================================
 struct Args {
     db: PathBuf,
     params: &'static Params,
+    /// `--lane <hex32>` repeatable: skip all heavy work and just dump the
+    /// full version histories for these lane_keys (lane_version + branch_version
+    /// at every depth). Useful for chasing one specific `only_in_tree` /
+    /// `only_in_iter` key reported by an earlier full run.
+    lane_keys: Vec<Hash>,
+    /// `--no-diff`: skip the leaf-set-diff DFS (the expensive part).
+    /// Roots and counts are still printed.
+    no_diff: bool,
+    /// `--no-fresh`: skip the in-memory `compute_root_update` recompute
+    /// (heavy memory). Keeps streamed and stored.
+    no_fresh: bool,
 }
 
 fn parse_args() -> Args {
     let mut db: Option<PathBuf> = None;
     let mut network: String = String::from("devnet");
+    let mut lane_keys: Vec<Hash> = Vec::new();
+    let mut no_diff = false;
+    let mut no_fresh = false;
 
     let argv: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -68,8 +83,28 @@ fn parse_args() -> Args {
                 network = argv[i + 1].clone();
                 i += 2;
             }
+            "--lane" => {
+                lane_keys.push(Hash::from_str(&argv[i + 1]).expect("--lane expects 64-char hex"));
+                i += 2;
+            }
+            "--no-diff" => {
+                no_diff = true;
+                i += 1;
+            }
+            "--no-fresh" => {
+                no_fresh = true;
+                i += 1;
+            }
             "-h" | "--help" => {
-                eprintln!("Usage: dump_smt_export --db <path> [--network devnet|testnet|mainnet|simnet]");
+                eprintln!(
+                    "Usage: dump_smt_export --db <path> [--network devnet|testnet|mainnet|simnet]\n\
+                     \n\
+                     Optional:\n\
+                     \x20 --lane <hex32>     dump full lane history for this key (repeatable);\n\
+                     \x20                    when given, all heavy passes are skipped.\n\
+                     \x20 --no-diff          skip the leaf-set diff DFS (~12 M reads).\n\
+                     \x20 --no-fresh         skip the in-memory compute_root_update recompute."
+                );
                 std::process::exit(0);
             }
             other => {
@@ -90,7 +125,7 @@ fn parse_args() -> Args {
             std::process::exit(2);
         }
     };
-    Args { db, params }
+    Args { db, params, lane_keys, no_diff, no_fresh }
 }
 
 fn main() {
@@ -133,6 +168,20 @@ fn main() {
         None => println!("  active_lanes_count   = <missing>    (smt_metadata not stored for pp)"),
     }
     println!();
+
+    // --lane short-circuit: dump per-lane history and exit. No DFS, no
+    // root computation, no streaming_import. Cheap and targeted.
+    if !args.lane_keys.is_empty() {
+        let svc_for_lane = reachability_service.clone();
+        let canonical_for_lane = move |bh: Hash| bh == ZERO_HASH || matches!(svc_for_lane.try_is_chain_ancestor_of(bh, pp), Ok(true));
+        for lk in &args.lane_keys {
+            dump_lane_history(&smt_stores, *lk, &canonical_for_lane);
+        }
+        println!("\n{SECTION}");
+        println!("Done (per-lane mode).");
+        println!("{SECTION}");
+        return;
+    }
 
     // Mirror VirtualStateProcessor::is_smt_canonical(bh, pp): a stored entry
     // is canonical for the pruning-point view if it's the IBD ZERO_HASH
@@ -221,26 +270,24 @@ fn main() {
     // leaves, ignoring any pre-existing tree on disk. This is the
     // ground-truth root for a leaf set: if both `stored` and `streamed`
     // are correct implementations, they must each equal `fresh_recompute`.
-    //
-    // 3-way comparison (read with `streamed` and `stored` below):
-    //   fresh == streamed, fresh != stored → live-incremental wrote the
-    //     wrong tree (or `branch_version` is missing/extra leaves).
-    //   fresh == stored,   fresh != streamed → `streaming_import` has a
-    //     bug for this leaf distribution.
-    //   fresh distinct from both → leaf-set-dependent bug in one of them.
-    println!("[fresh_recompute_root] running compute_root_update over an empty BTreeSmtStore ...");
-    let mut leaf_updates: Vec<LeafUpdate> = Vec::with_capacity(total_lanes as usize);
-    for chunk in &chunks {
-        for lane in chunk {
-            let leaf_hash = smt_leaf_hash(&SmtLeafInput { lane_tip: &lane.lane_tip, blue_score: lane.blue_score });
-            leaf_updates.push(LeafUpdate { key: lane.lane_key, leaf_hash });
+    let fresh_recompute_root = if args.no_fresh {
+        println!("[fresh_recompute_root] SKIPPED (--no-fresh)");
+        Hash::from_bytes([0; 32])
+    } else {
+        println!("[fresh_recompute_root] running compute_root_update over an empty BTreeSmtStore ...");
+        let mut leaf_updates: Vec<LeafUpdate> = Vec::with_capacity(total_lanes as usize);
+        for chunk in &chunks {
+            for lane in chunk {
+                let leaf_hash = smt_leaf_hash(&SmtLeafInput { lane_tip: &lane.lane_tip, blue_score: lane.blue_score });
+                leaf_updates.push(LeafUpdate { key: lane.lane_key, leaf_hash });
+            }
         }
-    }
-    let sorted = SortedLeafUpdates::from_unsorted(leaf_updates);
-    let btree_store = BTreeSmtStore::new();
-    let (fresh_recompute_root, _changes) =
-        compute_root_update::<SeqCommitActiveNode, _>(&btree_store, SeqCommitActiveNode::empty_root(), sorted)
+        let sorted = SortedLeafUpdates::from_unsorted(leaf_updates);
+        let btree_store = BTreeSmtStore::new();
+        let (root, _changes) = compute_root_update::<SeqCommitActiveNode, _>(&btree_store, SeqCommitActiveNode::empty_root(), sorted)
             .expect("compute_root_update failed");
+        root
+    };
 
     // ---- streamed_lanes_root: rebuild via streaming_import on a temp DB ----
     //
@@ -315,6 +362,14 @@ fn main() {
     // exact `only_in_iter` / `only_in_tree` / `value_mismatch` lane keys
     // (sample-bounded). This is what tells us *which* lanes the live tree
     // disagrees with the iter export on.
+    if args.no_diff {
+        println!();
+        println!("[leaf_set_diff] SKIPPED (--no-diff)");
+        println!("\n{SECTION}");
+        println!("Done. Total lanes seen: {total_lanes}");
+        println!("{SECTION}");
+        return;
+    }
     println!();
     println!("[leaf_set_diff] iter_all_canonical_owned vs branch_version DFS");
     println!("  Streaming both sorted-by-lane_key sources and merge-stepping.");
@@ -364,14 +419,37 @@ struct DiffSummary {
 
 /// Merge-step two ascending `(lane_key, leaf_hash)` streams, printing a
 /// bounded sample of every kind of difference and accumulating totals.
+///
+/// Also emits a heartbeat every 250 k advances so a running diff is
+/// visibly distinguishable from a stall — DFS over millions of leaves is
+/// slow but not silent.
 fn run_diff(
     mut iter_stream: impl Iterator<Item = (Hash, Hash)>,
     mut tree_stream: impl Iterator<Item = (Hash, Hash)>,
 ) -> DiffSummary {
+    use std::time::Instant;
+    let start = Instant::now();
     let mut summary = DiffSummary::default();
     let mut only_in_iter_printed = 0usize;
     let mut only_in_tree_printed = 0usize;
     let mut mismatch_printed = 0usize;
+    let mut last_heartbeat = 0u64;
+    let heartbeat_every = 250_000u64;
+    let maybe_heartbeat = |s: &DiffSummary, last: &mut u64| {
+        let total = s.iter_count + s.tree_count;
+        if total - *last >= heartbeat_every {
+            eprintln!(
+                "  [progress] iter={}  tree={}  only_in_iter={}  only_in_tree={}  value_mismatch={}  elapsed={:.0}s",
+                s.iter_count,
+                s.tree_count,
+                s.only_in_iter_count,
+                s.only_in_tree_count,
+                s.value_mismatch_count,
+                start.elapsed().as_secs_f64(),
+            );
+            *last = total;
+        }
+    };
 
     let mut a = iter_stream.next();
     let mut b = tree_stream.next();
@@ -431,6 +509,7 @@ fn run_diff(
                 }
             },
         }
+        maybe_heartbeat(&summary, &mut last_heartbeat);
     }
 
     summary
@@ -448,21 +527,22 @@ fn snapshot(fp: &blake3::Hasher) -> Hash {
 /// 32-byte key). Streams in O(stack depth) memory — no full-set
 /// materialisation — so we can merge-diff against the equally-sorted
 /// `iter_all_canonical_owned` stream in O(1) auxiliary memory.
+///
+/// `depth` carried in the stack is `u16` (not `u8`) so the DFS can recurse
+/// past depth 255 to the leaf level (DEPTH=256) without wrapping. A child
+/// at depth 256 is read as `(256, key)` which the branch_version store
+/// returns as `None` (no Node lives at the leaf depth) — the recursion
+/// then unwinds. With `u8` arithmetic this overflowed silently in release
+/// and produced an unbounded loop pushing depth-0 entries forever.
 struct LeafDfs<'a, F: Fn(Hash) -> bool> {
     stores: &'a SmtStores,
     bounds: SmtReadBounds,
     is_canonical: F,
-    /// Subtrees yet to descend into, in pop-order = visit-order.
-    /// Each entry is the `(depth, key_prefix)` of an internal subtree we
-    /// haven't visited; we resolve `get_node` lazily inside `next()`.
-    /// Empty subtrees (`None` reads) and Collapsed terminals don't sit on
-    /// the stack — Internals push their two children on encounter.
-    stack: Vec<(u8, Hash)>,
+    stack: Vec<(u16, Hash)>,
 }
 
 impl<'a, F: Fn(Hash) -> bool> LeafDfs<'a, F> {
     fn new(stores: &'a SmtStores, bounds: SmtReadBounds, is_canonical: F) -> Self {
-        // Start from the root: depth=0, normalized key all-zero.
         Self { stores, bounds, is_canonical, stack: vec![(0, Hash::from_bytes([0u8; 32]))] }
     }
 }
@@ -472,17 +552,23 @@ impl<F: Fn(Hash) -> bool> Iterator for LeafDfs<'_, F> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some((depth, key_prefix)) = self.stack.pop() {
-            let bk = kaspa_smt::store::BranchKey::new(depth, &key_prefix);
-            let entity = BranchEntity { depth, node_key: bk.node_key };
+            // depth ∈ 0..=256. branch_version stores Nodes only at 0..=255.
+            // At depth 256 the read returns None and we unwind.
+            if depth > 255 {
+                continue;
+            }
+            let depth_u8 = depth as u8;
+            let bk = kaspa_smt::store::BranchKey::new(depth_u8, &key_prefix);
+            let entity = BranchEntity { depth: depth_u8, node_key: bk.node_key };
             let node = self.stores.get_node(entity, self.bounds, |bh| (self.is_canonical)(bh)).and_then(|v| *v.data());
             match node {
                 Some(Node::Internal(_)) => {
                     // Push right then left so left is visited first → in-order traversal.
-                    let mut right = bk.node_key.as_bytes();
-                    right[depth as usize / 8] |= 1u8 << (7 - (depth as usize % 8));
-                    let right = Hash::from_bytes(right);
+                    let mut right_bytes = bk.node_key.as_bytes();
+                    right_bytes[depth as usize / 8] |= 1u8 << (7 - (depth as usize % 8));
+                    let right = Hash::from_bytes(right_bytes);
                     let left = bk.node_key;
-                    let next_depth = depth + 1;
+                    let next_depth = depth + 1; // u16, no overflow at 255→256
                     self.stack.push((next_depth, right));
                     self.stack.push((next_depth, left));
                 }
@@ -496,4 +582,66 @@ impl<F: Fn(Hash) -> bool> Iterator for LeafDfs<'_, F> {
         }
         None
     }
+}
+
+/// Dump full per-lane history (`--lane <hex>` mode). Prints every
+/// `lane_version` entry for the given key (canonical-tagged) and, for
+/// `branch_version`, looks for a `Collapsed` at every depth on the lane's
+/// path — locating the lane's actual leaf position in the live tree.
+fn dump_lane_history(stores: &SmtStores, lane_key: Hash, is_canonical: &impl Fn(Hash) -> bool) {
+    println!("[lane_history] lane_key={lane_key}");
+    println!("  All lane_version versions (newest blue_score first):");
+    let mut count = 0usize;
+    for entry in stores.lane_version.get_at(lane_key, u64::MAX, 0) {
+        let entry = entry.expect("lane_version iter error");
+        let bs = entry.blue_score();
+        let bh = entry.block_hash();
+        let canon = is_canonical(bh);
+        let zero = bh == ZERO_HASH;
+        let tag = match (canon, zero) {
+            (true, true) => "[canonical, ZERO_HASH=IBD]",
+            (true, false) => "[canonical]",
+            (false, _) => "[non-canonical]",
+        };
+        println!("    blue_score={bs:>10}  block_hash={bh}  {tag}  tip={}", entry.data());
+        count += 1;
+    }
+    if count == 0 {
+        println!("    (no versions found in lane_version for this key)");
+    }
+
+    println!("  branch_version Collapsed lookup along path (depth 0..=255):");
+    let mut found_at: Option<u8> = None;
+    for d in 0u8..=255u8 {
+        let bk = kaspa_smt::store::BranchKey::new(d, &lane_key);
+        // Scan all canonicality+window-irrelevant versions at this (depth, normalized_key).
+        // We want to know: is there a Collapsed for THIS lane_key at depth d, at any version?
+        let mut hit_canon: Option<(u64, Hash)> = None;
+        let mut hit_any: Option<(u64, Hash)> = None;
+        for entry in stores.branch_version.get_at(d, bk.node_key, u64::MAX, 0) {
+            let entry = entry.expect("branch_version iter error");
+            if let Some(Node::Collapsed(cl)) = *entry.data() {
+                if cl.lane_key == lane_key {
+                    if hit_any.is_none() {
+                        hit_any = Some((entry.blue_score(), entry.block_hash()));
+                    }
+                    if is_canonical(entry.block_hash()) && hit_canon.is_none() {
+                        hit_canon = Some((entry.blue_score(), entry.block_hash()));
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some((bs, bh)) = hit_canon {
+            println!("    depth={d:>3}  Collapsed(canonical)  bs={bs}  block_hash={bh}");
+            found_at = Some(d);
+            break;
+        } else if let Some((bs, bh)) = hit_any {
+            println!("    depth={d:>3}  Collapsed(non-canonical only)  bs={bs}  block_hash={bh}");
+        }
+    }
+    if found_at.is_none() {
+        println!("    (no canonical Collapsed found at any depth for this lane_key)");
+    }
+    println!();
 }
