@@ -33,9 +33,12 @@ use kaspa_consensus_core::api::{ImportLane, SMT_PROOF_INTERVAL};
 use kaspa_consensus_core::config::params::{DEVNET_PARAMS, MAINNET_PARAMS, Params, SIMNET_PARAMS, TESTNET_PARAMS};
 use kaspa_database::create_temp_db;
 use kaspa_database::prelude::{CachePolicy, ConnBuilder};
-use kaspa_hashes::{Hash, ZERO_HASH, blake3};
+use kaspa_hashes::{Hash, SeqCommitActiveNode, ZERO_HASH, blake3};
 use kaspa_seq_commit::hashing::smt_leaf_hash;
 use kaspa_seq_commit::types::SmtLeafInput;
+use kaspa_smt::SmtHasher;
+use kaspa_smt::store::{BTreeSmtStore, LeafUpdate, SortedLeafUpdates};
+use kaspa_smt::tree::compute_root_update;
 use kaspa_smt_store::processor::{SmtReadBounds, SmtStores};
 use kaspa_smt_store::streaming_import::streaming_import;
 
@@ -202,12 +205,42 @@ fn main() {
     // and returns the stored root at depth=0.
     let stored_lanes_root = smt_stores.get_lanes_root(bounds, make_canonical());
 
+    // ---- fresh_recompute_root: pure-leaf rebuild via compute_root_update ----
+    //
+    // Same algorithm the live processor uses for incremental block applies,
+    // but applied here with an EMPTY in-memory store and `current_root =
+    // empty_root` — i.e. it derives the tree purely from the iter-walk
+    // leaves, ignoring any pre-existing tree on disk. This is the
+    // ground-truth root for a leaf set: if both `stored` and `streamed`
+    // are correct implementations, they must each equal `fresh_recompute`.
+    //
+    // 3-way comparison (read with `streamed` and `stored` below):
+    //   fresh == streamed, fresh != stored → live-incremental wrote the
+    //     wrong tree (or `branch_version` is missing/extra leaves).
+    //   fresh == stored,   fresh != streamed → `streaming_import` has a
+    //     bug for this leaf distribution.
+    //   fresh distinct from both → leaf-set-dependent bug in one of them.
+    println!("[fresh_recompute_root] running compute_root_update over an empty BTreeSmtStore ...");
+    let mut leaf_updates: Vec<LeafUpdate> = Vec::with_capacity(total_lanes as usize);
+    for chunk in &chunks {
+        for lane in chunk {
+            let leaf_hash = smt_leaf_hash(&SmtLeafInput { lane_tip: &lane.lane_tip, blue_score: lane.blue_score });
+            leaf_updates.push(LeafUpdate { key: lane.lane_key, leaf_hash });
+        }
+    }
+    let sorted = SortedLeafUpdates::from_unsorted(leaf_updates);
+    let btree_store = BTreeSmtStore::new();
+    let (fresh_recompute_root, _changes) =
+        compute_root_update::<SeqCommitActiveNode, _>(&btree_store, SeqCommitActiveNode::empty_root(), sorted)
+            .expect("compute_root_update failed");
+
     // ---- streamed_lanes_root: rebuild via streaming_import on a temp DB ----
     //
     // Same lane stream we just walked, fed through the streaming builder
-    // with a fresh, empty DB as sink. If this disagrees with stored, the
-    // bug is `streaming_import` vs `compute_root_update` divergence on the
-    // syncer's own canonical lane set — independent of any wire path.
+    // with a fresh, empty DB as sink. The streaming builder walks bottom-up
+    // over sorted leaves and is structurally different from
+    // `compute_root_update`'s top-down recursion — agreement of the two on
+    // the same leaf set is non-trivial.
     println!("[streamed_lanes_root] rebuilding via streaming_import on a temp DB ...");
     let (_lt, temp_db) = create_temp_db!(ConnBuilder::default().with_files_limit(64));
     let temp_stores = SmtStores::new(temp_db.clone(), 1, 1);
@@ -221,21 +254,48 @@ fn main() {
 
     println!();
     println!("[roots]");
-    println!("  stored_lanes_root   = {stored_lanes_root}    (smt_stores.get_lanes_root)");
-    println!("  streamed_lanes_root = {streamed_lanes_root}    (streaming_import on iter walk)");
-    println!("  agreement           = {}", if stored_lanes_root == streamed_lanes_root { "MATCH" } else { "MISMATCH" });
+    println!("  stored_lanes_root        = {stored_lanes_root}    (live tree via smt_stores.get_lanes_root)");
+    println!("  streamed_lanes_root      = {streamed_lanes_root}    (bottom-up streaming_import on iter walk)");
+    println!("  fresh_recompute_root     = {fresh_recompute_root}    (top-down compute_root_update on empty BTreeSmtStore)");
+    let stored_eq_streamed = stored_lanes_root == streamed_lanes_root;
+    let stored_eq_fresh = stored_lanes_root == fresh_recompute_root;
+    let streamed_eq_fresh = streamed_lanes_root == fresh_recompute_root;
     println!();
-    if stored_lanes_root != streamed_lanes_root {
-        println!("Interpretation:");
-        println!("  The syncer's branch_version tree disagrees with what streaming_import");
-        println!("  rebuilds from the same canonical lane stream. This is a streaming-vs-live");
-        println!("  divergence on the syncer's OWN data — independent of any wire issue.");
-    } else {
-        println!("Interpretation:");
-        println!("  Syncer's stored tree and streaming-rebuilt tree agree. If a receiver still");
-        println!("  computes a different root from this peer's stream, the divergence is in the");
-        println!("  wire path or the receiver's own DB writes — compare the per-segment fingerprints");
-        println!("  printed above against the receiver-side log.");
+    println!("  stored == streamed       = {}", if stored_eq_streamed { "MATCH" } else { "MISMATCH" });
+    println!("  stored == fresh          = {}", if stored_eq_fresh { "MATCH" } else { "MISMATCH" });
+    println!("  streamed == fresh        = {}", if streamed_eq_fresh { "MATCH" } else { "MISMATCH" });
+    println!();
+    println!("Interpretation:");
+    match (stored_eq_streamed, stored_eq_fresh, streamed_eq_fresh) {
+        (true, true, true) => {
+            println!("  All three agree — no divergence. If a receiver still computes a different");
+            println!("  root from this peer's stream, the divergence is in the wire path or the");
+            println!("  receiver's own DB writes.");
+        }
+        (false, false, true) => {
+            println!("  streamed and fresh agree, stored disagrees → both leaf-based builders agree");
+            println!("  on the iter-walk lane set, but the LIVE tree on disk doesn't reflect that");
+            println!("  set. Most likely: branch_version is missing or has extra Collapsed leaves");
+            println!("  vs lane_version (incremental write-path bug or expire/prune divergence).");
+        }
+        (false, true, false) => {
+            println!("  stored and fresh agree, streamed disagrees → `streaming_import` builds a");
+            println!("  different tree than `compute_root_update` for this specific leaf set. The");
+            println!("  bug is in the streaming builder; capture this lane set as a regression.");
+        }
+        (true, false, false) => {
+            println!("  stored and streamed agree, fresh disagrees → both DB-using paths agree but");
+            println!("  the in-memory pure-recompute differs. This would mean `compute_root_update`");
+            println!("  reads stale data from the empty BTreeSmtStore — almost certainly a tooling");
+            println!("  bug here; treat with skepticism.");
+        }
+        (false, false, false) => {
+            println!("  All three disagree — the leaf set or hashing is non-deterministic, or there");
+            println!("  are multiple bugs interacting. Capture this snapshot for offline analysis.");
+        }
+        _ => {
+            println!("  (Unexpected match pattern — review raw values above.)");
+        }
     }
 
     println!("\n{SECTION}");
