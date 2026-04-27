@@ -1416,3 +1416,130 @@ fn prune_removes_old_versions_keeps_new() {
     let build3 = proc3.build(|_| true).unwrap();
     assert_ne!(build3.root, root2, "updating A should change the root");
 }
+
+/// Stress: scale-test that the streaming import path produces the same root
+/// as the live `SmtProcessor` path for the same canonical lane set.
+///
+/// The hand-crafted `streaming_import_matches_export_roundtrip_root` covers
+/// 4 lanes — too small to exercise the merge / `chain_up` /
+/// `merge_chain_with_empty` paths in `StreamingSmtBuilder` at any depth past
+/// a couple of levels. This builds a many-block tree with random updates
+/// and overlapping keys (so the live tree goes through real split /
+/// collapse / re-split structural changes plus per-lane re-updates), then
+/// exports the resulting canonical lane set and asserts `streaming_import`
+/// rebuilds the same root on a fresh DB.
+///
+/// Expirations are intentionally *not* triggered: in production
+/// `expire_stale_lanes` only fires for lanes whose last update has slid
+/// below the active-window min, so `iter_all_canonical_owned` (which is
+/// window-bounded) never returns expired entries. Forcing expirations
+/// inside the active window would only test an unreachable state.
+///
+/// Deterministic via fixed RNG seed; runs in well under a second.
+#[test]
+fn streaming_import_root_matches_live_at_scale() {
+    use kaspa_hashes::ZERO_HASH;
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use std::collections::HashSet;
+
+    // Kept modest so the test runs fast in CI but large enough that the
+    // tree spans many depths, has multiple internal levels, and sees lanes
+    // updated repeatedly across blocks.
+    const N_BLOCKS: u64 = 60;
+    const POOL_SIZE: usize = 4_000;
+    const UPDATES_PER_BLOCK: usize = 200;
+    const SEED: u64 = 0x5A7E_5704_5A7E_5704;
+
+    let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(64));
+    let stores = make_stores(&db);
+    let empty_root = SeqCommitActiveNode::empty_root();
+
+    // Pre-generate a deterministic pool of 20-byte lane IDs. Drawing each
+    // block's updates from the same pool with replacement guarantees
+    // overlap → real lane updates (not just inserts) → exercises the
+    // collapsed-leaf rewrite path in the live tree.
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let pool: Vec<[u8; 20]> = (0..POOL_SIZE)
+        .map(|_| {
+            let mut id = [0u8; 20];
+            rng.fill(&mut id);
+            id
+        })
+        .collect();
+
+    let mut live: HashSet<usize> = HashSet::new();
+    let mut current_root = empty_root;
+
+    for block_idx in 0..N_BLOCKS {
+        // Spread blue_scores out so consecutive blocks aren't adjacent —
+        // this exercises the read-window logic on cross-block reads.
+        let block_bs = (block_idx + 1) * 1_000;
+        let block_hash = Hash::from_u64_word(0xB10C_0000 + block_idx);
+
+        let mut proc = SmtProcessor::new(&stores, block_bs, same_pov_bounds(block_bs), current_root);
+
+        let mut update_idxs: HashSet<usize> = HashSet::new();
+        while update_idxs.len() < UPDATES_PER_BLOCK {
+            update_idxs.insert(rng.gen_range(0..POOL_SIZE));
+        }
+        for ki in &update_idxs {
+            let mut tip_bytes = [0u8; 32];
+            rng.fill(&mut tip_bytes);
+            proc.update_lane(lane_key(&pool[*ki]), Hash::from_bytes(tip_bytes));
+            live.insert(*ki);
+        }
+
+        let build = proc.build(|_| true).unwrap();
+        current_root = build.root;
+        let mut batch = WriteBatch::default();
+        build.flush(&stores, &mut batch, block_bs, block_hash).unwrap();
+        db.write(batch).unwrap();
+    }
+
+    let live_root = current_root;
+    let pp_blue_score = N_BLOCKS * 1_000;
+
+    // Mirror the syncer's wire-export iteration: drive the canonical lane
+    // stream through `iter_all_canonical_owned`, then chunk like the wire
+    // layer does (`SMT_CHUNK_SIZE` is 4096; pick something similar so we
+    // exercise the chunk loop).
+    let exported: Vec<ImportLane> = stores
+        .lane_version
+        .iter_all_canonical_owned(None, 0, Some(pp_blue_score), |_| true)
+        .map(|res| {
+            let (lane_key, verified) = res.unwrap();
+            ImportLane { lane_key, lane_tip: *verified.data(), blue_score: verified.blue_score(), proof: None }
+        })
+        .collect();
+    // Sanity-check the export is sorted (streaming builder requires it).
+    for w in exported.windows(2) {
+        assert!(w[0].lane_key < w[1].lane_key, "iter_all_canonical_owned must yield strictly ascending lane_keys");
+    }
+    assert_eq!(exported.len(), live.len(), "exported lane count should equal touched-pool size (no expirations)");
+
+    let total = exported.len() as u64;
+    let chunked: Vec<Vec<ImportLane>> = exported.chunks(2048).map(|c| c.to_vec()).collect();
+
+    // Re-build via streaming_import on a fresh DB. lanes_root=ZERO_HASH ⇒
+    // proof verification is skipped (lanes have no proofs).
+    let (_lt2, db2) = create_temp_db!(ConnBuilder::default().with_files_limit(64));
+    let import_stores = make_stores(&db2);
+    let result = streaming_import(
+        &db2,
+        &import_stores,
+        pp_blue_score,
+        ZERO_HASH,
+        total,
+        ZERO_HASH,
+        chunked.into_iter(),
+        4096,
+    )
+    .unwrap();
+
+    assert_eq!(
+        result.root, live_root,
+        "streaming_import root must match live SmtProcessor root for the same canonical lane set ({} lanes across {} blocks)",
+        total, N_BLOCKS,
+    );
+    assert_eq!(result.lanes_imported, total);
+}
