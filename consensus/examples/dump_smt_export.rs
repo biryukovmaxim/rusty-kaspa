@@ -29,13 +29,15 @@ use kaspa_consensus::model::services::reachability::{MTReachabilityService, Reac
 use kaspa_consensus::model::stores::headers::{DbHeadersStore, HeaderStoreReader};
 use kaspa_consensus::model::stores::pruning::{DbPruningStore, PruningStoreReader};
 use kaspa_consensus::model::stores::reachability::DbReachabilityStore;
-use kaspa_consensus_core::api::SMT_PROOF_INTERVAL;
+use kaspa_consensus_core::api::{ImportLane, SMT_PROOF_INTERVAL};
 use kaspa_consensus_core::config::params::{DEVNET_PARAMS, MAINNET_PARAMS, Params, SIMNET_PARAMS, TESTNET_PARAMS};
+use kaspa_database::create_temp_db;
 use kaspa_database::prelude::{CachePolicy, ConnBuilder};
 use kaspa_hashes::{Hash, ZERO_HASH, blake3};
 use kaspa_seq_commit::hashing::smt_leaf_hash;
 use kaspa_seq_commit::types::SmtLeafInput;
-use kaspa_smt_store::processor::SmtStores;
+use kaspa_smt_store::processor::{SmtReadBounds, SmtStores};
+use kaspa_smt_store::streaming_import::streaming_import;
 
 const SECTION: &str = "============================================================";
 
@@ -130,6 +132,13 @@ fn main() {
     let mut fp = blake3::Hasher::new();
     let mut idx: u64 = 0;
     let mut last_checkpoint_idx: u64 = 0;
+    // Buffer the lanes as we walk so we can re-feed them to `streaming_import`
+    // below without a second iter walk. ~80 bytes per lane → tens to a few
+    // hundred MB for production-scale snapshots; acceptable for an offline
+    // diagnostic on the kind of host that runs kaspad.
+    const CHUNK_LEN: usize = 4096;
+    let mut chunks: Vec<Vec<ImportLane>> = Vec::new();
+    let mut current_chunk: Vec<ImportLane> = Vec::with_capacity(CHUNK_LEN);
 
     println!("[checkpoints]  (every SMT_PROOF_INTERVAL = {SMT_PROOF_INTERVAL} lanes)");
     println!("  Format matches `streaming_import` log lines so they can be diff'd directly.\n");
@@ -153,13 +162,80 @@ fn main() {
             last_checkpoint_idx = idx;
         }
         idx += 1;
+
+        current_chunk.push(ImportLane { lane_key, lane_tip, blue_score, proof: None });
+        if current_chunk.len() == CHUNK_LEN {
+            chunks.push(std::mem::replace(&mut current_chunk, Vec::with_capacity(CHUNK_LEN)));
+        }
+    }
+    if !current_chunk.is_empty() {
+        chunks.push(current_chunk);
     }
 
+    let total_lanes = idx;
     let final_fp = snapshot(&fp);
-    println!("SMT import final: lanes_imported={idx} segment=[{last_checkpoint_idx}, {idx}] fp={final_fp}");
+    println!("SMT import final: lanes_imported={total_lanes} segment=[{last_checkpoint_idx}, {total_lanes}] fp={final_fp}");
+    println!();
+
+    // ---- stored_lanes_root: what the syncer would advertise in SmtMetadata ----
+    //
+    // Mirrors `VirtualStateProcessor::get_pruning_point_smt_metadata` exactly:
+    // SmtReadBounds::for_pov(pp_blue_score, finality_depth) + the same
+    // canonicality predicate. This reads the syncer's branch_version tree
+    // and returns the stored root at depth=0.
+    let svc2 = reachability_service.clone();
+    let canonical_for_root = move |bh: Hash| bh == ZERO_HASH || matches!(svc2.try_is_chain_ancestor_of(bh, pp), Ok(true));
+    let stored_lanes_root = smt_stores.get_lanes_root(SmtReadBounds::for_pov(max_score, f), canonical_for_root);
+
+    // ---- streamed_lanes_root: rebuild via streaming_import on a temp DB ----
+    //
+    // Same lane stream we just walked, fed through the streaming builder
+    // with a fresh, empty DB as sink. If this disagrees with stored, the
+    // bug is `streaming_import` vs `compute_root_update` divergence on the
+    // syncer's own canonical lane set — independent of any wire path.
+    println!("[streamed_lanes_root] rebuilding via streaming_import on a temp DB ...");
+    let (_lt, temp_db) = create_temp_db!(ConnBuilder::default().with_files_limit(64));
+    let temp_stores = SmtStores::new(temp_db.clone(), 1, 1);
+    // Pass `stored_lanes_root` as `lanes_root` so streaming_import's own
+    // mismatch-detection / localization fires automatically if the rebuilt
+    // root differs.
+    let result = streaming_import(
+        &temp_db,
+        &temp_stores,
+        max_score,
+        ZERO_HASH,
+        total_lanes,
+        stored_lanes_root,
+        chunks.into_iter(),
+        4096,
+    )
+    .expect("streaming_import failed");
+    let streamed_lanes_root = result.root;
+
+    println!();
+    println!("[roots]");
+    println!("  stored_lanes_root   = {stored_lanes_root}    (smt_stores.get_lanes_root)");
+    println!("  streamed_lanes_root = {streamed_lanes_root}    (streaming_import on iter walk)");
+    println!(
+        "  agreement           = {}",
+        if stored_lanes_root == streamed_lanes_root { "MATCH" } else { "MISMATCH" }
+    );
+    println!();
+    if stored_lanes_root != streamed_lanes_root {
+        println!("Interpretation:");
+        println!("  The syncer's branch_version tree disagrees with what streaming_import");
+        println!("  rebuilds from the same canonical lane stream. This is a streaming-vs-live");
+        println!("  divergence on the syncer's OWN data — independent of any wire issue.");
+    } else {
+        println!("Interpretation:");
+        println!("  Syncer's stored tree and streaming-rebuilt tree agree. If a receiver still");
+        println!("  computes a different root from this peer's stream, the divergence is in the");
+        println!("  wire path or the receiver's own DB writes — compare the per-segment fingerprints");
+        println!("  printed above against the receiver-side log.");
+    }
 
     println!("\n{SECTION}");
-    println!("Done. Total lanes seen: {idx}");
+    println!("Done. Total lanes seen: {total_lanes}");
     println!("{SECTION}");
 }
 
