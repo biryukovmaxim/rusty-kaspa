@@ -381,10 +381,8 @@ fn main() {
     // stream from iter walk; we materialised one earlier as `leaf_updates`,
     // but that was moved into `compute_root_update`. Easiest fix: re-derive
     // from a fresh canonical iter — small marginal cost vs the DFS itself.
-    let iter_for_diff = smt_stores
-        .lane_version
-        .iter_all_canonical_owned(None, min_score, Some(max_score), make_canonical())
-        .map(|res| {
+    let iter_for_diff =
+        smt_stores.lane_version.iter_all_canonical_owned(None, min_score, Some(max_score), make_canonical()).map(|res| {
             let (lane_key, verified) = res.expect("lane iter (diff pass) error");
             let lane_tip = *verified.data();
             let blue_score = verified.blue_score();
@@ -399,7 +397,9 @@ fn main() {
     println!("  tree_count           = {tree_count}");
     println!("  only_in_iter         = {only_in_iter_count}    (lane_version has but branch_version's canonical view does not)");
     println!("  only_in_tree         = {only_in_tree_count}    (branch_version has but iter_all_canonical_owned skipped)");
-    println!("  value_mismatch       = {value_mismatch_count}    (same lane_key, different leaf_hash → divergent (lane_tip, blue_score))");
+    println!(
+        "  value_mismatch       = {value_mismatch_count}    (same lane_key, different leaf_hash → divergent (lane_tip, blue_score))"
+    );
 
     println!("\n{SECTION}");
     println!("Done. Total lanes seen: {total_lanes}");
@@ -423,10 +423,7 @@ struct DiffSummary {
 /// Also emits a heartbeat every 250 k advances so a running diff is
 /// visibly distinguishable from a stall — DFS over millions of leaves is
 /// slow but not silent.
-fn run_diff(
-    mut iter_stream: impl Iterator<Item = (Hash, Hash)>,
-    mut tree_stream: impl Iterator<Item = (Hash, Hash)>,
-) -> DiffSummary {
+fn run_diff(mut iter_stream: impl Iterator<Item = (Hash, Hash)>, mut tree_stream: impl Iterator<Item = (Hash, Hash)>) -> DiffSummary {
     use std::time::Instant;
     let start = Instant::now();
     let mut summary = DiffSummary::default();
