@@ -29,6 +29,7 @@ use kaspa_consensus::model::services::reachability::{MTReachabilityService, Reac
 use kaspa_consensus::model::stores::headers::{DbHeadersStore, HeaderStoreReader};
 use kaspa_consensus::model::stores::pruning::{DbPruningStore, PruningStoreReader};
 use kaspa_consensus::model::stores::reachability::DbReachabilityStore;
+use kaspa_consensus::model::stores::smt_metadata::DbSmtMetadataStore;
 use kaspa_consensus_core::api::{ImportLane, SMT_PROOF_INTERVAL};
 use kaspa_consensus_core::config::params::{DEVNET_PARAMS, MAINNET_PARAMS, Params, SIMNET_PARAMS, TESTNET_PARAMS};
 use kaspa_database::create_temp_db;
@@ -37,8 +38,9 @@ use kaspa_hashes::{Hash, SeqCommitActiveNode, ZERO_HASH, blake3};
 use kaspa_seq_commit::hashing::smt_leaf_hash;
 use kaspa_seq_commit::types::SmtLeafInput;
 use kaspa_smt::SmtHasher;
-use kaspa_smt::store::{BTreeSmtStore, LeafUpdate, SortedLeafUpdates};
+use kaspa_smt::store::{BTreeSmtStore, LeafUpdate, Node, SortedLeafUpdates};
 use kaspa_smt::tree::compute_root_update;
+use kaspa_smt_store::cache::BranchEntity;
 use kaspa_smt_store::processor::{SmtReadBounds, SmtStores};
 use kaspa_smt_store::streaming_import::streaming_import;
 
@@ -111,6 +113,7 @@ fn main() {
 
     let headers_store = Arc::new(DbHeadersStore::new(db.clone(), cp(), cp()));
     let pruning_point_store = Arc::new(RwLock::new(DbPruningStore::new(db.clone())));
+    let smt_metadata_store = Arc::new(DbSmtMetadataStore::new(db.clone(), cp()));
     let smt_stores = Arc::new(SmtStores::new(db.clone(), 16, 16));
     let reachability_store = Arc::new(RwLock::new(DbReachabilityStore::new(db.clone(), cp(), cp())));
     let reachability_service = MTReachabilityService::new(reachability_store);
@@ -119,11 +122,16 @@ fn main() {
     let pp_header = headers_store.get_header(pp).expect("pruning point header missing");
     let max_score = pp_header.blue_score;
     let min_score = max_score.saturating_sub(f);
+    let stored_active_lanes_count = smt_metadata_store.get(pp).map(|m| m.active_lanes_count).ok();
 
     println!("[pruning_point]");
-    println!("  hash              = {pp}");
-    println!("  blue_score        = {max_score}");
-    println!("  scan_window       = [{min_score}, {max_score}]");
+    println!("  hash                 = {pp}");
+    println!("  blue_score           = {max_score}");
+    println!("  scan_window          = [{min_score}, {max_score}]");
+    match stored_active_lanes_count {
+        Some(n) => println!("  active_lanes_count   = {n}    (from smt_metadata_store at pp)"),
+        None => println!("  active_lanes_count   = <missing>    (smt_metadata not stored for pp)"),
+    }
     println!();
 
     // Mirror VirtualStateProcessor::is_smt_canonical(bh, pp): a stored entry
@@ -298,13 +306,194 @@ fn main() {
         }
     }
 
+    // ---- Leaf-set diff: iter walk vs branch_version DFS ----
+    //
+    // Both streams emit `(lane_key, leaf_hash)` in strictly ascending
+    // lane_key order — iter walk by RocksDB lane_version key prefix order
+    // and `LeafDfs` by SMT path order, both of which equal lex order on
+    // the 32-byte lane_key. We merge-step them in O(1) memory and emit
+    // exact `only_in_iter` / `only_in_tree` / `value_mismatch` lane keys
+    // (sample-bounded). This is what tells us *which* lanes the live tree
+    // disagrees with the iter export on.
+    println!();
+    println!("[leaf_set_diff] iter_all_canonical_owned vs branch_version DFS");
+    println!("  Streaming both sorted-by-lane_key sources and merge-stepping.");
+    println!("  Sample bound: up to {DIFF_SAMPLE_LIMIT} lane_keys per category.");
+    println!();
+
+    // Re-iterate &chunks (still in scope until streaming_import consumed it
+    // — careful: it was moved). We need a sorted (lane_key, leaf_hash)
+    // stream from iter walk; we materialised one earlier as `leaf_updates`,
+    // but that was moved into `compute_root_update`. Easiest fix: re-derive
+    // from a fresh canonical iter — small marginal cost vs the DFS itself.
+    let iter_for_diff = smt_stores
+        .lane_version
+        .iter_all_canonical_owned(None, min_score, Some(max_score), make_canonical())
+        .map(|res| {
+            let (lane_key, verified) = res.expect("lane iter (diff pass) error");
+            let lane_tip = *verified.data();
+            let blue_score = verified.blue_score();
+            let leaf_hash = smt_leaf_hash(&SmtLeafInput { lane_tip: &lane_tip, blue_score });
+            (lane_key, leaf_hash)
+        });
+    let dfs = LeafDfs::new(&smt_stores, bounds, make_canonical());
+    let DiffSummary { iter_count, tree_count, only_in_iter_count, only_in_tree_count, value_mismatch_count } =
+        run_diff(iter_for_diff, dfs);
+
+    println!("  iter_count           = {iter_count}");
+    println!("  tree_count           = {tree_count}");
+    println!("  only_in_iter         = {only_in_iter_count}    (lane_version has but branch_version's canonical view does not)");
+    println!("  only_in_tree         = {only_in_tree_count}    (branch_version has but iter_all_canonical_owned skipped)");
+    println!("  value_mismatch       = {value_mismatch_count}    (same lane_key, different leaf_hash → divergent (lane_tip, blue_score))");
+
     println!("\n{SECTION}");
     println!("Done. Total lanes seen: {total_lanes}");
     println!("{SECTION}");
+}
+
+const DIFF_SAMPLE_LIMIT: usize = 50;
+
+#[derive(Default)]
+struct DiffSummary {
+    iter_count: u64,
+    tree_count: u64,
+    only_in_iter_count: u64,
+    only_in_tree_count: u64,
+    value_mismatch_count: u64,
+}
+
+/// Merge-step two ascending `(lane_key, leaf_hash)` streams, printing a
+/// bounded sample of every kind of difference and accumulating totals.
+fn run_diff(
+    mut iter_stream: impl Iterator<Item = (Hash, Hash)>,
+    mut tree_stream: impl Iterator<Item = (Hash, Hash)>,
+) -> DiffSummary {
+    let mut summary = DiffSummary::default();
+    let mut only_in_iter_printed = 0usize;
+    let mut only_in_tree_printed = 0usize;
+    let mut mismatch_printed = 0usize;
+
+    let mut a = iter_stream.next();
+    let mut b = tree_stream.next();
+
+    loop {
+        match (a, b) {
+            (None, None) => break,
+            (Some((ka, _va)), None) => {
+                summary.iter_count += 1;
+                summary.only_in_iter_count += 1;
+                if only_in_iter_printed < DIFF_SAMPLE_LIMIT {
+                    println!("  only_in_iter:   {ka}");
+                    only_in_iter_printed += 1;
+                }
+                a = iter_stream.next();
+            }
+            (None, Some((kb, _vb))) => {
+                summary.tree_count += 1;
+                summary.only_in_tree_count += 1;
+                if only_in_tree_printed < DIFF_SAMPLE_LIMIT {
+                    println!("  only_in_tree:   {kb}");
+                    only_in_tree_printed += 1;
+                }
+                b = tree_stream.next();
+            }
+            (Some((ka, va)), Some((kb, vb))) => match ka.cmp(&kb) {
+                std::cmp::Ordering::Less => {
+                    summary.iter_count += 1;
+                    summary.only_in_iter_count += 1;
+                    if only_in_iter_printed < DIFF_SAMPLE_LIMIT {
+                        println!("  only_in_iter:   {ka}");
+                        only_in_iter_printed += 1;
+                    }
+                    a = iter_stream.next();
+                }
+                std::cmp::Ordering::Greater => {
+                    summary.tree_count += 1;
+                    summary.only_in_tree_count += 1;
+                    if only_in_tree_printed < DIFF_SAMPLE_LIMIT {
+                        println!("  only_in_tree:   {kb}");
+                        only_in_tree_printed += 1;
+                    }
+                    b = tree_stream.next();
+                }
+                std::cmp::Ordering::Equal => {
+                    summary.iter_count += 1;
+                    summary.tree_count += 1;
+                    if va != vb {
+                        summary.value_mismatch_count += 1;
+                        if mismatch_printed < DIFF_SAMPLE_LIMIT {
+                            println!("  value_mismatch: {ka}    iter_leaf={va} tree_leaf={vb}");
+                            mismatch_printed += 1;
+                        }
+                    }
+                    a = iter_stream.next();
+                    b = tree_stream.next();
+                }
+            },
+        }
+    }
+
+    summary
 }
 
 fn snapshot(fp: &blake3::Hasher) -> Hash {
     let mut out = [0u8; 32];
     out.copy_from_slice(fp.finalize().as_bytes());
     Hash::from_bytes(out)
+}
+
+/// In-order DFS walker over `branch_version`'s canonical view, yielding
+/// `Collapsed` leaves as `(lane_key, leaf_hash)` in **strictly ascending
+/// lane_key order** (SMT path order = bit-prefix order = lex order on the
+/// 32-byte key). Streams in O(stack depth) memory — no full-set
+/// materialisation — so we can merge-diff against the equally-sorted
+/// `iter_all_canonical_owned` stream in O(1) auxiliary memory.
+struct LeafDfs<'a, F: Fn(Hash) -> bool> {
+    stores: &'a SmtStores,
+    bounds: SmtReadBounds,
+    is_canonical: F,
+    /// Subtrees yet to descend into, in pop-order = visit-order.
+    /// Each entry is the `(depth, key_prefix)` of an internal subtree we
+    /// haven't visited; we resolve `get_node` lazily inside `next()`.
+    /// Empty subtrees (`None` reads) and Collapsed terminals don't sit on
+    /// the stack — Internals push their two children on encounter.
+    stack: Vec<(u8, Hash)>,
+}
+
+impl<'a, F: Fn(Hash) -> bool> LeafDfs<'a, F> {
+    fn new(stores: &'a SmtStores, bounds: SmtReadBounds, is_canonical: F) -> Self {
+        // Start from the root: depth=0, normalized key all-zero.
+        Self { stores, bounds, is_canonical, stack: vec![(0, Hash::from_bytes([0u8; 32]))] }
+    }
+}
+
+impl<F: Fn(Hash) -> bool> Iterator for LeafDfs<'_, F> {
+    type Item = (Hash, Hash); // (lane_key, leaf_hash)
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some((depth, key_prefix)) = self.stack.pop() {
+            let bk = kaspa_smt::store::BranchKey::new(depth, &key_prefix);
+            let entity = BranchEntity { depth, node_key: bk.node_key };
+            let node = self.stores.get_node(entity, self.bounds, |bh| (self.is_canonical)(bh)).and_then(|v| *v.data());
+            match node {
+                Some(Node::Internal(_)) => {
+                    // Push right then left so left is visited first → in-order traversal.
+                    let mut right = bk.node_key.as_bytes();
+                    right[depth as usize / 8] |= 1u8 << (7 - (depth as usize % 8));
+                    let right = Hash::from_bytes(right);
+                    let left = bk.node_key;
+                    let next_depth = depth + 1;
+                    self.stack.push((next_depth, right));
+                    self.stack.push((next_depth, left));
+                }
+                Some(Node::Collapsed(cl)) => {
+                    return Some((cl.lane_key, cl.leaf_hash));
+                }
+                None => {
+                    // Empty subtree — keep popping.
+                }
+            }
+        }
+        None
+    }
 }
