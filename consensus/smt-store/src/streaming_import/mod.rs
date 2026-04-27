@@ -10,13 +10,15 @@ use std::time::Instant;
 
 use std::collections::BTreeMap;
 
-use kaspa_consensus_core::api::ImportLane;
+use kaspa_consensus_core::api::{ImportLane, SMT_PROOF_INTERVAL};
 use kaspa_database::prelude::{BatchDbWriter, DB, StoreError};
-use kaspa_hashes::{Hash, SeqCommitActiveNode};
+use kaspa_hashes::{Hash, SeqCommitActiveNode, blake3};
 use kaspa_seq_commit::hashing::smt_leaf_hash;
 use kaspa_seq_commit::types::SmtLeafInput;
+use kaspa_smt::proof::{OwnedSmtProof, ProofBranchCache};
+use kaspa_smt::store::Node;
 use kaspa_smt::streaming::{StreamError, StreamingSmtBuilder};
-use log::info;
+use log::{info, warn};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::prelude::IndexedParallelIterator;
 use rocksdb::WriteBatch;
@@ -31,6 +33,131 @@ pub struct StreamingImportResult {
     pub root: Hash,
     pub lanes_imported: u64,
     pub nodes_written: usize,
+}
+
+/// Rolling fingerprint over `(lane_key || leaf_hash || blue_score_le)` per lane.
+///
+/// Identifies the divergent segment when the streaming root mismatches: the
+/// expected `lanes_root`. The receiver logs a snapshot of this hash at every
+/// proof-bearing lane (every `SMT_PROOF_INTERVAL` lanes — by construction the
+/// same boundaries the wire layer uses), and the standalone
+/// `dump_smt_export` example reproduces the same fingerprints from a syncer
+/// DB. Matching prefix → that segment is fine; first divergent fingerprint
+/// → the bad lanes are between the previous checkpoint and that one.
+fn fingerprint_lane(fp: &mut blake3::Hasher, lane_key: &Hash, leaf_hash: &Hash, blue_score: u64) {
+    fp.update(&lane_key.as_bytes());
+    fp.update(&leaf_hash.as_bytes());
+    fp.update(&blue_score.to_le_bytes());
+}
+
+fn fingerprint_snapshot(fp: &blake3::Hasher) -> Hash {
+    let mut out = [0u8; 32];
+    out.copy_from_slice(fp.finalize().as_bytes());
+    Hash::from_bytes(out)
+}
+
+/// One proof-bearing lane retained for divergence localization on root mismatch.
+struct ProofAnchor {
+    idx: u64,
+    lane_key: Hash,
+    leaf_hash: Hash,
+    proof: OwnedSmtProof,
+}
+
+/// Locate the divergence between the streaming-built tree and the expected one.
+///
+/// Each retained proof is a Merkle path: `verify_cached` against the EXPECTED
+/// `lanes_root` populates `ProofBranchCache` with the expected `Internal` hash
+/// at every `(depth, node_key)` on the proof's path (depths `0..terminal.depth`).
+/// We then read the actual `Internal` the streaming import wrote at each of
+/// those positions in `branch_version` and report the shallowest divergence
+/// per anchor.
+///
+/// With 6 anchors over a 6 M-lane import, the union of (depth, normalized_key)
+/// divergences narrows the bad subtree — the bad lane(s) live below the
+/// shallowest mismatched depth on at least one anchor's path.
+fn localize_divergence(stores: &SmtStores, lanes_root: Hash, computed_root: Hash, anchors: &[ProofAnchor]) {
+    warn!("=== SMT root mismatch localization (anchors={}) ===", anchors.len());
+    warn!("expected_lanes_root={lanes_root}");
+    warn!("computed_root      ={computed_root}");
+
+    for anchor in anchors {
+        let mut cache = ProofBranchCache::new();
+        let verify_ok = anchor
+            .proof
+            .as_proof()
+            .verify_cached::<SeqCommitActiveNode>(&anchor.lane_key, Some(anchor.leaf_hash), lanes_root, &mut cache)
+            .unwrap_or(false);
+
+        warn!(
+            "anchor idx={} lane_key={} leaf_hash={} proof_path_len={} verifies_against_expected={}",
+            anchor.idx,
+            anchor.lane_key,
+            anchor.leaf_hash,
+            cache.len(),
+            verify_ok,
+        );
+
+        // BTreeMap iterates by BranchKey (depth ascending, then node_key) — shallow first.
+        let mut shallowest: Option<(u8, Hash)> = None;
+        let mut last_match_depth: Option<u8> = None;
+        let mut mismatches = 0usize;
+        let mut compared = 0usize;
+
+        for (bk, expected_hash) in cache.iter() {
+            // Read the actual stored entry. IBD entries use ZERO_HASH as block_hash and
+            // are written exactly once per (depth, node_key) by the streaming sink, so
+            // the newest version (target=u64::MAX, min=0) is the import-written value.
+            let actual_first = stores.branch_version.get_at(bk.depth, bk.node_key, u64::MAX, 0).next();
+            compared += 1;
+            let actual_hash: Option<Hash> = match actual_first {
+                Some(Ok(fork)) => match *fork.data() {
+                    Some(Node::Internal(h)) => Some(h),
+                    Some(Node::Collapsed(_)) => None, // structural mismatch: expected Internal here
+                    None => None,                     // tombstone
+                },
+                Some(Err(_)) | None => None,
+            };
+
+            if actual_hash != Some(*expected_hash) {
+                mismatches += 1;
+                if shallowest.is_none() {
+                    shallowest = Some((bk.depth, *expected_hash));
+                    let actual_str = match actual_hash {
+                        Some(h) => format!("Internal({h})"),
+                        None => "absent_or_collapsed".to_string(),
+                    };
+                    warn!(
+                        "  shallowest divergence: depth={} node_key={} expected_internal={} actual={}",
+                        bk.depth, bk.node_key, expected_hash, actual_str,
+                    );
+                }
+            } else if shallowest.is_none() {
+                // Track the deepest still-matching ancestor (only meaningful while no mismatch yet).
+                last_match_depth = Some(bk.depth);
+            }
+        }
+
+        match shallowest {
+            Some((d, _)) => {
+                let last_ok = last_match_depth.map(|x| x as i32).unwrap_or(-1);
+                warn!(
+                    "  anchor summary: matched up to depth={} ; first divergence at depth={} ; \
+                     mismatches/compared={}/{} → bad lanes are within the subtree rooted at \
+                     (depth={}, node_key=BranchKey::new({}, anchor.lane_key))",
+                    last_ok, d, mismatches, compared, d, d,
+                );
+            }
+            None => {
+                warn!(
+                    "  anchor summary: every ancestor on this lane's path matches the DB. \
+                     The divergence must be off this lane's path (i.e., in a subtree this \
+                     proof does not cover)."
+                );
+            }
+        }
+    }
+    warn!("=== end SMT root mismatch localization ===");
 }
 
 struct ImportProgress {
@@ -83,6 +210,11 @@ pub fn streaming_import(
         return Ok(StreamingImportResult { root: SeqCommitActiveNode::empty_root(), lanes_imported: 0, nodes_written: 0 });
     }
 
+    info!(
+        "SMT import starting: total_count={total_count}, expected_lanes_root={lanes_root}, pp_blue_score={pp_blue_score}, \
+         proof_interval={SMT_PROOF_INTERVAL}"
+    );
+
     // `branch_version` writes are versioned per-leaf (see `DbSink::write_node`)
     // so they age out of the read window at the same rate the live processor
     // would have produced. The sink itself doesn't need a sink-wide bs.
@@ -95,6 +227,11 @@ pub fn streaming_import(
     let mut lanes_imported = 0u64;
     let mut progress = ImportProgress::new(total_count);
     let mut leaf_hashes: Vec<(Hash, Hash)> = Vec::new();
+    let mut fp = blake3::Hasher::new();
+    let mut last_checkpoint_idx: u64 = 0;
+    // Retained for divergence localization. With SMT_PROOF_INTERVAL = 1<<20
+    // and 6 M lanes this is at most ~6 entries — cheap to keep.
+    let mut proof_anchors: Vec<ProofAnchor> = Vec::new();
 
     for chunk in chunks {
         if chunk.is_empty() {
@@ -126,7 +263,32 @@ pub fn streaming_import(
         }
         batch_id += 1;
 
-        for (lane, &(lane_key, leaf_hash)) in chunk.iter().zip(leaf_hashes.iter()) {
+        for (i, (lane, &(lane_key, leaf_hash))) in chunk.iter().zip(leaf_hashes.iter()).enumerate() {
+            let global_idx = lanes_imported + i as u64;
+            fingerprint_lane(&mut fp, &lane_key, &leaf_hash, lane.blue_score);
+
+            // Boundaries match the wire encoder (`SmtStream` in
+            // `protocol/flows/src/ibd/streams.rs`): a proof is attached at
+            // lane indices that are multiples of `SMT_PROOF_INTERVAL`. We
+            // log a fingerprint snapshot at each so the receiver's stream
+            // can be diffed segment-by-segment against the syncer's
+            // `iter_all_canonical_owned` walk (use the
+            // `dump_smt_export` example to produce the matching fingerprints).
+            if (global_idx as usize).is_multiple_of(SMT_PROOF_INTERVAL) {
+                let snap = fingerprint_snapshot(&fp);
+                info!(
+                    "SMT import checkpoint: idx={global_idx} segment=[{last_checkpoint_idx}, {global_idx}] \
+                     lane_key={lane_key} blue_score={} leaf_hash={leaf_hash} fp={snap} proof_present={}",
+                    lane.blue_score,
+                    lane.proof.is_some(),
+                );
+                last_checkpoint_idx = global_idx;
+            }
+
+            if let Some(proof) = &lane.proof {
+                proof_anchors.push(ProofAnchor { idx: global_idx, lane_key, leaf_hash, proof: proof.clone() });
+            }
+
             builder.feed(lane_key, leaf_hash, lane.blue_score)?;
         }
         lanes_imported += chunk.len() as u64;
@@ -135,9 +297,19 @@ pub fn streaming_import(
 
     progress.report_completion();
 
+    let final_fp = fingerprint_snapshot(&fp);
+    info!("SMT import final: lanes_imported={lanes_imported} segment=[{last_checkpoint_idx}, {lanes_imported}] fp={final_fp}");
+
     let (root, mut sink) = builder.finish()?;
     sink.flush_batch().map_err(StreamError::Sink)?;
     flush_lane_batch(db, lane_batch, batch_count)?;
+
+    if root == lanes_root {
+        info!("SMT import root: computed={root} expected={lanes_root} MATCH");
+    } else {
+        warn!("SMT import root: computed={root} expected={lanes_root} MISMATCH");
+        localize_divergence(stores, lanes_root, root, &proof_anchors);
+    }
 
     Ok(StreamingImportResult { root, lanes_imported, nodes_written: sink.nodes_written() })
 }
