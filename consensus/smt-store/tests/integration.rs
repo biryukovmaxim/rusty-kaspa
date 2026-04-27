@@ -1524,17 +1524,8 @@ fn streaming_import_root_matches_live_at_scale() {
     // proof verification is skipped (lanes have no proofs).
     let (_lt2, db2) = create_temp_db!(ConnBuilder::default().with_files_limit(64));
     let import_stores = make_stores(&db2);
-    let result = streaming_import(
-        &db2,
-        &import_stores,
-        pp_blue_score,
-        ZERO_HASH,
-        total,
-        ZERO_HASH,
-        chunked.into_iter(),
-        4096,
-    )
-    .unwrap();
+    let result =
+        streaming_import(&db2, &import_stores, pp_blue_score, ZERO_HASH, total, ZERO_HASH, chunked.into_iter(), 4096).unwrap();
 
     assert_eq!(
         result.root, live_root,

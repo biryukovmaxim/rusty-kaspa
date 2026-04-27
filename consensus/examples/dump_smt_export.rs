@@ -125,9 +125,13 @@ fn main() {
 
     // Mirror VirtualStateProcessor::is_smt_canonical(bh, pp): a stored entry
     // is canonical for the pruning-point view if it's the IBD ZERO_HASH
-    // sentinel or a chain ancestor of pp.
-    let svc = reachability_service.clone();
-    let is_canonical = move |bh: Hash| -> bool { bh == ZERO_HASH || matches!(svc.try_is_chain_ancestor_of(bh, pp), Ok(true)) };
+    // sentinel or a chain ancestor of pp. Cloned per-call site below so each
+    // closure owns its own Arc into the reachability service.
+    let make_canonical = || {
+        let svc = reachability_service.clone();
+        move |bh: Hash| bh == ZERO_HASH || matches!(svc.try_is_chain_ancestor_of(bh, pp), Ok(true))
+    };
+    let bounds = SmtReadBounds::for_pov(max_score, f);
 
     let mut fp = blake3::Hasher::new();
     let mut idx: u64 = 0;
@@ -143,7 +147,7 @@ fn main() {
     println!("[checkpoints]  (every SMT_PROOF_INTERVAL = {SMT_PROOF_INTERVAL} lanes)");
     println!("  Format matches `streaming_import` log lines so they can be diff'd directly.\n");
 
-    for res in smt_stores.lane_version.iter_all_canonical_owned(None, min_score, Some(max_score), is_canonical) {
+    for res in smt_stores.lane_version.iter_all_canonical_owned(None, min_score, Some(max_score), make_canonical()) {
         let (lane_key, verified) = res.expect("lane iter error");
         let lane_tip = *verified.data();
         let blue_score = verified.blue_score();
@@ -153,7 +157,20 @@ fn main() {
         fp.update(&leaf_hash.as_bytes());
         fp.update(&blue_score.to_le_bytes());
 
-        if (idx as usize).is_multiple_of(SMT_PROOF_INTERVAL) {
+        // At SMT_PROOF_INTERVAL boundaries, generate a real inclusion proof
+        // against the syncer's tree (root = stored_lanes_root computed
+        // below). Attaching it makes `streaming_import`'s `localize_divergence`
+        // useful: on mismatch it'll diff the proof's expected ancestor
+        // hashes against what streaming actually wrote at the same
+        // (depth, node_key) — pinning *which subtree* diverged.
+        let on_checkpoint = (idx as usize).is_multiple_of(SMT_PROOF_INTERVAL);
+        let proof = if on_checkpoint {
+            Some(smt_stores.prove_lane(&lane_key, bounds, make_canonical()).expect("prove_lane failed"))
+        } else {
+            None
+        };
+
+        if on_checkpoint {
             let snap = snapshot(&fp);
             println!(
                 "SMT import checkpoint: idx={idx} segment=[{last_checkpoint_idx}, {idx}] \
@@ -163,7 +180,7 @@ fn main() {
         }
         idx += 1;
 
-        current_chunk.push(ImportLane { lane_key, lane_tip, blue_score, proof: None });
+        current_chunk.push(ImportLane { lane_key, lane_tip, blue_score, proof });
         if current_chunk.len() == CHUNK_LEN {
             chunks.push(std::mem::replace(&mut current_chunk, Vec::with_capacity(CHUNK_LEN)));
         }
@@ -183,9 +200,7 @@ fn main() {
     // SmtReadBounds::for_pov(pp_blue_score, finality_depth) + the same
     // canonicality predicate. This reads the syncer's branch_version tree
     // and returns the stored root at depth=0.
-    let svc2 = reachability_service.clone();
-    let canonical_for_root = move |bh: Hash| bh == ZERO_HASH || matches!(svc2.try_is_chain_ancestor_of(bh, pp), Ok(true));
-    let stored_lanes_root = smt_stores.get_lanes_root(SmtReadBounds::for_pov(max_score, f), canonical_for_root);
+    let stored_lanes_root = smt_stores.get_lanes_root(bounds, make_canonical());
 
     // ---- streamed_lanes_root: rebuild via streaming_import on a temp DB ----
     //
@@ -199,27 +214,16 @@ fn main() {
     // Pass `stored_lanes_root` as `lanes_root` so streaming_import's own
     // mismatch-detection / localization fires automatically if the rebuilt
     // root differs.
-    let result = streaming_import(
-        &temp_db,
-        &temp_stores,
-        max_score,
-        ZERO_HASH,
-        total_lanes,
-        stored_lanes_root,
-        chunks.into_iter(),
-        4096,
-    )
-    .expect("streaming_import failed");
+    let result =
+        streaming_import(&temp_db, &temp_stores, max_score, ZERO_HASH, total_lanes, stored_lanes_root, chunks.into_iter(), 4096)
+            .expect("streaming_import failed");
     let streamed_lanes_root = result.root;
 
     println!();
     println!("[roots]");
     println!("  stored_lanes_root   = {stored_lanes_root}    (smt_stores.get_lanes_root)");
     println!("  streamed_lanes_root = {streamed_lanes_root}    (streaming_import on iter walk)");
-    println!(
-        "  agreement           = {}",
-        if stored_lanes_root == streamed_lanes_root { "MATCH" } else { "MISMATCH" }
-    );
+    println!("  agreement           = {}", if stored_lanes_root == streamed_lanes_root { "MATCH" } else { "MISMATCH" });
     println!();
     if stored_lanes_root != streamed_lanes_root {
         println!("Interpretation:");
