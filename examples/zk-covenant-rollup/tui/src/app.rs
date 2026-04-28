@@ -4,7 +4,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use kaspa_addresses::{Address, Prefix, Version};
-use kaspa_consensus_core::constants::{STORAGE_MASS_PARAMETER, TX_VERSION_POST_COV_HF};
+use kaspa_consensus_core::constants::{STORAGE_MASS_PARAMETER, TX_VERSION_TOCCATA};
 use kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL;
 use kaspa_consensus_core::sign::{sign, sign_input};
 use kaspa_consensus_core::subnets::SUBNETWORK_ID_NATIVE;
@@ -1838,7 +1838,7 @@ impl App {
         let mut map = std::collections::HashMap::new();
         map.insert(proof.block_prove_to, seq_commit_hash);
         let accessor = zk_covenant_rollup_host::mock_chain::MockSeqCommitAccessor(map);
-        let mut tmp_tx = Transaction::new(TX_VERSION_POST_COV_HF, inputs.clone(), outputs.clone(), 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+        let mut tmp_tx = Transaction::new(TX_VERSION_TOCCATA, inputs.clone(), outputs.clone(), 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
         let provisional_signable =
             SignableTransaction::with_entries(tmp_tx.clone(), vec![covenant_entry.clone(), collateral_entry.clone()]);
         tmp_tx.inputs[1].signature_script =
@@ -1869,7 +1869,7 @@ impl App {
         }
 
         // Build tx, then sign collateral input.
-        let mut tx = Transaction::new(TX_VERSION_POST_COV_HF, tmp_tx.inputs.clone(), outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+        let mut tx = Transaction::new(TX_VERSION_TOCCATA, tmp_tx.inputs.clone(), outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
         let tx_id = tx.id();
 
         // Sign only input[1] (collateral) — input[0] already has ZK sig_script
@@ -2198,7 +2198,7 @@ impl App {
 
         outputs.push(TransactionOutput::new(collateral.amount, deployer_spk.clone()));
 
-        let mut tx = Transaction::new(TX_VERSION_POST_COV_HF, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+        let mut tx = Transaction::new(TX_VERSION_TOCCATA, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
         let collateral_idx = tx.inputs.len() - 1;
         let provisional_signable = SignableTransaction::with_entries(tx.clone(), all_entries.clone());
         tx.inputs[collateral_idx].signature_script =
@@ -2612,7 +2612,7 @@ impl App {
                             Some(CovenantBinding { covenant_id: on_chain_covenant_id, authorizing_input: 0 }),
                         )];
 
-                        let tx = Transaction::new(TX_VERSION_POST_COV_HF, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+                        let tx = Transaction::new(TX_VERSION_TOCCATA, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
                         let signable = SignableTransaction::with_entries(tx, utxo_entries);
                         let keypair = secp256k1::Keypair::from_secret_key(secp256k1::SECP256K1, &deployer_sk);
                         let signed = sign(signable, keypair);
