@@ -34,7 +34,7 @@ pub fn apply_measured_compute_budgets(
 
     let budgets: Result<Vec<_>, _> =
         (0..tx.inputs.len()).map(|input_idx| try_measure_compute_budget_for_input(tx, utxos, input_idx, accessor)).collect();
-    for (input, budget) in tx.inputs.iter_mut().zip(budgets?.into_iter()) {
+    for (input, budget) in tx.inputs.iter_mut().zip(budgets?) {
         input.mass = budget.into();
     }
     Ok(())
