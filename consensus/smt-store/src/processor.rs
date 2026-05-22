@@ -523,14 +523,24 @@ impl<'a> SmtProcessor<'a> {
                 node_changes: SmtNodeChanges::new(),
                 lane_changes: self.lane_changes,
                 payload_and_ctx_digest: ZERO_HASH,
+                payload_root: ZERO_HASH,
                 active_lanes_count: 0,
+                finality_anchor: ZERO_HASH,
             });
         }
 
         let leaf_updates = self.lane_changes.to_leaf_updates();
         let reader = VersionedBranchReader { stores: self.stores, bounds: self.bounds, is_canonical };
         let (root, node_changes) = compute_root_update::<SeqCommitActiveNode, _>(&reader, self.current_lanes_root, leaf_updates)?;
-        Ok(SmtBuild { root, node_changes, lane_changes: self.lane_changes, payload_and_ctx_digest: ZERO_HASH, active_lanes_count: 0 })
+        Ok(SmtBuild {
+            root,
+            node_changes,
+            lane_changes: self.lane_changes,
+            payload_and_ctx_digest: ZERO_HASH,
+            payload_root: ZERO_HASH,
+            active_lanes_count: 0,
+            finality_anchor: ZERO_HASH,
+        })
     }
 }
 
@@ -541,7 +551,13 @@ pub struct SmtBuild {
     lane_changes: BlockLaneChanges,
     /// Set by `build_seq_commit` after computing the seq_commit components.
     pub payload_and_ctx_digest: Hash,
+    /// Stored so an importer can reconstruct `payload_and_ctx_digest` from
+    /// its components (`mergeset_context_hash(ctx)` + `payload_root`) and
+    /// verify the claimed `finality_anchor` against the header's AIMR.
+    pub payload_root: Hash,
     pub active_lanes_count: u64,
+    /// KIP-21: cached per-block anchor, surfaced for DA inactivity proofs.
+    pub finality_anchor: Hash,
 }
 
 impl SmtBuild {

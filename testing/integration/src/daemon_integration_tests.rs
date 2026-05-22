@@ -856,8 +856,11 @@ async fn daemon_pruning_seqcommit_sync_test() {
 
     // Step 1: advance the chain to ~1.5 * finality depth from genesis.
     // We will create a seqcommit transaction at that height, referencing a block
-    // almost a full finality depth below the tip.
+    // almost a full activity_threshold below the tip (KIP-21: the seqcommit
+    // look-back is bounded by `activity_threshold = finality_depth / 2`, not
+    // by the full finality depth).
     let finality_depth = params.finality_depth();
+    let activity_threshold = params.activity_threshold();
     let initial_blocks = finality_depth.saturating_mul(3).saturating_div(2) as usize;
     for _ in 0..initial_blocks {
         let template = rpc_client1.get_block_template(miner_address.clone(), vec![]).await.unwrap();
@@ -876,10 +879,10 @@ async fn daemon_pruning_seqcommit_sync_test() {
     )
     .await;
 
-    // Choose a target almost a full finality depth below the current tip, leaving
+    // Choose a target almost a full activity_threshold below the current tip, leaving
     // a small buffer for the confirmation and spend blocks.
     let dag_info = rpc_client1.get_block_dag_info().await.unwrap();
-    let remaining = finality_depth.saturating_sub(3);
+    let remaining = activity_threshold.saturating_sub(3);
     let target_block = walk_parent_chain(&rpc_client1, dag_info.sink, remaining).await;
 
     // Build a P2SH redeem script that exercises OpChainblockSeqCommit.
@@ -943,9 +946,14 @@ async fn daemon_pruning_seqcommit_sync_test() {
 
     // Step 2: advance the pruning point so it moves off genesis and ends up above the
     // target block that the seqcommit script references.
+    //
+    // KIP-21: with the seqcommit look-back shrunk to `activity_threshold = F/2`, the
+    // target sits at depth ≈ F/2 below the initial tip (instead of ≈ F before). Pruning
+    // samples still spacing by F in blue_score, so PP may need two F-advances to climb
+    // past the target; bump the budget accordingly.
     let mut dag_info = rpc_client1.get_block_dag_info().await.unwrap();
     let mut extra_blocks = 0usize;
-    let extra_blocks_limit = params.pruning_depth().saturating_add(30) as usize;
+    let extra_blocks_limit = params.pruning_depth().saturating_add(params.finality_depth()).saturating_add(30) as usize;
     while (dag_info.pruning_point_hash == SIMNET_GENESIS.hash
         || !is_ancestor_in_selected_parent_chain(&rpc_client1, dag_info.pruning_point_hash, target_block).await)
         && extra_blocks < extra_blocks_limit

@@ -486,6 +486,13 @@ impl Params {
         self.blockrate.finality_depth
     }
 
+    /// KIP-21 active-lanes window. Half of `finality_depth` so a block's
+    /// `finality_anchor` lands one below the window's lower edge. Derived
+    /// (not configured) to lock the invariant across networks.
+    pub fn activity_threshold(&self) -> u64 {
+        self.blockrate.finality_depth / 2
+    }
+
     pub fn pruning_depth(&self) -> u64 {
         self.blockrate.pruning_depth
     }

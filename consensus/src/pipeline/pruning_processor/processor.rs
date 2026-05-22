@@ -580,13 +580,13 @@ impl PruningProcessor {
 
         let pp_header = self.headers_store.get_compact_header_data(new_pruning_point).unwrap();
         // Prune SMT lane/branch version stores and score index.
-        // The inclusive cutoff is `pp.blue_score − finality_depth − 1`: the
-        // score `pp.blue_score − finality_depth` is still inside the active
+        // The inclusive cutoff is `pp.blue_score − activity_threshold − 1`: the
+        // score `pp.blue_score − activity_threshold` is still inside the active
         // window at the pruning point and must be preserved.
         if self.config.toccata_activation.is_active(pp_header.daa_score) {
             let smt_cutoff = crate::pipeline::virtual_processor::bounds::SeqCommitBounds::inclusive_prune_cutoff(
                 pp_header.blue_score,
-                self.config.params.finality_depth(),
+                self.config.params.activity_threshold(),
             );
             info!("SMT pruning: cutoff_blue_score={}", smt_cutoff);
             self.smt_stores.prune(&self.db, smt_cutoff);
@@ -723,7 +723,8 @@ impl PruningProcessor {
 
     fn assert_smt_rebuilding(&self, new_pruning_point: Hash, pruning_point_blue_score: u64) {
         info!("Rebuilding pruning point SMT root after pruning data (sanity test)");
-        let bounds = kaspa_smt_store::processor::SmtReadBounds::for_pov(pruning_point_blue_score, self.config.params.finality_depth());
+        let bounds =
+            kaspa_smt_store::processor::SmtReadBounds::for_pov(pruning_point_blue_score, self.config.params.activity_threshold());
         let expected_root = self.smt_stores.get_lanes_root(bounds, |bh| self.is_smt_canonical(bh, new_pruning_point));
         let expected_count = self.smt_metadata_store.get(new_pruning_point).unwrap().active_lanes_count;
         let (root, count) = self

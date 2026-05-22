@@ -63,6 +63,15 @@ pub(super) struct ResolvedLaneUpdate {
     pub is_new: bool,
 }
 
+/// Selected-parent state the current block inherits when building its seq_commit.
+pub(super) struct ParentBlockSeqState {
+    /// `accepted_id_merkle_root` of the selected parent.
+    pub seq_commit: Hash,
+    pub blue_score: u64,
+    pub lanes_root: Hash,
+    pub active_lanes_count: u64,
+}
+
 /// A context for processing the UTXO state of a block with respect to its selected parent.
 /// Note this can also be the virtual block.
 pub(super) struct UtxoProcessingContext<'a> {
@@ -381,7 +390,7 @@ impl VirtualStateProcessor {
                 &self.reachability_service,
                 &self.headers_store,
                 self.toccata_activation,
-                self.finality_depth,
+                self.activity_threshold,
             ))
         } else {
             None
@@ -462,7 +471,7 @@ impl VirtualStateProcessor {
                 &self.reachability_service,
                 &self.headers_store,
                 self.toccata_activation,
-                self.finality_depth,
+                self.activity_threshold,
             ))
         } else {
             None
@@ -532,7 +541,7 @@ impl VirtualStateProcessor {
         use kaspa_seq_commit::hashing::{activity_digest_lane, lane_key, lane_tip_next};
         use kaspa_seq_commit::types::LaneTipInput;
         let mut updates = Vec::with_capacity(data.lane_activities.len());
-        let bounds = SeqCommitBounds::new(parent_blue_score, current_blue_score, self.finality_depth);
+        let bounds = SeqCommitBounds::new(parent_blue_score, current_blue_score, self.activity_threshold);
         let read_bounds = bounds.selected_parent_read_bounds(); // -> [current - F, parent]
 
         for (lane_id, activity_leaves) in &data.lane_activities {
@@ -561,29 +570,26 @@ impl VirtualStateProcessor {
 
     /// Build the SMT from lane updates + expirations, compute the final seq_commit hash.
     ///
-    /// `parent_lanes_root` is the SMT root inherited from the selected parent block.
     /// Works with an immutable view of DB state. Returns the commit hash and an `SmtBuild`
     /// containing the diff (updated branches, lane versions, score index) for later persistence.
     pub(super) fn build_seq_commit(
         &self,
-        parent_seq_commit: Hash,
+        parent: &ParentBlockSeqState,
         context_hash: Hash,
         current_blue_score: u64,
-        parent_blue_score: u64,
-        parent_lanes_root: Hash,
-        parent_active_lanes: u64,
         lane_updates: &[ResolvedLaneUpdate],
         miner_payload_leaves: Vec<Hash>,
         selected_parent: Hash,
+        finality_anchor: Hash,
     ) -> (Hash, kaspa_smt_store::processor::SmtBuild) {
         use kaspa_seq_commit::hashing::{miner_payload_root, seq_commit, seq_state_root};
         use kaspa_seq_commit::types::{SeqCommitInput, SeqState};
         use kaspa_smt_store::processor::SmtProcessor;
 
-        let bounds = SeqCommitBounds::new(parent_blue_score, current_blue_score, self.finality_depth);
+        let bounds = SeqCommitBounds::new(parent.blue_score, current_blue_score, self.activity_threshold);
         // 1. Create processor starting from the parent's lanes root
         let mut proc =
-            SmtProcessor::new(&self.smt_stores, current_blue_score, bounds.selected_parent_read_bounds(), parent_lanes_root);
+            SmtProcessor::new(&self.smt_stores, current_blue_score, bounds.selected_parent_read_bounds(), parent.lanes_root);
 
         // 2. Expire stale lanes (scans [parent-F, current-F) for lanes with no newer version)
         let expired_count = self.expire_stale_lanes(&mut proc, bounds, selected_parent);
@@ -591,8 +597,8 @@ impl VirtualStateProcessor {
         // 3. Apply lane updates.
         // A lane at the boundary (bs = current-F-1) gets both expired (step 2) and re-added
         // here as is_new=true. This is not wasteful: BlockLaneChanges uses a BTreeMap keyed
-        // by lane_key, so update_lane overwrites the expire_lane entry — the walk sees only
-        // the final leaf. The two count operations cancel: expired+1, new+1 → net zero.
+        // by lane_key, so update_lane overwrites the expire_lane entry: the walk sees only
+        // the final leaf. The two count operations cancel: expired+1, new+1 net zero.
         let mut new_lane_count = 0;
         for lu in lane_updates {
             if lu.is_new {
@@ -601,18 +607,20 @@ impl VirtualStateProcessor {
             proc.update_lane(lu.lane_key, lu.new_tip);
         }
 
-        // 4. Build SMT (skips entirely when no pending leaves — no expirations, no touches)
+        // 4. Build SMT (skips entirely when no pending leaves: no expirations, no touches)
         let mut build = proc.build(|bh| self.is_smt_canonical(bh, selected_parent)).unwrap();
 
-        // 5. Compute final hash: payload_and_ctx_digest → state_root → seq_commit
+        // 5. Compute final hash: payload_and_ctx_digest -> state_root -> seq_commit
         let payload_root = miner_payload_root(miner_payload_leaves.into_iter());
         let pd = kaspa_seq_commit::hashing::payload_and_context_digest(&context_hash, &payload_root);
         let state_root = seq_state_root(&SeqState { lanes_root: &build.root, payload_and_ctx_digest: &pd });
-        let commit = seq_commit(&SeqCommitInput { parent_seq_commit: &parent_seq_commit, state_root: &state_root });
+        let commit = seq_commit(&SeqCommitInput { parent_seq_commit: &parent.seq_commit, state_root: &state_root });
 
         // 6. Store metadata on the build for persistence
         build.payload_and_ctx_digest = pd;
-        build.active_lanes_count = parent_active_lanes + new_lane_count - expired_count;
+        build.payload_root = payload_root;
+        build.active_lanes_count = parent.active_lanes_count + new_lane_count - expired_count;
+        build.finality_anchor = finality_anchor;
 
         (commit, build)
     }
@@ -632,10 +640,12 @@ impl VirtualStateProcessor {
         let parent_header = self.headers_store.get_header(selected_parent).unwrap();
         let current_blue_score = ctx.ghostdag_data.blue_score;
 
+        let finality_anchor = self.compute_finality_anchor(&ctx.ghostdag_data);
         let context_hash = mergeset_context_hash(&MergesetContext {
             timestamp: seq_commit_timestamp(parent_header.timestamp),
             daa_score: header.daa_score,
             blue_score: current_blue_score,
+            finality_anchor,
         });
 
         let parent_seq_commit = parent_header.accepted_id_merkle_root;
@@ -648,18 +658,23 @@ impl VirtualStateProcessor {
             selected_parent,
             parent_seq_commit,
         );
-        let (parent_lanes_root, parent_active_lanes) = self.get_parent_smt_metadata(selected_parent, parent_header.blue_score);
+        let (parent_lanes_root, parent_active_lanes, _parent_anchor) =
+            self.get_parent_smt_metadata(selected_parent, parent_header.blue_score);
+        let parent_state = ParentBlockSeqState {
+            seq_commit: parent_seq_commit,
+            blue_score: parent_header.blue_score,
+            lanes_root: parent_lanes_root,
+            active_lanes_count: parent_active_lanes,
+        };
 
         let (hash, build) = self.build_seq_commit(
-            parent_seq_commit,
+            &parent_state,
             context_hash,
             current_blue_score,
-            parent_header.blue_score,
-            parent_lanes_root,
-            parent_active_lanes,
             &lane_updates,
             data.miner_payload_leaves,
             selected_parent,
+            finality_anchor,
         );
 
         Ok((hash, build))

@@ -1155,7 +1155,9 @@ impl ConsensusApi for Consensus {
         new_pruning_point: Hash,
         lanes_root: Hash,
         payload_and_ctx_digest: Hash,
+        payload_root: Hash,
         expected_lane_count: u64,
+        finality_anchor: Hash,
         lane_batches: ImportLaneBatchIterator<'_>,
     ) -> PruningImportResult<()> {
         use kaspa_hashes::ZERO_HASH;
@@ -1191,7 +1193,11 @@ impl ConsensusApi for Consensus {
         use crate::model::stores::smt_metadata::SmtBlockMetadata;
         self.storage
             .smt_metadata_store
-            .insert_batch(&mut batch, new_pruning_point, SmtBlockMetadata::new(payload_and_ctx_digest, actual_count))
+            .insert_batch(
+                &mut batch,
+                new_pruning_point,
+                SmtBlockMetadata::new(payload_and_ctx_digest, payload_root, actual_count, finality_anchor),
+            )
             .unwrap();
         self.db.write(batch).unwrap();
 
@@ -1217,7 +1223,9 @@ impl ConsensusApi for Consensus {
             return Err(ConsensusError::UnexpectedPruningPoint);
         }
         let max_score = self.storage.headers_store.get_blue_score(pp).unwrap();
-        let min_score = max_score.saturating_sub(self.config.params.finality_depth());
+        // KIP-21: IBD streams only the active-lanes window `[pp - F/2, pp]`,
+        // not the full finality window. Halves SMT sync payload.
+        let min_score = max_score.saturating_sub(self.config.params.activity_threshold());
 
         let smt_stores = self.storage.smt_stores.clone();
         let vp = self.virtual_processor.clone();

@@ -120,7 +120,9 @@ pub struct VirtualStateProcessor {
     pub(super) genesis: GenesisBlock,
     pub(super) max_block_parents: u8,
     pub(super) mergeset_size_limit: u64,
-    pub(super) finality_depth: u64,
+    /// KIP-21 active-lanes window = `finality_depth / 2`. SMT bounds, pruning
+    /// cutoff, IBD window, and anchor-target arithmetic all derive from this.
+    pub(super) activity_threshold: u64,
     pub(super) mempool_mass_cofactors: kaspa_consensus_core::config::params::ForkedParam<kaspa_consensus_core::mass::MassCofactors>,
     pub(super) block_version: ForkedParam<u16>,
 
@@ -254,7 +256,7 @@ impl VirtualStateProcessor {
             smt_stores: storage.smt_stores.clone(),
             smt_metadata_store: storage.smt_metadata_store.clone(),
             _mining_rules: mining_rules,
-            finality_depth: params.finality_depth(),
+            activity_threshold: params.activity_threshold(),
         }
     }
 
@@ -528,10 +530,12 @@ impl VirtualStateProcessor {
         // Flush SMT branch/lane/score-index changes (KIP-21) alongside UTXO data
         if let Some(build) = smt_build {
             let pd = build.payload_and_ctx_digest;
+            let pr = build.payload_root;
             let alc = build.active_lanes_count;
+            let anchor = build.finality_anchor;
             build.flush(&self.smt_stores, &mut batch, blue_score, current).unwrap();
             use crate::model::stores::smt_metadata::SmtBlockMetadata;
-            self.smt_metadata_store.insert_batch(&mut batch, current, SmtBlockMetadata::new(pd, alc)).unwrap();
+            self.smt_metadata_store.insert_batch(&mut batch, current, SmtBlockMetadata::new(pd, pr, alc, anchor)).unwrap();
         }
         let write_guard = self.statuses_store.set_batch(&mut batch, current, StatusUTXOValid).unwrap();
         self.db.write(batch).unwrap();
@@ -589,7 +593,7 @@ impl VirtualStateProcessor {
         let accepted_id_digests = if self.toccata_activation.is_active(virtual_daa_window.daa_score) {
             let commit = self.compute_seq_commit(&ctx, &virtual_ghostdag_data, virtual_daa_window.daa_score);
             // Post-KIP21: single-element vec containing the seq_commit.
-            // The virtual's SmtBuild is ephemeral — only chain blocks persist SMT state.
+            // The virtual's SmtBuild is ephemeral - only chain blocks persist SMT state.
             vec![commit]
         } else {
             ctx.accepted_tx_ids.clone()
@@ -620,10 +624,12 @@ impl VirtualStateProcessor {
         let parent_header = self.headers_store.get_header(selected_parent).unwrap();
         let current_blue_score = virtual_ghostdag_data.blue_score;
 
+        let finality_anchor = self.compute_finality_anchor(virtual_ghostdag_data);
         let context_hash = mergeset_context_hash(&MergesetContext {
             timestamp: seq_commit_timestamp(parent_header.timestamp),
             daa_score,
             blue_score: current_blue_score,
+            finality_anchor,
         });
 
         let parent_seq_commit = parent_header.accepted_id_merkle_root;
@@ -636,18 +642,23 @@ impl VirtualStateProcessor {
             selected_parent,
             parent_seq_commit,
         );
-        let (parent_lanes_root, parent_active_lanes) = self.get_parent_smt_metadata(selected_parent, parent_header.blue_score);
+        let (parent_lanes_root, parent_active_lanes, _parent_anchor) =
+            self.get_parent_smt_metadata(selected_parent, parent_header.blue_score);
+        let parent_state = crate::pipeline::virtual_processor::utxo_validation::ParentBlockSeqState {
+            seq_commit: parent_seq_commit,
+            blue_score: parent_header.blue_score,
+            lanes_root: parent_lanes_root,
+            active_lanes_count: parent_active_lanes,
+        };
 
         let (commit, _build) = self.build_seq_commit(
-            parent_seq_commit,
+            &parent_state,
             context_hash,
             current_blue_score,
-            parent_header.blue_score,
-            parent_lanes_root,
-            parent_active_lanes,
             &lane_updates,
             data.miner_payload_leaves,
             selected_parent,
+            finality_anchor,
         );
         commit
     }
@@ -676,6 +687,8 @@ impl VirtualStateProcessor {
             timestamp: seq_commit_timestamp(self.genesis.timestamp),
             daa_score: self.genesis.daa_score,
             blue_score,
+            // Genesis has no past chain - no anchor is reachable.
+            finality_anchor: ZERO_HASH,
         });
 
         // Collect per-lane activity leaves from genesis transactions.
@@ -692,7 +705,7 @@ impl VirtualStateProcessor {
         });
         let payload_root = miner_payload_root(std::iter::once(mpl));
 
-        // Build SMT over an in-memory store — new lanes anchor at ZERO_HASH.
+        // Build SMT over an in-memory store - new lanes anchor at ZERO_HASH.
         let parent_seq_commit = ZERO_HASH;
         let leaf_updates = kaspa_smt::store::SortedLeafUpdates::from_unsorted(lane_activities.iter().map(|(lane_id, leaves)| {
             let lk = lane_key(lane_id);
@@ -742,21 +755,23 @@ impl VirtualStateProcessor {
 
         let lanes_root = self
             .smt_stores
-            .get_lanes_root(SmtReadBounds::for_pov(pp_header.blue_score, self.finality_depth), |bh| self.is_smt_canonical(bh, pp));
+            .get_lanes_root(SmtReadBounds::for_pov(pp_header.blue_score, self.activity_threshold), |bh| self.is_smt_canonical(bh, pp));
 
         Ok(SmtExportMetadata {
             lanes_root,
             payload_and_ctx_digest: meta.payload_and_ctx_digest,
+            payload_root: meta.payload_root,
             parent_seq_commit,
             active_lanes_count: meta.active_lanes_count,
+            finality_anchor: meta.finality_anchor,
         })
     }
 
     /// Check if `block_hash` is canonical for SMT lookups.
-    /// ZERO_HASH is treated as always canonical — it marks IBD-imported entries.
+    /// ZERO_HASH is treated as always canonical - it marks IBD-imported entries.
     ///
     /// After reachability pruning, blocks that were on the selected chain before
-    /// a reorg may have their reachability data deleted — their SMT lane entries
+    /// a reorg may have their reachability data deleted - their SMT lane entries
     /// remain but they are no longer canonical. `Err(KeyNotFound)` from
     /// `try_is_chain_ancestor_of` means the block's reachability was pruned,
     /// so it is definitively outside `future(retention_root)` and non-canonical.
@@ -764,14 +779,56 @@ impl VirtualStateProcessor {
         block_hash == ZERO_HASH || matches!(self.reachability_service.try_is_chain_ancestor_of(block_hash, selected_parent), Ok(true))
     }
 
-    /// Get the parent's lanes_root and active_lanes_count.
-    /// lanes_root comes from the branch version store; active_lanes_count from metadata.
-    pub(super) fn get_parent_smt_metadata(&self, selected_parent: Hash, parent_blue_score: u64) -> (Hash, u64) {
-        let active_lanes_count = self.smt_metadata_store.get(selected_parent).map(|meta| meta.active_lanes_count).unwrap_or(0);
-        let lanes_root = self.smt_stores.get_lanes_root(SmtReadBounds::for_pov(parent_blue_score, self.finality_depth), |bh| {
+    /// KIP-21: derive `finality_anchor` for a block being processed.
+    ///
+    /// Returns the `accepted_id_merkle_root` of the highest chain block at
+    /// `blue_score <= current_bs - activity_threshold - 1` (the block just
+    /// out of the activity window from `ghostdag_data`'s POV).
+    ///
+    /// The SMT coinbase-lane lookup is a fast path for the node that
+    /// originally processed the block: the entry there carries the writer's
+    /// real `block_hash` and the header lookup is direct. On any other node
+    /// the lane only holds the IBD-imported active tip (one entry per lane
+    /// key), so we fall back to a deterministic chain walk via
+    /// `BlockDepthManager::calc_block_at_blue_score`, which both syncer and
+    /// syncee can perform identically using `depth_store.finality_point`
+    /// plus the selected-chain reachability iterator.
+    pub(super) fn compute_finality_anchor(&self, ghostdag_data: &GhostdagData) -> Hash {
+        if ghostdag_data.blue_score <= self.activity_threshold {
+            return ZERO_HASH;
+        }
+        let target_bs = ghostdag_data.blue_score - self.activity_threshold - 1;
+        let selected_parent = ghostdag_data.selected_parent;
+
+        let coinbase_lk = kaspa_seq_commit::hashing::lane_key(&kaspa_consensus_core::subnets::SUBNETWORK_ID_COINBASE.into_bytes());
+        let bounds = SmtReadBounds::new(target_bs, 0);
+        if let Some(v) = self.smt_stores.get_lane(coinbase_lk, bounds, |bh| self.is_smt_canonical(bh, selected_parent))
+            && v.block_hash() != ZERO_HASH
+        {
+            return self.headers_store.get_header(v.block_hash()).unwrap().accepted_id_merkle_root;
+        }
+
+        let chain_block = self.depth_manager.calc_block_at_blue_score(ghostdag_data, target_bs);
+        if chain_block == kaspa_consensus_core::blockhash::ORIGIN || chain_block == self.genesis.hash {
+            return ZERO_HASH;
+        }
+        self.headers_store.get_header(chain_block).unwrap().accepted_id_merkle_root
+    }
+
+    /// Get the parent's lanes_root, active_lanes_count, and finality_anchor.
+    /// lanes_root comes from the branch version store; the other two from metadata.
+    /// When the parent has no stored metadata (e.g. pre-toccata or origin predecessor),
+    /// returns `(empty_root, 0, ZERO_HASH)` - explicit fallback, no `Default`.
+    pub(super) fn get_parent_smt_metadata(&self, selected_parent: Hash, parent_blue_score: u64) -> (Hash, u64, Hash) {
+        let (active_lanes_count, finality_anchor) = self
+            .smt_metadata_store
+            .get(selected_parent)
+            .map(|meta| (meta.active_lanes_count, meta.finality_anchor))
+            .unwrap_or((0, ZERO_HASH));
+        let lanes_root = self.smt_stores.get_lanes_root(SmtReadBounds::for_pov(parent_blue_score, self.activity_threshold), |bh| {
             self.is_smt_canonical(bh, selected_parent)
         });
-        (lanes_root, active_lanes_count)
+        (lanes_root, active_lanes_count, finality_anchor)
     }
 
     /// Expire lanes that fall out of the active window between parent and current blue score.
@@ -1403,7 +1460,7 @@ impl VirtualStateProcessor {
         self.db.write(batch).unwrap();
         drop(selected_chain_write);
 
-        // Init virtual state — pre-compute accepted_id_digests here so
+        // Init virtual state - pre-compute accepted_id_digests here so
         // VirtualState::from_genesis stays a plain data constructor.
         let ghostdag_data = self.ghostdag_manager.ghostdag(&[self.genesis.hash]);
         let accepted_id_digests = self.compute_genesis_accepted_id_digests(&ghostdag_data);

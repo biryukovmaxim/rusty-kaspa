@@ -69,13 +69,21 @@ pub struct ImportLane {
 
 pub type ImportLaneBatchIterator<'a> = &'a mut (dyn Iterator<Item = Vec<ImportLane>> + Send);
 
-/// SMT metadata for IBD sync — verified against the pruning point header.
+/// SMT metadata for IBD sync, verified against the pruning point header.
 #[derive(Clone, Debug)]
 pub struct SmtExportMetadata {
     pub lanes_root: Hash,
     pub payload_and_ctx_digest: Hash,
+    /// Lets the importer reconstruct `payload_and_ctx_digest` from
+    /// `mergeset_context_hash(ctx)` (rebuilt from PP header fields plus the
+    /// claimed `finality_anchor`) and authenticate the anchor against AIMR.
+    pub payload_root: Hash,
     pub parent_seq_commit: Hash,
     pub active_lanes_count: u64,
+    /// KIP-21: PP's anchor (seq_commit of the block just out of PP's
+    /// activity window). The importer verifies it via `payload_root`
+    /// reconstruction.
+    pub finality_anchor: Hash,
 }
 
 /// Abstracts the consensus external API
@@ -306,7 +314,9 @@ pub trait ConsensusApi: Send + Sync {
         _new_pruning_point: Hash,
         _lanes_root: Hash,
         _payload_and_ctx_digest: Hash,
+        _payload_root: Hash,
         _expected_lane_count: u64,
+        _finality_anchor: Hash,
         _lane_batches: ImportLaneBatchIterator<'_>,
     ) -> PruningImportResult<()> {
         unimplemented!()

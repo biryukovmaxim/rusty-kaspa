@@ -49,6 +49,7 @@ pub struct TestConsensus {
 pub struct TestSeqCommitLaneProof {
     pub lanes_root: Hash,
     pub payload_and_ctx_digest: Hash,
+    pub payload_root: Hash,
     pub parent_seq_commit: Hash,
     pub expected_seq_commit: Hash,
     pub parent_lane_tip: Option<Hash>,
@@ -219,13 +220,18 @@ impl TestConsensus {
         MutableBlock::from_header(self.build_header_with_parents(hash, parents))
     }
 
+    /// Read the stored SMT block metadata (KIP-21) for a block.
+    pub fn smt_block_metadata(&self, block_hash: Hash) -> crate::model::stores::smt_metadata::SmtBlockMetadata {
+        self.consensus.storage.smt_metadata_store.get(block_hash).unwrap()
+    }
+
     pub fn seq_commit_lane_proof(&self, block_hash: Hash, lane_key: Hash) -> TestSeqCommitLaneProof {
         let header = self.consensus.headers_store.get_header(block_hash).unwrap();
         let selected_parent = header.direct_parents()[0];
         let parent_header = self.consensus.headers_store.get_header(selected_parent).unwrap();
-        let min_blue_score = header.blue_score.saturating_sub(self.params.finality_depth());
+        let min_blue_score = header.blue_score.saturating_sub(self.params.activity_threshold());
         let parent_bounds = SmtReadBounds::new(parent_header.blue_score, min_blue_score);
-        let current_bounds = SmtReadBounds::for_pov(header.blue_score, self.params.finality_depth());
+        let current_bounds = SmtReadBounds::for_pov(header.blue_score, self.params.activity_threshold());
 
         let parent_lane_tip = self
             .consensus
@@ -255,6 +261,7 @@ impl TestConsensus {
         TestSeqCommitLaneProof {
             lanes_root,
             payload_and_ctx_digest: metadata.payload_and_ctx_digest,
+            payload_root: metadata.payload_root,
             parent_seq_commit: parent_header.accepted_id_merkle_root,
             expected_seq_commit: header.accepted_id_merkle_root,
             parent_lane_tip,

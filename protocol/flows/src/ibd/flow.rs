@@ -709,12 +709,27 @@ impl IbdFlow {
         // Phase 0: receive and verify metadata
         let md = stream.recv_metadata().await?;
         let parent_header = consensus.async_get_header(pp_header.direct_parents()[0]).await.unwrap();
+        // Reconstruct the mergeset context PP was mined against:
+        //  - timestamp: selected parent's timestamp (per `seq_commit_timestamp`)
+        //  - daa_score, blue_score: from the PP header itself
+        //  - finality_anchor: claimed value from the wire
+        // verify_smt_metadata uses these + payload_root to recompute
+        // payload_and_ctx_digest. Matching against the AIMR-committed value
+        // authenticates the claimed anchor.
+        let ctx = kaspa_seq_commit::types::MergesetContext {
+            timestamp: kaspa_seq_commit::hashing::seq_commit_timestamp(parent_header.timestamp),
+            daa_score: pp_header.daa_score,
+            blue_score: pp_header.blue_score,
+            finality_anchor: md.finality_anchor,
+        };
         verify_smt_metadata(
             &SmtMetadata {
                 lanes_root: &md.lanes_root,
                 payload_and_ctx_digest: &md.payload_and_ctx_digest,
+                payload_root: &md.payload_root,
                 parent_seq_commit: &md.parent_seq_commit,
             },
+            &ctx,
             pp_header.accepted_id_merkle_root,
             parent_header.accepted_id_merkle_root,
         )
@@ -722,7 +737,9 @@ impl IbdFlow {
 
         let lanes_root = md.lanes_root;
         let payload_and_ctx_digest = md.payload_and_ctx_digest;
+        let payload_root = md.payload_root;
         let expected_count = md.active_lanes_count;
+        let finality_anchor = md.finality_anchor;
 
         // Small queue of already-chunked batches: one in flight + one being processed
         // by the importer is enough headroom; each chunk holds up to SMT_CHUNK_SIZE lanes.
@@ -730,7 +747,15 @@ impl IbdFlow {
 
         let consensus_for_import = consensus.clone();
         let builder_handle = tokio::task::spawn_blocking(move || {
-            consensus_for_import.import_pruning_point_smt(pruning_point, lanes_root, payload_and_ctx_digest, expected_count, rx)
+            consensus_for_import.import_pruning_point_smt(
+                pruning_point,
+                lanes_root,
+                payload_and_ctx_digest,
+                payload_root,
+                expected_count,
+                finality_anchor,
+                rx,
+            )
         });
 
         while let Some(chunk) = stream.next_chunk().await? {

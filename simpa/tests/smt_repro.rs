@@ -87,7 +87,8 @@ fn assert_pruning_point_smt_roundtrip(seed: u64) {
 
     let pp = consensus.pruning_point();
     let pp_blue_score = consensus.get_header(pp).unwrap().blue_score;
-    let smt_cutoff = pp_blue_score.saturating_sub(FINALITY_DEPTH).saturating_sub(1);
+    // KIP-21: pruning cutoff now uses activity_threshold (= F/2), not F.
+    let smt_cutoff = pp_blue_score.saturating_sub(FINALITY_DEPTH / 2).saturating_sub(1);
     let metadata = consensus.get_pruning_point_smt_metadata(pp).unwrap();
     let (imported_root, imported_lanes) =
         import_exported_pruning_point_smt(&*consensus, pp, pp_blue_score, metadata.lanes_root, metadata.active_lanes_count);
