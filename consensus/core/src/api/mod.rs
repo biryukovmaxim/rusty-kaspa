@@ -76,7 +76,8 @@ pub struct SmtExportMetadata {
     pub payload_and_ctx_digest: Hash,
     /// Lets the importer reconstruct `payload_and_ctx_digest` from
     /// `mergeset_context_hash(ctx)` (rebuilt from PP header fields plus the
-    /// claimed `finality_anchor`) and authenticate the anchor against AIMR.
+    /// claimed `finality_anchor`) and authenticate the anchor against the
+    /// header's `seq_commit` (= `accepted_id_merkle_root`).
     pub payload_root: Hash,
     pub parent_seq_commit: Hash,
     pub active_lanes_count: u64,

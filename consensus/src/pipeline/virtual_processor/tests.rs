@@ -482,7 +482,7 @@ async fn finality_anchor_runtime_resolves_via_coinbase_lane() {
 ///     result = B3
 ///     return header(B3).accepted_id_merkle_root
 ///
-///   Equals header(B3).aimr, which 1a also returns from the lane lookup.
+///   Equals header(B3).seq_commit, which 1a also returns from the lane lookup.
 /// ```
 #[tokio::test]
 async fn finality_anchor_fallback_matches_mining_time_for_genesis_hpp() {

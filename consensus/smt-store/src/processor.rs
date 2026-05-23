@@ -553,7 +553,8 @@ pub struct SmtBuild {
     pub payload_and_ctx_digest: Hash,
     /// Stored so an importer can reconstruct `payload_and_ctx_digest` from
     /// its components (`mergeset_context_hash(ctx)` + `payload_root`) and
-    /// verify the claimed `finality_anchor` against the header's AIMR.
+    /// verify the claimed `finality_anchor` against the header's
+    /// `seq_commit` (= `accepted_id_merkle_root`).
     pub payload_root: Hash,
     pub active_lanes_count: u64,
     /// KIP-21: cached per-block anchor, surfaced for DA inactivity proofs.

@@ -14,7 +14,8 @@ pub struct SmtMetadata<'a> {
     pub payload_and_ctx_digest: &'a Hash,
     /// Lets the verifier reconstruct `payload_and_ctx_digest` from
     /// `mergeset_context_hash(ctx)` and authenticate the claimed
-    /// `finality_anchor` (carried inside `ctx`) against the header's AIMR.
+    /// `finality_anchor` (carried inside `ctx`) against the header's
+    /// `seq_commit` (= `accepted_id_merkle_root`).
     pub payload_root: &'a Hash,
     pub parent_seq_commit: &'a Hash,
 }
@@ -41,10 +42,10 @@ pub enum SmtVerifyError {
     ProofError(#[from] kaspa_smt::proof::SmtProofError),
 }
 
-/// Verify that the metadata is consistent with the header's
-/// `accepted_id_merkle_root` (= seq_commit).
+/// Verify that the metadata is consistent with the header's `seq_commit`
+/// (= `accepted_id_merkle_root`).
 ///
-/// Beyond the AIMR + parent linkage check, this also rebuilds
+/// Beyond the `seq_commit` + parent linkage check, this also rebuilds
 /// `payload_and_ctx_digest` from `mergeset_context_hash(ctx)` and
 /// `metadata.payload_root` to authenticate `ctx.finality_anchor`. Callers
 /// reconstruct `ctx` from header data (timestamp from the PP's selected

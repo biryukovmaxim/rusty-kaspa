@@ -714,8 +714,8 @@ impl IbdFlow {
         //  - daa_score, blue_score: from the PP header itself
         //  - finality_anchor: claimed value from the wire
         // verify_smt_metadata uses these + payload_root to recompute
-        // payload_and_ctx_digest. Matching against the AIMR-committed value
-        // authenticates the claimed anchor.
+        // payload_and_ctx_digest. Matching against the header's seq_commit
+        // (= accepted_id_merkle_root) authenticates the claimed anchor.
         let ctx = kaspa_seq_commit::types::MergesetContext {
             timestamp: kaspa_seq_commit::hashing::seq_commit_timestamp(parent_header.timestamp),
             daa_score: pp_header.daa_score,

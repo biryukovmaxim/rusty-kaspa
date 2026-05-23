@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// `payload_and_ctx_digest` from its components (`mergeset_context_hash` of
 /// known header fields + claimed `finality_anchor`, paired with the stored
 /// `payload_root`) and thereby authenticate the claimed anchor against the
-/// pruning-point header's AIMR.
+/// pruning-point header's `seq_commit` (= `accepted_id_merkle_root`).
 ///
 /// `finality_anchor` caches the per-block KIP-21 anchor (seq_commit of the
 /// highest chain block at `bs <= block_bs - activity_threshold - 1`).
