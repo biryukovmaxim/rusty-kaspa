@@ -821,9 +821,6 @@ impl VirtualStateProcessor {
         };
 
         let bs_start = self.headers_store.get_blue_score(search_from).unwrap_or(0); // zero for genesis case
-        if bs_start < self.finality_depth + 1 {
-            return ZERO_HASH;
-        }
         assert!(bs_start <= target_bs);
         let mut current = search_from;
         for chain_block in self.reachability_service.forward_chain_iterator(current, selected_parent, true).skip(1) {
