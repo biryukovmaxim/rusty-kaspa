@@ -48,9 +48,7 @@ use kaspa_core::time::unix_now;
 use kaspa_database::utils::get_kaspa_tempdir;
 use kaspa_hashes::{Hash, SeqCommitActiveNode};
 use kaspa_rpc_core::RpcHeader;
-use kaspa_seq_commit::hashing::{
-    activity_digest_lane, activity_leaf, lane_key, lane_tip_next, mergeset_context_hash, seq_commit_timestamp, smt_leaf_hash,
-};
+use kaspa_seq_commit::hashing::{activity_digest_lane, activity_leaf, lane_key, lane_tip_next, mergeset_context_hash, smt_leaf_hash};
 use kaspa_seq_commit::types::{LaneTipInput, MergesetContext, SmtLeafInput};
 use kaspa_seq_commit::verify::{SmtMetadata, verify_smt_metadata};
 use kaspa_txscript::{MAX_SCRIPT_ELEMENT_SIZE_POST_TOCCATA, pay_to_script_hash_script};
@@ -1480,15 +1478,21 @@ fn chain_seq_commit_lane_activity_for_tx(
 fn chain_seq_commit_context_hash(consensus: &TestConsensus, accepting_block: Hash) -> Hash {
     let header = consensus.get_header(accepting_block).unwrap();
     let parent_header = consensus.get_header(header.direct_parents()[0]).unwrap();
-    // The block's own SMT metadata holds the anchor computed at processing time;
-    // that's the same anchor that was hashed into the context.
     let meta = consensus.smt_block_metadata(accepting_block);
+    let inactivity_shortcut = inactivity_shortcut_for(consensus, meta.inactivity_shortcut_block);
     mergeset_context_hash(&MergesetContext {
-        timestamp: seq_commit_timestamp(parent_header.timestamp),
+        timestamp: parent_header.timestamp,
         daa_score: header.daa_score,
         blue_score: header.blue_score,
-        finality_anchor: meta.finality_anchor,
+        inactivity_shortcut,
     })
+}
+
+fn inactivity_shortcut_for(consensus: &TestConsensus, inactivity_shortcut_block: Hash) -> Hash {
+    if inactivity_shortcut_block == kaspa_hashes::ZERO_HASH || inactivity_shortcut_block == consensus.params().genesis.hash {
+        return kaspa_hashes::ZERO_HASH;
+    }
+    consensus.get_header(inactivity_shortcut_block).unwrap().accepted_id_merkle_root
 }
 
 fn assert_chain_seq_commit_lane(consensus: &TestConsensus, accepting_block: Hash, activity: &ChainSeqCommitLaneActivity) {
@@ -1496,11 +1500,12 @@ fn assert_chain_seq_commit_lane(consensus: &TestConsensus, accepting_block: Hash
     let header = consensus.get_header(accepting_block).unwrap();
     let parent_header = consensus.get_header(header.direct_parents()[0]).unwrap();
     let meta = consensus.smt_block_metadata(accepting_block);
+    let inactivity_shortcut = inactivity_shortcut_for(consensus, meta.inactivity_shortcut_block);
     let ctx = MergesetContext {
-        timestamp: seq_commit_timestamp(parent_header.timestamp),
+        timestamp: parent_header.timestamp,
         daa_score: header.daa_score,
         blue_score: header.blue_score,
-        finality_anchor: meta.finality_anchor,
+        inactivity_shortcut,
     };
     verify_smt_metadata(
         &SmtMetadata {
@@ -1604,9 +1609,9 @@ async fn seqcommit_sp_context_threshold_edge_test() {
             p.genesis.hash = genesis_header.hash;
 
             // Keep the threshold minimal so the selected-parent edge is reached by the next block.
-            // KIP-21: the seqcommit threshold is `activity_threshold = finality_depth / 2`, so
-            // set `finality_depth = 2` to get an `activity_threshold` of 1.
-            p.finality_depth = 2;
+            // KIP-21: the seqcommit look-back equals `finality_depth`; set it to 1 so a
+            // single follow-up block is still within the threshold during template validation.
+            p.finality_depth = 1;
             p.toccata_activation = ForkActivation::always();
         })
         .build();
@@ -1644,7 +1649,7 @@ async fn seqcommit_sp_context_threshold_edge_test() {
     let tx = tx.tx.unwrap_or_clone();
 
     let target_blue_score = consensus.get_header(target_hash).unwrap().blue_score;
-    let threshold = config.activity_threshold();
+    let threshold = config.finality_depth();
     assert!(seq_commit_within_threshold(target_blue_score, target_blue_score, threshold));
 
     // Build through the test BBT path. Since the spend block's selected parent is the target,

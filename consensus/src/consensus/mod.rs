@@ -1157,7 +1157,7 @@ impl ConsensusApi for Consensus {
         payload_and_ctx_digest: Hash,
         payload_root: Hash,
         expected_lane_count: u64,
-        finality_anchor: Hash,
+        inactivity_shortcut_block: Hash,
         lane_batches: ImportLaneBatchIterator<'_>,
     ) -> PruningImportResult<()> {
         use kaspa_hashes::ZERO_HASH;
@@ -1189,6 +1189,8 @@ impl ConsensusApi for Consensus {
             )));
         }
 
+        // The wire's `inactivity_shortcut` (seq_commit value) was already
+        // authenticated by the caller via `verify_smt_metadata`
         let mut batch = rocksdb::WriteBatch::default();
         use crate::model::stores::smt_metadata::SmtBlockMetadata;
         self.storage
@@ -1196,7 +1198,7 @@ impl ConsensusApi for Consensus {
             .insert_batch(
                 &mut batch,
                 new_pruning_point,
-                SmtBlockMetadata::new(payload_and_ctx_digest, payload_root, actual_count, finality_anchor),
+                SmtBlockMetadata::new(payload_and_ctx_digest, payload_root, actual_count, inactivity_shortcut_block),
             )
             .unwrap();
         self.db.write(batch).unwrap();
@@ -1223,9 +1225,8 @@ impl ConsensusApi for Consensus {
             return Err(ConsensusError::UnexpectedPruningPoint);
         }
         let max_score = self.storage.headers_store.get_blue_score(pp).unwrap();
-        // KIP-21: IBD streams only the active-lanes window `[pp - F/2, pp]`,
-        // not the full finality window. Halves SMT sync payload.
-        let min_score = max_score.saturating_sub(self.config.params.activity_threshold());
+        // KIP-21: IBD streams only the active-lanes window `[pp - finality_depth, pp]`.
+        let min_score = max_score.saturating_sub(self.config.params.finality_depth());
 
         let smt_stores = self.storage.smt_stores.clone();
         let vp = self.virtual_processor.clone();

@@ -14,27 +14,26 @@ use std::sync::Arc;
 /// store at depth=0 and read via `SmtStores::get_lanes_root`.
 ///
 /// `payload_root` is kept so that an IBD importer can reconstruct
-/// `payload_and_ctx_digest` from its components (`mergeset_context_hash` of
-/// known header fields + claimed `finality_anchor`, paired with the stored
-/// `payload_root`) and thereby authenticate the claimed anchor against the
-/// pruning-point header's `seq_commit` (= `accepted_id_merkle_root`).
+/// `payload_and_ctx_digest` from header fields paired with the derived
+/// `inactivity_shortcut` and thereby authenticate the pruning-point header's
+/// `seq_commit` (= `accepted_id_merkle_root`).
 ///
-/// `finality_anchor` caches the per-block KIP-21 anchor (seq_commit of the
-/// highest chain block at `bs <= block_bs - activity_threshold - 1`).
-/// Consensus recomputes it on the fly via
-/// `BlockDepthManager::calc_block_at_blue_score`; the cached value is what
-/// DA-layer inactivity proofs surface to clients.
+/// `inactivity_shortcut_block` is the block hash of the highest chain block
+/// at `bs <= block_bs - finality_depth - 1`. The committed
+/// `inactivity_shortcut` value (in `MergesetContext` and on the IBD wire) is
+/// `headers_store(inactivity_shortcut_block).accepted_id_merkle_root`.
+/// `ZERO_HASH` means we don't have the corresponding block
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmtBlockMetadata {
     pub payload_and_ctx_digest: Hash,
     pub payload_root: Hash,
     pub active_lanes_count: u64,
-    pub finality_anchor: Hash,
+    pub inactivity_shortcut_block: Hash,
 }
 
 impl SmtBlockMetadata {
-    pub fn new(payload_and_ctx_digest: Hash, payload_root: Hash, active_lanes_count: u64, finality_anchor: Hash) -> Self {
-        Self { payload_and_ctx_digest, payload_root, active_lanes_count, finality_anchor }
+    pub fn new(payload_and_ctx_digest: Hash, payload_root: Hash, active_lanes_count: u64, inactivity_shortcut_block: Hash) -> Self {
+        Self { payload_and_ctx_digest, payload_root, active_lanes_count, inactivity_shortcut_block }
     }
 }
 

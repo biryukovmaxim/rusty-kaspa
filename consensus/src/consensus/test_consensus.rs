@@ -229,9 +229,9 @@ impl TestConsensus {
         let header = self.consensus.headers_store.get_header(block_hash).unwrap();
         let selected_parent = header.direct_parents()[0];
         let parent_header = self.consensus.headers_store.get_header(selected_parent).unwrap();
-        let min_blue_score = header.blue_score.saturating_sub(self.params.activity_threshold());
+        let min_blue_score = header.blue_score.saturating_sub(self.params.finality_depth());
         let parent_bounds = SmtReadBounds::new(parent_header.blue_score, min_blue_score);
-        let current_bounds = SmtReadBounds::for_pov(header.blue_score, self.params.activity_threshold());
+        let current_bounds = SmtReadBounds::for_pov(header.blue_score, self.params.finality_depth());
 
         let parent_lane_tip = self
             .consensus

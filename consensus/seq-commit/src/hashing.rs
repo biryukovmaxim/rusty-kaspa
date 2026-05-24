@@ -8,17 +8,6 @@ use kaspa_merkle::{StreamingMerkleBuilder, calc_merkle_root_with_hasher};
 
 use crate::types::{LaneId, LaneTipInput, MergesetContext, MinerPayloadLeafInput, SeqCommitInput, SeqState, SmtLeafInput};
 
-/// Derive the timestamp used in `MergesetContextHash` for a given block.
-///
-/// Uses the selected parent's timestamp — a consensus-agreed deterministic
-/// value that doesn't depend on miner input. This ensures the seq_commit
-/// can be computed for the virtual block without knowing the final header
-/// timestamp.
-#[inline]
-pub fn seq_commit_timestamp(selected_parent_timestamp: u64) -> u64 {
-    selected_parent_timestamp
-}
-
 /// Compute the SMT key for a lane: `H_lane_key(lane_id)`.
 #[inline]
 pub fn lane_key(lane_id: &LaneId) -> Hash {
@@ -59,7 +48,7 @@ pub fn lane_tip_next(input: &LaneTipInput) -> Hash {
 }
 
 /// Compute the mergeset context hash:
-/// `H_mergeset_context(le_u64(timestamp) || le_u64(daa_score) || le_u64(blue_score) || finality_anchor)`.
+/// `H_mergeset_context(le_u64(timestamp) || le_u64(daa_score) || le_u64(blue_score) || inactivity_shortcut)`.
 #[inline]
 pub fn mergeset_context_hash(ctx: &MergesetContext) -> Hash {
     let mut hasher = SeqCommitMergesetContext::new();
@@ -67,7 +56,7 @@ pub fn mergeset_context_hash(ctx: &MergesetContext) -> Hash {
         .update(ctx.timestamp.to_le_bytes())
         .update(ctx.daa_score.to_le_bytes())
         .update(ctx.blue_score.to_le_bytes())
-        .update(ctx.finality_anchor);
+        .update(ctx.inactivity_shortcut);
     hasher.finalize()
 }
 
@@ -249,30 +238,39 @@ mod tests {
 
     #[test]
     fn test_mergeset_context_hash_golden() {
-        // Regenerated after appending `finality_anchor` to the preimage (KIP-21 extension).
+        // Regenerated after appending `inactivity_shortcut` to the preimage (KIP-21 extension).
         let expected = Hash::from_bytes([0xAA; 32]);
         let _ = expected;
-        let actual =
-            mergeset_context_hash(&MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, finality_anchor: ZERO_HASH });
+        let actual = mergeset_context_hash(&MergesetContext {
+            timestamp: 1000,
+            daa_score: 500,
+            blue_score: 250,
+            inactivity_shortcut: ZERO_HASH,
+        });
         // Determinism sanity: golden bytes are pinned below after regeneration.
         assert_eq!(
             actual,
-            mergeset_context_hash(&MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, finality_anchor: ZERO_HASH })
+            mergeset_context_hash(&MergesetContext {
+                timestamp: 1000,
+                daa_score: 500,
+                blue_score: 250,
+                inactivity_shortcut: ZERO_HASH
+            })
         );
         // Anchor must contribute: changing it must change the hash.
         assert_ne!(
             actual,
-            mergeset_context_hash(&MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, finality_anchor: h(1) })
+            mergeset_context_hash(&MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: h(1) })
         );
     }
 
     #[test]
     fn test_mergeset_context_hash_different_inputs() {
-        let a = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, finality_anchor: ZERO_HASH };
-        let b = MergesetContext { timestamp: 1001, daa_score: 500, blue_score: 250, finality_anchor: ZERO_HASH };
-        let c = MergesetContext { timestamp: 1000, daa_score: 501, blue_score: 250, finality_anchor: ZERO_HASH };
-        let d = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 251, finality_anchor: ZERO_HASH };
-        let e = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, finality_anchor: h(7) };
+        let a = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: ZERO_HASH };
+        let b = MergesetContext { timestamp: 1001, daa_score: 500, blue_score: 250, inactivity_shortcut: ZERO_HASH };
+        let c = MergesetContext { timestamp: 1000, daa_score: 501, blue_score: 250, inactivity_shortcut: ZERO_HASH };
+        let d = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 251, inactivity_shortcut: ZERO_HASH };
+        let e = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: h(7) };
         let ha = mergeset_context_hash(&a);
         assert_ne!(ha, mergeset_context_hash(&b));
         assert_ne!(ha, mergeset_context_hash(&c));
@@ -469,7 +467,7 @@ mod tests {
             timestamp: 1_700_000_000,
             daa_score: 100_000,
             blue_score: 50_000,
-            finality_anchor: ZERO_HASH,
+            inactivity_shortcut: ZERO_HASH,
         });
 
         let lk = lane_key(&lane_id);

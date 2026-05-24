@@ -56,31 +56,6 @@ impl<S: DepthStoreReader, U: ReachabilityStoreReader, V: GhostdagStoreReader, T:
         self.calculate_block_at_depth(ghostdag_data, BlockDepthType::Finality, pruning_point)
     }
 
-    /// Locate the highest chain block on `ghostdag_data`'s selected chain whose
-    /// `blue_score` is at most `target_blue_score`. The walk uses the same
-    /// `depth_store.finality_point` + `reachability_service.forward_chain_iterator`
-    /// path as [`Self::calc_finality_point`], but takes the target score as a
-    /// free parameter (KIP-21 needs the chain block at `current.bs - F/2 - 1`).
-    ///
-    /// Returns `ORIGIN` for genesis-adjacent inputs or when `target_blue_score`
-    /// is at or above the block's own `blue_score`.
-    pub fn calc_block_at_blue_score(&self, ghostdag_data: &GhostdagData, target_blue_score: u64) -> Hash {
-        if ghostdag_data.selected_parent.is_origin() || ghostdag_data.blue_score <= target_blue_score {
-            return ORIGIN;
-        }
-        let mut current = self.depth_store.finality_point(ghostdag_data.selected_parent).unwrap();
-        if current == ORIGIN {
-            current = self.genesis_hash;
-        }
-        for chain_block in self.reachability_service.forward_chain_iterator(current, ghostdag_data.selected_parent, true) {
-            if self.ghostdag_store.get_blue_score(chain_block).unwrap() > target_blue_score {
-                break;
-            }
-            current = chain_block;
-        }
-        current
-    }
-
     fn calculate_block_at_depth(&self, ghostdag_data: &GhostdagData, depth_type: BlockDepthType, pruning_point: Hash) -> Hash {
         if ghostdag_data.selected_parent.is_origin() {
             return ORIGIN;

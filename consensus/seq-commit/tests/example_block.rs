@@ -121,7 +121,8 @@ fn example_seq_commit_for_block() {
     let timestamp = 1_700_000_000u64;
     let daa_score = 100_000u64;
     let blue_score = 50_000u64;
-    let ctx = mergeset_context_hash(&MergesetContext { timestamp, daa_score, blue_score, finality_anchor: kaspa_hashes::ZERO_HASH });
+    let ctx =
+        mergeset_context_hash(&MergesetContext { timestamp, daa_score, blue_score, inactivity_shortcut: kaspa_hashes::ZERO_HASH });
 
     // --- Lane tips ---
     // Lane A: already active → parent_ref = previous lane_tip_hash

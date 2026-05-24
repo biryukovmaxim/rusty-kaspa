@@ -518,7 +518,7 @@ impl ConsensusSessionOwned {
         payload_and_ctx_digest: Hash,
         payload_root: Hash,
         expected_lane_count: u64,
-        finality_anchor: Hash,
+        inactivity_shortcut_block: Hash,
         mut rx: tokio::sync::mpsc::Receiver<Vec<ImportLane>>,
     ) -> PruningImportResult<()> {
         let lane_batches: ImportLaneBatchIterator = &mut std::iter::from_fn(move || rx.blocking_recv());
@@ -528,7 +528,7 @@ impl ConsensusSessionOwned {
             payload_and_ctx_digest,
             payload_root,
             expected_lane_count,
-            finality_anchor,
+            inactivity_shortcut_block,
             lane_batches,
         )
     }

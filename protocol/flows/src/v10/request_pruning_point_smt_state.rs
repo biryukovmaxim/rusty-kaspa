@@ -58,13 +58,13 @@ impl RequestPruningPointSmtStateFlow {
 
         // KIP-21 wire schema: 5 x 32-byte hashes
         // (lanes_root, payload_and_ctx_digest, payload_root,
-        //  parent_seq_commit, finality_anchor).
+        //  parent_seq_commit, inactivity_shortcut_block).
         let mut md_bytes = Vec::with_capacity(160);
         md_bytes.extend_from_slice(&metadata.lanes_root.as_bytes());
         md_bytes.extend_from_slice(&metadata.payload_and_ctx_digest.as_bytes());
         md_bytes.extend_from_slice(&metadata.payload_root.as_bytes());
         md_bytes.extend_from_slice(&metadata.parent_seq_commit.as_bytes());
-        md_bytes.extend_from_slice(&metadata.finality_anchor.as_bytes());
+        md_bytes.extend_from_slice(&metadata.inactivity_shortcut_block.as_bytes());
         self.router
             .enqueue(make_message!(Payload::SmtMetadata, SmtMetadataMessage { data: md_bytes, active_lanes_count: expected_count }))
             .await?;

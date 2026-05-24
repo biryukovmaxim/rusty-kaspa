@@ -390,7 +390,7 @@ impl VirtualStateProcessor {
                 &self.reachability_service,
                 &self.headers_store,
                 self.toccata_activation,
-                self.activity_threshold,
+                self.finality_depth,
             ))
         } else {
             None
@@ -471,7 +471,7 @@ impl VirtualStateProcessor {
                 &self.reachability_service,
                 &self.headers_store,
                 self.toccata_activation,
-                self.activity_threshold,
+                self.finality_depth,
             ))
         } else {
             None
@@ -541,7 +541,7 @@ impl VirtualStateProcessor {
         use kaspa_seq_commit::hashing::{activity_digest_lane, lane_key, lane_tip_next};
         use kaspa_seq_commit::types::LaneTipInput;
         let mut updates = Vec::with_capacity(data.lane_activities.len());
-        let bounds = SeqCommitBounds::new(parent_blue_score, current_blue_score, self.activity_threshold);
+        let bounds = SeqCommitBounds::new(parent_blue_score, current_blue_score, self.finality_depth);
         let read_bounds = bounds.selected_parent_read_bounds(); // -> [current - F, parent]
 
         for (lane_id, activity_leaves) in &data.lane_activities {
@@ -580,13 +580,13 @@ impl VirtualStateProcessor {
         lane_updates: &[ResolvedLaneUpdate],
         miner_payload_leaves: Vec<Hash>,
         selected_parent: Hash,
-        finality_anchor: Hash,
+        inactivity_shortcut_block: Hash,
     ) -> (Hash, kaspa_smt_store::processor::SmtBuild) {
         use kaspa_seq_commit::hashing::{miner_payload_root, seq_commit, seq_state_root};
         use kaspa_seq_commit::types::{SeqCommitInput, SeqState};
         use kaspa_smt_store::processor::SmtProcessor;
 
-        let bounds = SeqCommitBounds::new(parent.blue_score, current_blue_score, self.activity_threshold);
+        let bounds = SeqCommitBounds::new(parent.blue_score, current_blue_score, self.finality_depth);
         // 1. Create processor starting from the parent's lanes root
         let mut proc =
             SmtProcessor::new(&self.smt_stores, current_blue_score, bounds.selected_parent_read_bounds(), parent.lanes_root);
@@ -620,7 +620,7 @@ impl VirtualStateProcessor {
         build.payload_and_ctx_digest = pd;
         build.payload_root = payload_root;
         build.active_lanes_count = parent.active_lanes_count + new_lane_count - expired_count;
-        build.finality_anchor = finality_anchor;
+        build.inactivity_shortcut_block = inactivity_shortcut_block;
 
         (commit, build)
     }
@@ -633,19 +633,19 @@ impl VirtualStateProcessor {
         ctx: &UtxoProcessingContext,
         header: &Header,
     ) -> BlockProcessResult<(Hash, kaspa_smt_store::processor::SmtBuild)> {
-        use kaspa_seq_commit::hashing::{mergeset_context_hash, seq_commit_timestamp};
+        use kaspa_seq_commit::hashing::mergeset_context_hash;
         use kaspa_seq_commit::types::MergesetContext;
 
         let selected_parent = ctx.selected_parent();
         let parent_header = self.headers_store.get_header(selected_parent).unwrap();
         let current_blue_score = ctx.ghostdag_data.blue_score;
 
-        let finality_anchor = self.compute_finality_anchor(&ctx.ghostdag_data);
+        let inactivity_shortcut_block = self.compute_inactivity_shortcut_block(&ctx.ghostdag_data);
         let context_hash = mergeset_context_hash(&MergesetContext {
-            timestamp: seq_commit_timestamp(parent_header.timestamp),
+            timestamp: parent_header.timestamp,
             daa_score: header.daa_score,
             blue_score: current_blue_score,
-            finality_anchor,
+            inactivity_shortcut: self.inactivity_shortcut(inactivity_shortcut_block),
         });
 
         let parent_seq_commit = parent_header.accepted_id_merkle_root;
@@ -658,7 +658,7 @@ impl VirtualStateProcessor {
             selected_parent,
             parent_seq_commit,
         );
-        let (parent_lanes_root, parent_active_lanes, _parent_anchor) =
+        let (parent_lanes_root, parent_active_lanes, _parent_shortcut) =
             self.get_parent_smt_metadata(selected_parent, parent_header.blue_score);
         let parent_state = ParentBlockSeqState {
             seq_commit: parent_seq_commit,
@@ -674,7 +674,7 @@ impl VirtualStateProcessor {
             &lane_updates,
             data.miner_payload_leaves,
             selected_parent,
-            finality_anchor,
+            inactivity_shortcut_block,
         );
 
         Ok((hash, build))

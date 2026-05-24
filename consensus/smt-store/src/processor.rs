@@ -525,7 +525,7 @@ impl<'a> SmtProcessor<'a> {
                 payload_and_ctx_digest: ZERO_HASH,
                 payload_root: ZERO_HASH,
                 active_lanes_count: 0,
-                finality_anchor: ZERO_HASH,
+                inactivity_shortcut_block: ZERO_HASH,
             });
         }
 
@@ -539,7 +539,7 @@ impl<'a> SmtProcessor<'a> {
             payload_and_ctx_digest: ZERO_HASH,
             payload_root: ZERO_HASH,
             active_lanes_count: 0,
-            finality_anchor: ZERO_HASH,
+            inactivity_shortcut_block: ZERO_HASH,
         })
     }
 }
@@ -552,13 +552,13 @@ pub struct SmtBuild {
     /// Set by `build_seq_commit` after computing the seq_commit components.
     pub payload_and_ctx_digest: Hash,
     /// Stored so an importer can reconstruct `payload_and_ctx_digest` from
-    /// its components (`mergeset_context_hash(ctx)` + `payload_root`) and
-    /// verify the claimed `finality_anchor` against the header's
-    /// `seq_commit` (= `accepted_id_merkle_root`).
+    /// header fields paired with the derived inactivity-shortcut seq_commit
+    /// and verify the pruning-point header's `seq_commit`
+    /// (= `accepted_id_merkle_root`).
     pub payload_root: Hash,
     pub active_lanes_count: u64,
-    /// KIP-21: cached per-block anchor, surfaced for DA inactivity proofs.
-    pub finality_anchor: Hash,
+    /// KIP-21: block hash whose seq_commit IS the `inactivity_shortcut`.
+    pub inactivity_shortcut_block: Hash,
 }
 
 impl SmtBuild {

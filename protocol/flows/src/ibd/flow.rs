@@ -706,21 +706,26 @@ impl IbdFlow {
 
         let mut stream = SmtStream::new(&self.router, &mut self.incoming_route);
 
-        // Phase 0: receive and verify metadata
+        // Phase 0: receive and verify metadata. Wire ships only the
+        // inactivity_shortcut_block; derive the spec-committed seq_commit
+        // value via headers_store and verify via payload_and_ctx_digest
+        // against pp_header's seq_commit.
         let md = stream.recv_metadata().await?;
         let parent_header = consensus.async_get_header(pp_header.direct_parents()[0]).await.unwrap();
-        // Reconstruct the mergeset context PP was mined against:
-        //  - timestamp: selected parent's timestamp (per `seq_commit_timestamp`)
-        //  - daa_score, blue_score: from the PP header itself
-        //  - finality_anchor: claimed value from the wire
-        // verify_smt_metadata uses these + payload_root to recompute
-        // payload_and_ctx_digest. Matching against the header's seq_commit
-        // (= accepted_id_merkle_root) authenticates the claimed anchor.
+        let inactivity_shortcut = if md.inactivity_shortcut_block == kaspa_hashes::ZERO_HASH {
+            kaspa_hashes::ZERO_HASH
+        } else {
+            consensus
+                .async_get_header(md.inactivity_shortcut_block)
+                .await
+                .map_err(|e| ProtocolError::OtherOwned(format!("inactivity_shortcut_block header not found: {e}")))?
+                .accepted_id_merkle_root
+        };
         let ctx = kaspa_seq_commit::types::MergesetContext {
-            timestamp: kaspa_seq_commit::hashing::seq_commit_timestamp(parent_header.timestamp),
+            timestamp: parent_header.timestamp,
             daa_score: pp_header.daa_score,
             blue_score: pp_header.blue_score,
-            finality_anchor: md.finality_anchor,
+            inactivity_shortcut,
         };
         verify_smt_metadata(
             &SmtMetadata {
@@ -739,7 +744,7 @@ impl IbdFlow {
         let payload_and_ctx_digest = md.payload_and_ctx_digest;
         let payload_root = md.payload_root;
         let expected_count = md.active_lanes_count;
-        let finality_anchor = md.finality_anchor;
+        let inactivity_shortcut_block = md.inactivity_shortcut_block;
 
         // Small queue of already-chunked batches: one in flight + one being processed
         // by the importer is enough headroom; each chunk holds up to SMT_CHUNK_SIZE lanes.
@@ -753,7 +758,7 @@ impl IbdFlow {
                 payload_and_ctx_digest,
                 payload_root,
                 expected_count,
-                finality_anchor,
+                inactivity_shortcut_block,
                 rx,
             )
         });

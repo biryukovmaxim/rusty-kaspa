@@ -7,15 +7,15 @@ pub type LaneId = [u8; 20];
 
 /// Mergeset context fields hashed into the sequencing commitment.
 ///
-/// `finality_anchor` is the `accepted_id_merkle_root` (seq_commit) of the
-/// highest chain block at `blue_score <= current_blue_score - activity_threshold - 1`,
+/// `inactivity_shortcut` is the `accepted_id_merkle_root` (seq_commit) of the
+/// highest chain block at `blue_score <= current_blue_score - finality_depth - 1`,
 /// i.e. the latest block just out of the active-lanes window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MergesetContext {
     pub timestamp: u64,
     pub daa_score: u64,
     pub blue_score: u64,
-    pub finality_anchor: Hash,
+    pub inactivity_shortcut: Hash,
 }
 
 /// Input for computing the next lane tip hash.

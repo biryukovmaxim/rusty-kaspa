@@ -241,16 +241,18 @@ impl<'a, 'b> SmtStream<'a, 'b> {
                 Some(Payload::SmtMetadata(payload)) => {
                     // KIP-21 wire schema: 5 x 32-byte hashes
                     // (lanes_root, payload_and_ctx_digest, payload_root,
-                    //  parent_seq_commit, finality_anchor).
+                    //  parent_seq_commit, inactivity_shortcut_block).
                     let (chunks, rem) = payload.data.as_chunks::<32>();
-                    let &[lanes_root, payload_and_ctx_digest, payload_root, parent_seq_commit, finality_anchor] = chunks else {
+                    let &[lanes_root, payload_and_ctx_digest, payload_root, parent_seq_commit, inactivity_shortcut_block] = chunks
+                    else {
                         return Err(ProtocolError::Other("SmtMetadata data must be exactly 160 bytes"));
                     };
                     if !rem.is_empty() {
                         return Err(ProtocolError::Other("SmtMetadata data must be exactly 160 bytes"));
                     }
-                    let [lanes_root, payload_and_ctx_digest, payload_root, parent_seq_commit, finality_anchor] =
-                        [lanes_root, payload_and_ctx_digest, payload_root, parent_seq_commit, finality_anchor].map(Hash::from_bytes);
+                    let [lanes_root, payload_and_ctx_digest, payload_root, parent_seq_commit, inactivity_shortcut_block] =
+                        [lanes_root, payload_and_ctx_digest, payload_root, parent_seq_commit, inactivity_shortcut_block]
+                            .map(Hash::from_bytes);
                     self.expected_count = payload.active_lanes_count;
                     Ok(kaspa_consensus_core::api::SmtExportMetadata {
                         lanes_root,
@@ -258,7 +260,7 @@ impl<'a, 'b> SmtStream<'a, 'b> {
                         payload_root,
                         parent_seq_commit,
                         active_lanes_count: payload.active_lanes_count,
-                        finality_anchor,
+                        inactivity_shortcut_block,
                     })
                 }
                 Some(Payload::UnexpectedPruningPoint(_)) => Err(ProtocolError::ConsensusError(ConsensusError::UnexpectedPruningPoint)),

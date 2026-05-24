@@ -14,8 +14,8 @@ pub struct SmtMetadata<'a> {
     pub payload_and_ctx_digest: &'a Hash,
     /// Lets the verifier reconstruct `payload_and_ctx_digest` from
     /// `mergeset_context_hash(ctx)` and authenticate the claimed
-    /// `finality_anchor` (carried inside `ctx`) against the header's
-    /// `seq_commit` (= `accepted_id_merkle_root`).
+    /// `ctx.inactivity_shortcut` against the header's `seq_commit`
+    /// (= `accepted_id_merkle_root`).
     pub payload_root: &'a Hash,
     pub parent_seq_commit: &'a Hash,
 }
@@ -47,10 +47,10 @@ pub enum SmtVerifyError {
 ///
 /// Beyond the `seq_commit` + parent linkage check, this also rebuilds
 /// `payload_and_ctx_digest` from `mergeset_context_hash(ctx)` and
-/// `metadata.payload_root` to authenticate `ctx.finality_anchor`. Callers
-/// reconstruct `ctx` from header data (timestamp from the PP's selected
-/// parent, daa_score / blue_score from the PP header) plus the claimed
-/// anchor from the wire.
+/// `metadata.payload_root` to authenticate `ctx.inactivity_shortcut`.
+/// Callers reconstruct `ctx` from header data (timestamp from the PP's
+/// selected parent, daa_score / blue_score from the PP header) plus the
+/// inactivity_shortcut value derived from the wire's block hash.
 pub fn verify_smt_metadata(
     metadata: &SmtMetadata<'_>,
     ctx: &MergesetContext,
@@ -123,7 +123,7 @@ mod tests {
     }
 
     fn sample_ctx() -> MergesetContext {
-        MergesetContext { timestamp: 1_700_000_000, daa_score: 1234, blue_score: 250, finality_anchor: Hash::from_bytes([7; 32]) }
+        MergesetContext { timestamp: 1_700_000_000, daa_score: 1234, blue_score: 250, inactivity_shortcut: Hash::from_bytes([7; 32]) }
     }
 
     #[test]
@@ -175,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_wrong_anchor_detected_via_payload_digest() {
+    fn metadata_wrong_inactivity_shortcut_detected_via_payload_digest() {
         let lr = Hash::from_bytes([1; 32]);
         let pr = Hash::from_bytes([3; 32]);
         let ps = Hash::from_bytes([4; 32]);
@@ -189,7 +189,7 @@ mod tests {
             h.finalize()
         };
         let mut bad_ctx = ctx;
-        bad_ctx.finality_anchor = Hash::from_bytes([0xAB; 32]);
+        bad_ctx.inactivity_shortcut = Hash::from_bytes([0xAB; 32]);
         let md = SmtMetadata { lanes_root: &lr, payload_and_ctx_digest: &pd, payload_root: &pr, parent_seq_commit: &ps };
         assert!(matches!(verify_smt_metadata(&md, &bad_ctx, sc, ps), Err(SmtVerifyError::PayloadAndCtxDigestMismatch { .. })));
     }

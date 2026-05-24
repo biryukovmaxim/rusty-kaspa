@@ -1,7 +1,4 @@
-use crate::{
-    consensus::test_consensus::TestConsensus,
-    model::{services::reachability::ReachabilityService, stores::ghostdag::GhostdagStoreReader},
-};
+use crate::{consensus::test_consensus::TestConsensus, model::services::reachability::ReachabilityService};
 use kaspa_consensus_core::{
     BlockHashSet,
     api::ConsensusApi,
@@ -346,50 +343,26 @@ fn new_miner_data() -> MinerData {
     MinerData::new(ScriptPublicKey::new(0, script), vec![])
 }
 
-// ---------------------------------------------------------------------------
-// KIP-21: compute_finality_anchor - edge-case tests.
-//
-// Activity window is `[current_bs - activity_threshold, current_bs]`. The
-// anchor is the `accepted_id_merkle_root` of the highest chain block at
-// `bs <= current_bs - activity_threshold - 1` (the block "just out of" the
-// window). All tests below run with `finality_depth = 4`, so
-// `activity_threshold = 2`.
-// ---------------------------------------------------------------------------
-
-fn finality_anchor_config() -> kaspa_consensus_core::config::Config {
+fn inactivity_shortcut_config() -> kaspa_consensus_core::config::Config {
     ConfigBuilder::new(MAINNET_PARAMS)
         .skip_proof_of_work()
         .edit_consensus_params(|p| {
-            // activity_threshold = finality_depth / 2 = 2
-            p.finality_depth = 4;
+            p.finality_depth = 2;
             p.toccata_activation = ForkActivation::always();
         })
         .build()
 }
 
-/// **ZERO branch** - `current_bs <= activity_threshold` returns `ZERO_HASH`.
-///
-/// There is no chain block "out of the window" yet: the entire chain is still
-/// inside the activity window from `current`'s POV. Runtime processing hits
-/// the same early-return at line 1 of `compute_finality_anchor`, so the
-/// recorded anchor in `SmtBlockMetadata` matches what the function would
-/// return for any caller (runtime or recomputed).
-///
-/// ```text
-///   bs:   0     1     2
-///   G ── B1 ── B2
-///         ↑     ↑
-///         bs=1  bs=2          activity_threshold = 2
-///         AT branch: bs <= AT  →  anchor = ZERO_HASH
-/// ```
+/// Blocks with `bs <= finality_depth` have no resolvable shortcut yet;
+/// the recorded `inactivity_shortcut_block` is `ZERO_HASH`.
 #[tokio::test]
-async fn finality_anchor_is_zero_within_activity_threshold() {
-    let config = finality_anchor_config();
+async fn inactivity_shortcut_block_is_zero_within_finality_depth() {
+    let config = inactivity_shortcut_config();
     let mut ctx = TestContext::new(TestConsensus::new(&config));
-    let activity_threshold = config.activity_threshold();
-    assert_eq!(activity_threshold, 2);
+    let finality_depth = config.finality_depth();
+    assert_eq!(finality_depth, 2);
 
-    // Mine B1, B2 - both have bs ∈ {1, 2} ≤ activity_threshold.
+    // Mine B1, B2 - both have bs ∈ {1, 2} ≤ finality_depth.
     let mut chain = vec![config.genesis.hash];
     for _ in 0..2 {
         ctx.build_block_template_row(0..1).validate_and_insert_row().await;
@@ -398,44 +371,21 @@ async fn finality_anchor_is_zero_within_activity_threshold() {
 
     for hash in chain.iter().copied().skip(1) {
         let header = ctx.consensus.get_header(hash).unwrap();
-        assert!(header.blue_score <= activity_threshold);
+        assert!(header.blue_score <= finality_depth);
         let meta = ctx.consensus.smt_block_metadata(hash);
-        assert_eq!(meta.finality_anchor, kaspa_hashes::ZERO_HASH, "bs={}", header.blue_score);
+        assert_eq!(meta.inactivity_shortcut_block, kaspa_hashes::ZERO_HASH, "bs={}", header.blue_score);
     }
 }
 
-/// **1a branch** - runtime-processed blocks resolve through the coinbase
-/// lane SMT lookup with a real `block_hash`, so the anchor is exactly the
-/// `accepted_id_merkle_root` of the chain block at `target_bs`.
-///
-/// Every block updates the coinbase lane via its selected parent's coinbase
-/// tx, so for a runtime chain the lane carries one entry per chain block
-/// with the real (non-`ZERO_HASH`) block hash. The SMT lookup at
-/// `target_bs` therefore returns that exact block - no IBD sentinel, no
-/// segment walk, no PP fallback.
-///
-/// ```text
-///   bs:   0     1     2     3     4     5     6
-///   G ── B1 ── B2 ── B3 ── B4 ── B5 ── B6
-///                     ↑                 ↑
-///                     anchor(B6)        current = B6  (bs=6)
-///                     target_bs = 6 - 2 - 1 = 3
-///                     → chain block at bs≤3 → B3
-///
-///   coinbase lane    (bs=1, B1)
-///   entries          (bs=2, B2)
-///   (real hashes,    (bs=3, B3) ← lookup target
-///    not ZERO_HASH)  (bs=4, B4)
-///                    (bs=5, B5)
-///                    (bs=6, B6)
-/// ```
+/// Tip at `bs = finality_depth + 4` records the chain block at
+/// `bs = target_bs = tip_bs - finality_depth - 1` as its
+/// inactivity_shortcut block hash.
 #[tokio::test]
-async fn finality_anchor_runtime_resolves_via_coinbase_lane() {
-    let config = finality_anchor_config();
+async fn inactivity_shortcut_resolves_to_chain_block_at_target_bs() {
+    let config = inactivity_shortcut_config();
     let mut ctx = TestContext::new(TestConsensus::new(&config));
-    let activity_threshold = config.activity_threshold();
+    let finality_depth = config.finality_depth();
 
-    // Mine a single-tip chain of length 6: B1..B6 with bs = 1..6.
     let mut chain = Vec::new();
     for _ in 0..6 {
         ctx.build_block_template_row(0..1).validate_and_insert_row().await;
@@ -445,123 +395,29 @@ async fn finality_anchor_runtime_resolves_via_coinbase_lane() {
     let tip = *chain.last().unwrap();
     let tip_header = ctx.consensus.get_header(tip).unwrap();
     assert_eq!(tip_header.blue_score, 6);
-    let target_bs = tip_header.blue_score - activity_threshold - 1; // = 3
+    let target_bs = tip_header.blue_score - finality_depth - 1; // = 3
 
-    // Locate the chain block at bs == target_bs in our mined chain.
     let expected_block = *chain.iter().find(|h| ctx.consensus.get_header(**h).unwrap().blue_score == target_bs).unwrap();
-    let expected_anchor = ctx.consensus.get_header(expected_block).unwrap().accepted_id_merkle_root;
-
-    let recorded = ctx.consensus.smt_block_metadata(tip).finality_anchor;
-    assert_eq!(recorded, expected_anchor);
+    let recorded = ctx.consensus.smt_block_metadata(tip).inactivity_shortcut_block;
+    assert_eq!(recorded, expected_block);
 }
 
-/// The SMT coinbase-lane lookup can miss `target_bs` for two reasons:
-/// the lane carries only one tip per lane_key, and IBD ships only the
-/// active tip per lane in `[pp.bs - F/2, pp.bs]`. In either case the
-/// fallback must produce the same anchor as the 1a (real `block_hash`)
-/// path on the originating node.
-///
-/// `BlockDepthManager::calc_block_at_blue_score` is the deterministic
-/// fallback: it walks `depth_store.finality_point(sp)` forward to the
-/// chain block at the highest `blue_score <= target_bs`, using only
-/// consensus state shared by syncer and syncee.
-///
-/// ```text
-///   activity_threshold = 2  (finality_depth = 4)
-///
-///   bs:  0     1     2     3     4     5     6
-///   G    B1    B2    B3    B4    B5    B6
-///                     ^                 ^
-///                     anchor target     current block (B6)
-///                     target_bs = 3     selected_parent = B5
-///
-///   Fallback walk from sp = B5:
-///     finality_point(B5) -> some chain block at bs <= 5 - F = 1
-///     forward iterator yields B1, B2, B3, B4, B5
-///     advance while bs <= 3:  B1 ok, B2 ok, B3 ok, B4 > 3 break
-///     result = B3
-///     return header(B3).accepted_id_merkle_root
-///
-///   Equals header(B3).seq_commit, which 1a also returns from the lane lookup.
-/// ```
+/// Consecutive chain blocks: the inactivity_shortcut advances by one chain
+/// block per parent-to-child step, since `target_bs` grows in lockstep with
+/// `blue_score` on a no-merge chain.
 #[tokio::test]
-async fn finality_anchor_fallback_matches_mining_time_for_genesis_hpp() {
-    let config = finality_anchor_config();
+async fn inactivity_shortcut_advances_one_block_per_chain_step() {
+    let config = inactivity_shortcut_config();
     let mut ctx = TestContext::new(TestConsensus::new(&config));
 
+    let mut chain = vec![config.genesis.hash];
     for _ in 0..6 {
         ctx.build_block_template_row(0..1).validate_and_insert_row().await;
+        chain.push(ctx.consensus.get_sink());
     }
-    let b6 = ctx.consensus.get_sink();
-    let b6_header = ctx.consensus.get_header(b6).unwrap();
-    assert_eq!(b6_header.blue_score, 6);
-    assert_eq!(b6_header.pruning_point, config.genesis.hash);
 
-    let mut walker = b6;
-    let b3 = loop {
-        let header = ctx.consensus.get_header(walker).unwrap();
-        if header.blue_score == 3 {
-            break walker;
-        }
-        walker = header.direct_parents()[0];
-    };
-    let expected_anchor = ctx.consensus.get_header(b3).unwrap().accepted_id_merkle_root;
-
-    assert_eq!(ctx.consensus.smt_block_metadata(b6).finality_anchor, expected_anchor, "1a recorded anchor");
-
-    let b6_ghostdag = ctx.consensus.ghostdag_store().get_data(b6).unwrap();
-    let vp = ctx.consensus.virtual_processor();
-    let chain_block = vp.depth_manager.calc_block_at_blue_score(&b6_ghostdag, 3);
-    let walked_anchor = ctx.consensus.get_header(chain_block).unwrap().accepted_id_merkle_root;
-    assert_eq!(walked_anchor, expected_anchor);
-}
-
-/// **1c branch (default)** - `target_bs` is below every entry in the
-/// coinbase lane and `header_pruning_point` has no stored
-/// `SmtBlockMetadata` (the chain is too young for PP to have advanced past
-/// genesis). The function falls through 1a → 1b → 1c and returns
-/// `ZERO_HASH` via the `unwrap_or` default.
-///
-/// This is *not* the same code path as the `current_bs <= activity_threshold`
-/// early return - the SMT lookup actually runs, returns `None`, and the
-/// metadata lookup on genesis also returns `Err`. The observable result is
-/// `ZERO_HASH`, which matches runtime behavior because at this chain depth
-/// no anchor block exists yet.
-///
-/// ```text
-///   bs:   0     1     2     3
-///   G ── B1 ── B2 ── B3
-///                     ↑
-///                     current = B3       (bs=3)
-///                     target_bs = 3 - 2 - 1 = 0
-///
-///   coinbase lane entries: (bs=1, B1) (bs=2, B2) (bs=3, B3)
-///   lookup with bounds(target=0, min=0):
-///     scans bs<=0 → no entries (lane never touched at bs=0; genesis
-///                  is not processed through the lane path)
-///     → None  →  1c
-///
-///   1c: smt_metadata_store.get(genesis) → Err
-///       → unwrap_or(ZERO_HASH)  →  ZERO_HASH
-/// ```
-#[tokio::test]
-async fn finality_anchor_falls_through_to_pp_metadata_when_lane_lookup_misses() {
-    let config = finality_anchor_config();
-    let mut ctx = TestContext::new(TestConsensus::new(&config));
-    let activity_threshold = config.activity_threshold();
-
-    // Mine exactly activity_threshold + 1 blocks so the tip's target_bs == 0
-    // (below the lowest lane entry, which is at bs = 1).
-    for _ in 0..(activity_threshold + 1) {
-        ctx.build_block_template_row(0..1).validate_and_insert_row().await;
+    for (i, hash) in chain.iter().copied().enumerate().skip(4) {
+        let expected = chain[i - 3];
+        assert_eq!(ctx.consensus.smt_block_metadata(hash).inactivity_shortcut_block, expected, "block index {i}");
     }
-    let tip = ctx.consensus.get_sink();
-    let tip_header = ctx.consensus.get_header(tip).unwrap();
-    assert_eq!(tip_header.blue_score, activity_threshold + 1);
-
-    // PP is still genesis (PP advancement hasn't kicked in yet for such a
-    // short chain), and genesis has no SmtBlockMetadata → ZERO_HASH.
-    assert_eq!(tip_header.pruning_point, config.genesis.hash);
-    let recorded = ctx.consensus.smt_block_metadata(tip).finality_anchor;
-    assert_eq!(recorded, kaspa_hashes::ZERO_HASH);
 }
