@@ -757,7 +757,6 @@ impl VirtualStateProcessor {
 
         Ok(SmtExportMetadata {
             lanes_root,
-            payload_and_ctx_digest: meta.payload_and_ctx_digest,
             payload_root: meta.payload_root,
             parent_seq_commit,
             active_lanes_count: meta.active_lanes_count,

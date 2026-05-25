@@ -1508,12 +1508,7 @@ fn assert_chain_seq_commit_lane(consensus: &TestConsensus, accepting_block: Hash
         inactivity_shortcut,
     };
     verify_smt_metadata(
-        &SmtMetadata {
-            lanes_root: &proof.lanes_root,
-            payload_and_ctx_digest: &proof.payload_and_ctx_digest,
-            payload_root: &proof.payload_root,
-            parent_seq_commit: &proof.parent_seq_commit,
-        },
+        &SmtMetadata { lanes_root: &proof.lanes_root, payload_root: &proof.payload_root, parent_seq_commit: &proof.parent_seq_commit },
         &ctx,
         proof.expected_seq_commit,
         proof.parent_seq_commit,

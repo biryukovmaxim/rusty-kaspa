@@ -551,10 +551,6 @@ pub struct SmtBuild {
     lane_changes: BlockLaneChanges,
     /// Set by `build_seq_commit` after computing the seq_commit components.
     pub payload_and_ctx_digest: Hash,
-    /// Stored so an importer can reconstruct `payload_and_ctx_digest` from
-    /// header fields paired with the derived inactivity-shortcut seq_commit
-    /// and verify the pruning-point header's `seq_commit`
-    /// (= `accepted_id_merkle_root`).
     pub payload_root: Hash,
     pub active_lanes_count: u64,
     /// KIP-21: block hash whose seq_commit IS the `inactivity_shortcut`.

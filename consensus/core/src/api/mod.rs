@@ -73,10 +73,6 @@ pub type ImportLaneBatchIterator<'a> = &'a mut (dyn Iterator<Item = Vec<ImportLa
 #[derive(Clone, Debug)]
 pub struct SmtExportMetadata {
     pub lanes_root: Hash,
-    pub payload_and_ctx_digest: Hash,
-    /// Lets the importer reconstruct `payload_and_ctx_digest` from PP header
-    /// fields paired with `inactivity_shortcut`, and authenticate it against
-    /// the header's `seq_commit` (= `accepted_id_merkle_root`).
     pub payload_root: Hash,
     pub parent_seq_commit: Hash,
     pub active_lanes_count: u64,

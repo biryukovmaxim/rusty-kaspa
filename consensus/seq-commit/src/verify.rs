@@ -11,7 +11,6 @@ use kaspa_hashes::{Hash, HasherBase, SeqCommitMerkleBranch};
 #[derive(Clone, Copy, Debug)]
 pub struct SmtMetadata<'a> {
     pub lanes_root: &'a Hash,
-    pub payload_and_ctx_digest: &'a Hash,
     pub payload_root: &'a Hash,
     pub parent_seq_commit: &'a Hash,
 }
@@ -24,9 +23,6 @@ pub enum SmtVerifyError {
 
     #[error("parent_seq_commit mismatch: expected {expected}, got {got}")]
     ParentSeqCommitMismatch { expected: Hash, got: Hash },
-
-    #[error("payload_and_ctx_digest mismatch: expected {expected}, computed {computed}")]
-    PayloadAndCtxDigestMismatch { expected: Hash, computed: Hash },
 
     #[error("proof verification failed for lane at index {index}")]
     ProofFailed { index: usize },
@@ -54,12 +50,8 @@ pub fn verify_smt_metadata(
 
     let context_hash = mergeset_context_hash(ctx);
     let computed_pd = payload_and_context_digest(&context_hash, metadata.payload_root);
-    if computed_pd != *metadata.payload_and_ctx_digest {
-        return Err(SmtVerifyError::PayloadAndCtxDigestMismatch { expected: *metadata.payload_and_ctx_digest, computed: computed_pd });
-    }
 
-    let state_root =
-        seq_state_root(&SeqState { lanes_root: metadata.lanes_root, payload_and_ctx_digest: metadata.payload_and_ctx_digest });
+    let state_root = seq_state_root(&SeqState { lanes_root: metadata.lanes_root, payload_and_ctx_digest: &computed_pd });
 
     let computed = {
         let mut h = SeqCommitMerkleBranch::new();
@@ -130,17 +122,16 @@ mod tests {
             h.finalize()
         };
 
-        let md = SmtMetadata { lanes_root: &lr, payload_and_ctx_digest: &pd, payload_root: &pr, parent_seq_commit: &ps };
+        let md = SmtMetadata { lanes_root: &lr, payload_root: &pr, parent_seq_commit: &ps };
         assert!(verify_smt_metadata(&md, &ctx, sc, ps).is_ok());
     }
 
     #[test]
     fn metadata_wrong_parent() {
         let lr = Hash::from_bytes([1; 32]);
-        let pd = Hash::from_bytes([2; 32]);
         let pr = Hash::from_bytes([3; 32]);
         let ps = Hash::from_bytes([4; 32]);
-        let md = SmtMetadata { lanes_root: &lr, payload_and_ctx_digest: &pd, payload_root: &pr, parent_seq_commit: &ps };
+        let md = SmtMetadata { lanes_root: &lr, payload_root: &pr, parent_seq_commit: &ps };
         assert!(matches!(
             verify_smt_metadata(&md, &sample_ctx(), ZERO_HASH, Hash::from_bytes([99; 32])),
             Err(SmtVerifyError::ParentSeqCommitMismatch { .. })
@@ -153,17 +144,17 @@ mod tests {
         let pr = Hash::from_bytes([3; 32]);
         let ps = Hash::from_bytes([4; 32]);
         let ctx = sample_ctx();
-        let ch = mergeset_context_hash(&ctx);
-        let pd = payload_and_context_digest(&ch, &pr);
-        let md = SmtMetadata { lanes_root: &lr, payload_and_ctx_digest: &pd, payload_root: &pr, parent_seq_commit: &ps };
+        let md = SmtMetadata { lanes_root: &lr, payload_root: &pr, parent_seq_commit: &ps };
         assert!(matches!(
             verify_smt_metadata(&md, &ctx, Hash::from_bytes([99; 32]), ps),
             Err(SmtVerifyError::SeqCommitMismatch { .. })
         ));
     }
 
+    // A perturbed `MergesetContext.inactivity_shortcut` flows into `seq_state_root` via
+    // recomputed `payload_and_ctx_digest`, so the failure now surfaces as `SeqCommitMismatch`.
     #[test]
-    fn metadata_wrong_inactivity_shortcut_detected_via_payload_digest() {
+    fn metadata_wrong_inactivity_shortcut_detected_via_seq_commit() {
         let lr = Hash::from_bytes([1; 32]);
         let pr = Hash::from_bytes([3; 32]);
         let ps = Hash::from_bytes([4; 32]);
@@ -178,8 +169,8 @@ mod tests {
         };
         let mut bad_ctx = ctx;
         bad_ctx.inactivity_shortcut = Hash::from_bytes([0xAB; 32]);
-        let md = SmtMetadata { lanes_root: &lr, payload_and_ctx_digest: &pd, payload_root: &pr, parent_seq_commit: &ps };
-        assert!(matches!(verify_smt_metadata(&md, &bad_ctx, sc, ps), Err(SmtVerifyError::PayloadAndCtxDigestMismatch { .. })));
+        let md = SmtMetadata { lanes_root: &lr, payload_root: &pr, parent_seq_commit: &ps };
+        assert!(matches!(verify_smt_metadata(&md, &bad_ctx, sc, ps), Err(SmtVerifyError::SeqCommitMismatch { .. })));
     }
 
     #[test]
