@@ -354,26 +354,27 @@ fn inactivity_shortcut_config() -> kaspa_consensus_core::config::Config {
 }
 
 /// Blocks with `bs <= finality_depth` have no resolvable shortcut yet;
-/// the recorded `inactivity_shortcut_block` is `ZERO_HASH`.
+/// the recorded `inactivity_shortcut_block` is the selected parent (a
+/// pre-hardening stand-in whose seq_commit folds to `ZERO_HASH`).
 #[tokio::test]
-async fn inactivity_shortcut_block_is_zero_within_finality_depth() {
+async fn inactivity_shortcut_block_stands_in_with_sp_within_finality_depth() {
     let config = inactivity_shortcut_config();
     let mut ctx = TestContext::new(TestConsensus::new(&config));
     let finality_depth = config.finality_depth();
     assert_eq!(finality_depth, 2);
 
-    // Mine B1, B2 - both have bs ∈ {1, 2} ≤ finality_depth.
     let mut chain = vec![config.genesis.hash];
     for _ in 0..2 {
         ctx.build_block_template_row(0..1).validate_and_insert_row().await;
         chain.push(ctx.consensus.get_sink());
     }
 
-    for hash in chain.iter().copied().skip(1) {
+    for (i, hash) in chain.iter().copied().enumerate().skip(1) {
         let header = ctx.consensus.get_header(hash).unwrap();
         assert!(header.blue_score <= finality_depth);
         let meta = ctx.consensus.smt_block_metadata(hash);
-        assert_eq!(meta.inactivity_shortcut_block(), kaspa_hashes::ZERO_HASH, "bs={}", header.blue_score);
+        let expected_sp = chain[i - 1];
+        assert_eq!(meta.inactivity_shortcut_block(), expected_sp, "bs={}", header.blue_score);
     }
 }
 

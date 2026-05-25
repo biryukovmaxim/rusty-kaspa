@@ -1493,10 +1493,17 @@ fn chain_seq_commit_context_hash(consensus: &TestConsensus, accepting_block: Has
 }
 
 fn inactivity_shortcut_for(consensus: &TestConsensus, inactivity_shortcut_block: Hash) -> Hash {
-    if inactivity_shortcut_block == kaspa_hashes::ZERO_HASH || inactivity_shortcut_block == consensus.params().genesis.hash {
+    assert_ne!(inactivity_shortcut_block, kaspa_hashes::ZERO_HASH);
+    if inactivity_shortcut_block == consensus.params().genesis.hash {
         return kaspa_hashes::ZERO_HASH;
     }
-    consensus.get_header(inactivity_shortcut_block).unwrap().accepted_id_merkle_root
+    let header = consensus.get_header(inactivity_shortcut_block).unwrap();
+    if header.blue_score < consensus.params().finality_depth() + 1
+        || !consensus.params().zk_hardening_activation.is_active(header.daa_score)
+    {
+        return kaspa_hashes::ZERO_HASH;
+    }
+    header.accepted_id_merkle_root
 }
 
 fn assert_chain_seq_commit_lane(consensus: &TestConsensus, accepting_block: Hash, activity: &ChainSeqCommitLaneActivity) {
