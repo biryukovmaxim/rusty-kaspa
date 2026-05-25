@@ -617,7 +617,6 @@ impl VirtualStateProcessor {
         let commit = seq_commit(&SeqCommitInput { parent_seq_commit: &parent.seq_commit, state_root: &state_root });
 
         // 6. Store metadata on the build for persistence
-        build.payload_and_ctx_digest = pd;
         build.payload_root = payload_root;
         build.active_lanes_count = parent.active_lanes_count + new_lane_count - expired_count;
         build.inactivity_shortcut_block = inactivity_shortcut_block;

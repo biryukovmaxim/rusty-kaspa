@@ -515,7 +515,6 @@ impl ConsensusSessionOwned {
         &self,
         new_pruning_point: Hash,
         lanes_root: Hash,
-        payload_and_ctx_digest: Hash,
         payload_root: Hash,
         expected_lane_count: u64,
         inactivity_shortcut_block: Hash,
@@ -525,7 +524,6 @@ impl ConsensusSessionOwned {
         self.consensus.import_pruning_point_smt(
             new_pruning_point,
             lanes_root,
-            payload_and_ctx_digest,
             payload_root,
             expected_lane_count,
             inactivity_shortcut_block,

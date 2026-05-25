@@ -1154,7 +1154,6 @@ impl ConsensusApi for Consensus {
         &self,
         new_pruning_point: Hash,
         lanes_root: Hash,
-        payload_and_ctx_digest: Hash,
         payload_root: Hash,
         expected_lane_count: u64,
         inactivity_shortcut_block: Hash,
@@ -1198,7 +1197,7 @@ impl ConsensusApi for Consensus {
             .insert_batch(
                 &mut batch,
                 new_pruning_point,
-                SmtBlockMetadata::new(payload_and_ctx_digest, payload_root, actual_count, inactivity_shortcut_block),
+                SmtBlockMetadata::new(payload_root, inactivity_shortcut_block, actual_count),
             )
             .unwrap();
         self.db.write(batch).unwrap();

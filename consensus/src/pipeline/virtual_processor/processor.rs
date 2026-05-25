@@ -527,13 +527,12 @@ impl VirtualStateProcessor {
         self.pruning_samples_store.insert_batch(&mut batch, current, pruning_sample_from_pov).idempotent().unwrap();
         // Flush SMT branch/lane/score-index changes (KIP-21) alongside UTXO data
         if let Some(build) = smt_build {
-            let pd = build.payload_and_ctx_digest;
             let pr = build.payload_root;
             let alc = build.active_lanes_count;
             let shortcut_block = build.inactivity_shortcut_block;
             build.flush(&self.smt_stores, &mut batch, blue_score, current).unwrap();
             use crate::model::stores::smt_metadata::SmtBlockMetadata;
-            self.smt_metadata_store.insert_batch(&mut batch, current, SmtBlockMetadata::new(pd, pr, alc, shortcut_block)).unwrap();
+            self.smt_metadata_store.insert_batch(&mut batch, current, SmtBlockMetadata::new(pr, shortcut_block, alc)).unwrap();
         }
         let write_guard = self.statuses_store.set_batch(&mut batch, current, StatusUTXOValid).unwrap();
         self.db.write(batch).unwrap();
@@ -757,10 +756,10 @@ impl VirtualStateProcessor {
 
         Ok(SmtExportMetadata {
             lanes_root,
-            payload_root: meta.payload_root,
+            payload_root: meta.payload_root(),
             parent_seq_commit,
-            active_lanes_count: meta.active_lanes_count,
-            inactivity_shortcut_block: meta.inactivity_shortcut_block,
+            active_lanes_count: meta.active_lanes_count(),
+            inactivity_shortcut_block: meta.inactivity_shortcut_block(),
         })
     }
 
@@ -811,7 +810,7 @@ impl VirtualStateProcessor {
         }
 
         let search_from = if let Some(sp_inactivity_shortcut_block) =
-            self.smt_metadata_store.get(selected_parent).map(|md| md.inactivity_shortcut_block).optional().unwrap()
+            self.smt_metadata_store.get(selected_parent).map(|md| md.inactivity_shortcut_block()).optional().unwrap()
             && sp_inactivity_shortcut_block != ZERO_HASH
         {
             sp_inactivity_shortcut_block
@@ -849,7 +848,7 @@ impl VirtualStateProcessor {
         let (active_lanes_count, inactivity_shortcut_block) = self
             .smt_metadata_store
             .get(selected_parent)
-            .map(|meta| (meta.active_lanes_count, meta.inactivity_shortcut_block))
+            .map(|meta| (meta.active_lanes_count(), meta.inactivity_shortcut_block()))
             .unwrap_or((0, ZERO_HASH));
         let lanes_root = self.smt_stores.get_lanes_root(SmtReadBounds::for_pov(parent_blue_score, self.finality_depth), |bh| {
             self.is_smt_canonical(bh, selected_parent)

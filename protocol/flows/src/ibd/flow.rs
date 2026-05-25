@@ -685,7 +685,6 @@ impl IbdFlow {
     async fn sync_new_smt_state(&mut self, consensus: &ConsensusProxy, pruning_point: Hash) -> Result<(), ProtocolError> {
         use super::streams::SmtStream;
         use kaspa_p2p_lib::pb::RequestPruningPointSmtStateMessage;
-        use kaspa_seq_commit::hashing::{mergeset_context_hash, payload_and_context_digest};
         use kaspa_seq_commit::verify::{SmtMetadata, verify_smt_metadata};
 
         let pp_header = consensus.async_get_header(pruning_point).await.unwrap();
@@ -739,10 +738,6 @@ impl IbdFlow {
         )
         .map_err(|e| ProtocolError::OtherOwned(format!("SMT metadata verification failed: {e}")))?;
 
-        // Recompute payload_and_ctx_digest from the verified context. It's no
-        // longer on the wire (`verify_smt_metadata` derives it internally too),
-        // but the import API still persists it on `SmtBlockMetadata`.
-        let payload_and_ctx_digest = payload_and_context_digest(&mergeset_context_hash(&ctx), &md.payload_root);
         let lanes_root = md.lanes_root;
         let payload_root = md.payload_root;
         let expected_count = md.active_lanes_count;
@@ -757,7 +752,6 @@ impl IbdFlow {
             consensus_for_import.import_pruning_point_smt(
                 pruning_point,
                 lanes_root,
-                payload_and_ctx_digest,
                 payload_root,
                 expected_count,
                 inactivity_shortcut_block,

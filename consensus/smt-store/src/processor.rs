@@ -522,7 +522,6 @@ impl<'a> SmtProcessor<'a> {
                 root: self.current_lanes_root,
                 node_changes: SmtNodeChanges::new(),
                 lane_changes: self.lane_changes,
-                payload_and_ctx_digest: ZERO_HASH,
                 payload_root: ZERO_HASH,
                 active_lanes_count: 0,
                 inactivity_shortcut_block: ZERO_HASH,
@@ -536,7 +535,6 @@ impl<'a> SmtProcessor<'a> {
             root,
             node_changes,
             lane_changes: self.lane_changes,
-            payload_and_ctx_digest: ZERO_HASH,
             payload_root: ZERO_HASH,
             active_lanes_count: 0,
             inactivity_shortcut_block: ZERO_HASH,
@@ -549,8 +547,6 @@ pub struct SmtBuild {
     pub root: Hash,
     node_changes: SmtNodeChanges,
     lane_changes: BlockLaneChanges,
-    /// Set by `build_seq_commit` after computing the seq_commit components.
-    pub payload_and_ctx_digest: Hash,
     pub payload_root: Hash,
     pub active_lanes_count: u64,
     /// KIP-21: block hash whose seq_commit IS the `inactivity_shortcut`.

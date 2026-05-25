@@ -307,7 +307,6 @@ pub trait ConsensusApi: Send + Sync {
         &self,
         _new_pruning_point: Hash,
         _lanes_root: Hash,
-        _payload_and_ctx_digest: Hash,
         _payload_root: Hash,
         _expected_lane_count: u64,
         _inactivity_shortcut_block: Hash,

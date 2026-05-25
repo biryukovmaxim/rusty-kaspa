@@ -48,7 +48,6 @@ pub struct TestConsensus {
 
 pub struct TestSeqCommitLaneProof {
     pub lanes_root: Hash,
-    pub payload_and_ctx_digest: Hash,
     pub payload_root: Hash,
     pub parent_seq_commit: Hash,
     pub expected_seq_commit: Hash,
@@ -260,8 +259,7 @@ impl TestConsensus {
 
         TestSeqCommitLaneProof {
             lanes_root,
-            payload_and_ctx_digest: metadata.payload_and_ctx_digest,
-            payload_root: metadata.payload_root,
+            payload_root: metadata.payload_root(),
             parent_seq_commit: parent_header.accepted_id_merkle_root,
             expected_seq_commit: header.accepted_id_merkle_root,
             parent_lane_tip,

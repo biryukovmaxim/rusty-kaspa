@@ -373,7 +373,7 @@ async fn inactivity_shortcut_block_is_zero_within_finality_depth() {
         let header = ctx.consensus.get_header(hash).unwrap();
         assert!(header.blue_score <= finality_depth);
         let meta = ctx.consensus.smt_block_metadata(hash);
-        assert_eq!(meta.inactivity_shortcut_block, kaspa_hashes::ZERO_HASH, "bs={}", header.blue_score);
+        assert_eq!(meta.inactivity_shortcut_block(), kaspa_hashes::ZERO_HASH, "bs={}", header.blue_score);
     }
 }
 
@@ -398,7 +398,7 @@ async fn inactivity_shortcut_resolves_to_chain_block_at_target_bs() {
     let target_bs = tip_header.blue_score - finality_depth - 1; // = 3
 
     let expected_block = *chain.iter().find(|h| ctx.consensus.get_header(**h).unwrap().blue_score == target_bs).unwrap();
-    let recorded = ctx.consensus.smt_block_metadata(tip).inactivity_shortcut_block;
+    let recorded = ctx.consensus.smt_block_metadata(tip).inactivity_shortcut_block();
     assert_eq!(recorded, expected_block);
 }
 
@@ -418,6 +418,6 @@ async fn inactivity_shortcut_advances_one_block_per_chain_step() {
 
     for (i, hash) in chain.iter().copied().enumerate().skip(4) {
         let expected = chain[i - 3];
-        assert_eq!(ctx.consensus.smt_block_metadata(hash).inactivity_shortcut_block, expected, "block index {i}");
+        assert_eq!(ctx.consensus.smt_block_metadata(hash).inactivity_shortcut_block(), expected, "block index {i}");
     }
 }
