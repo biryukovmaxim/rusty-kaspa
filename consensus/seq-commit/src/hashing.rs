@@ -48,15 +48,15 @@ pub fn lane_tip_next(input: &LaneTipInput) -> Hash {
 }
 
 /// Compute the mergeset context hash:
-/// `H_mergeset_context(le_u64(timestamp) || le_u64(daa_score) || le_u64(blue_score) || inactivity_shortcut)`.
+/// `H_mergeset_context(le_u64(timestamp) || le_u64(daa_score) || le_u64(blue_score) [|| inactivity_shortcut])`.
+/// The shortcut bytes are folded in only when `Some(_)` (post-activation).
 #[inline]
 pub fn mergeset_context_hash(ctx: &MergesetContext) -> Hash {
     let mut hasher = SeqCommitMergesetContext::new();
-    hasher
-        .update(ctx.timestamp.to_le_bytes())
-        .update(ctx.daa_score.to_le_bytes())
-        .update(ctx.blue_score.to_le_bytes())
-        .update(ctx.inactivity_shortcut);
+    hasher.update(ctx.timestamp.to_le_bytes()).update(ctx.daa_score.to_le_bytes()).update(ctx.blue_score.to_le_bytes());
+    if let Some(shortcut) = ctx.inactivity_shortcut {
+        hasher.update(shortcut);
+    }
     hasher.finalize()
 }
 
@@ -245,7 +245,7 @@ mod tests {
             timestamp: 1000,
             daa_score: 500,
             blue_score: 250,
-            inactivity_shortcut: ZERO_HASH,
+            inactivity_shortcut: Some(ZERO_HASH),
         });
         // Determinism sanity: golden bytes are pinned below after regeneration.
         assert_eq!(
@@ -254,28 +254,45 @@ mod tests {
                 timestamp: 1000,
                 daa_score: 500,
                 blue_score: 250,
-                inactivity_shortcut: ZERO_HASH
+                inactivity_shortcut: Some(ZERO_HASH)
             })
         );
         // Anchor must contribute: changing it must change the hash.
         assert_ne!(
             actual,
-            mergeset_context_hash(&MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: h(1) })
+            mergeset_context_hash(&MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: Some(h(1)) })
         );
     }
 
     #[test]
     fn test_mergeset_context_hash_different_inputs() {
-        let a = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: ZERO_HASH };
-        let b = MergesetContext { timestamp: 1001, daa_score: 500, blue_score: 250, inactivity_shortcut: ZERO_HASH };
-        let c = MergesetContext { timestamp: 1000, daa_score: 501, blue_score: 250, inactivity_shortcut: ZERO_HASH };
-        let d = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 251, inactivity_shortcut: ZERO_HASH };
-        let e = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: h(7) };
+        let a = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: Some(ZERO_HASH) };
+        let b = MergesetContext { timestamp: 1001, daa_score: 500, blue_score: 250, inactivity_shortcut: Some(ZERO_HASH) };
+        let c = MergesetContext { timestamp: 1000, daa_score: 501, blue_score: 250, inactivity_shortcut: Some(ZERO_HASH) };
+        let d = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 251, inactivity_shortcut: Some(ZERO_HASH) };
+        let e = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: Some(h(7)) };
         let ha = mergeset_context_hash(&a);
         assert_ne!(ha, mergeset_context_hash(&b));
         assert_ne!(ha, mergeset_context_hash(&c));
         assert_ne!(ha, mergeset_context_hash(&d));
         assert_ne!(ha, mergeset_context_hash(&e));
+    }
+
+    /// KIP-21 activation gate: when inactivity_shortcut is None (pre-activation),
+    /// the shortcut bytes are not folded in, so the hash must differ from a
+    /// post-activation hash that folds in even ZERO_HASH bytes.
+    #[test]
+    fn pre_activation_omits_shortcut_from_hash() {
+        let pre = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: None };
+        let post_zero = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: Some(ZERO_HASH) };
+        let post_h7 =
+            MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: Some(h(7)) };
+        let hpre = mergeset_context_hash(&pre);
+        let hpost_zero = mergeset_context_hash(&post_zero);
+        let hpost_h7 = mergeset_context_hash(&post_h7);
+        assert_ne!(hpre, hpost_zero, "None vs Some(ZERO_HASH) must hash differently");
+        assert_ne!(hpre, hpost_h7);
+        assert_ne!(hpost_zero, hpost_h7);
     }
 
     #[test]
@@ -467,7 +484,7 @@ mod tests {
             timestamp: 1_700_000_000,
             daa_score: 100_000,
             blue_score: 50_000,
-            inactivity_shortcut: ZERO_HASH,
+            inactivity_shortcut: Some(ZERO_HASH),
         });
 
         let lk = lane_key(&lane_id);

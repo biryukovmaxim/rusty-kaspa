@@ -7,15 +7,16 @@ pub type LaneId = [u8; 20];
 
 /// Mergeset context fields hashed into the sequencing commitment.
 ///
-/// `inactivity_shortcut` is the `accepted_id_merkle_root` (seq_commit) of the
-/// highest chain block at `blue_score <= current_blue_score - finality_depth - 1`,
-/// i.e. the latest block just out of the active-lanes window.
+/// `inactivity_shortcut`: pre-activation `None` (omitted from the hash);
+/// post-activation `Some(seq_commit)` of the highest chain block at
+/// `blue_score <= current_blue_score - finality_depth - 1`. The activation
+/// gate is decided by the caller (see `zk_hardening_activation`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MergesetContext {
     pub timestamp: u64,
     pub daa_score: u64,
     pub blue_score: u64,
-    pub inactivity_shortcut: Hash,
+    pub inactivity_shortcut: Option<Hash>,
 }
 
 /// Input for computing the next lane tip hash.

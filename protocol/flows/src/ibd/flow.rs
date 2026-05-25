@@ -711,14 +711,21 @@ impl IbdFlow {
         // headers_store, then verify against pp_header's seq_commit.
         let md = stream.recv_metadata().await?;
         let parent_header = consensus.async_get_header(pp_header.direct_parents()[0]).await.unwrap();
-        let inactivity_shortcut = if md.inactivity_shortcut_block == kaspa_hashes::ZERO_HASH {
-            kaspa_hashes::ZERO_HASH
+        // Resolve inactivity_shortcut iff this pruning point is post-activation; pre-activation
+        // blocks didn't commit it, so the verifier must also omit it from `mergeset_context_hash`.
+        let inactivity_shortcut = if self.ctx.config.zk_hardening_activation.is_active(pp_header.daa_score) {
+            let shortcut = if md.inactivity_shortcut_block == kaspa_hashes::ZERO_HASH {
+                kaspa_hashes::ZERO_HASH
+            } else {
+                consensus
+                    .async_get_header(md.inactivity_shortcut_block)
+                    .await
+                    .map_err(|e| ProtocolError::OtherOwned(format!("inactivity_shortcut_block header not found: {e}")))?
+                    .accepted_id_merkle_root
+            };
+            Some(shortcut)
         } else {
-            consensus
-                .async_get_header(md.inactivity_shortcut_block)
-                .await
-                .map_err(|e| ProtocolError::OtherOwned(format!("inactivity_shortcut_block header not found: {e}")))?
-                .accepted_id_merkle_root
+            None
         };
         let ctx = kaspa_seq_commit::types::MergesetContext {
             timestamp: parent_header.timestamp,

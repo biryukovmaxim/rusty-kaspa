@@ -177,6 +177,9 @@ pub struct VirtualStateProcessor {
     pub(crate) toccata_activation: ForkActivation,
     pub(crate) toccata_logger: ForkLogger,
 
+    // KIP-21 finality-anchor activation: gates inactivity_shortcut inclusion in mergeset_context_hash.
+    pub(crate) zk_hardening_activation: ForkActivation,
+
     // SMT stores
     pub(super) smt_stores: Arc<kaspa_smt_store::processor::SmtStores>,
     pub(super) smt_metadata_store: Arc<crate::model::stores::smt_metadata::DbSmtMetadataStore>,
@@ -251,6 +254,7 @@ impl VirtualStateProcessor {
             counters,
             toccata_activation: params.toccata_activation,
             toccata_logger: ForkLogger::new("virtual state processing rules", true),
+            zk_hardening_activation: params.zk_hardening_activation,
             smt_stores: storage.smt_stores.clone(),
             smt_metadata_store: storage.smt_metadata_store.clone(),
             _mining_rules: mining_rules,
@@ -626,7 +630,10 @@ impl VirtualStateProcessor {
             timestamp: parent_header.timestamp,
             daa_score,
             blue_score: current_blue_score,
-            inactivity_shortcut: self.inactivity_shortcut(inactivity_shortcut_block),
+            inactivity_shortcut: self
+                .zk_hardening_activation
+                .is_active(daa_score)
+                .then(|| self.inactivity_shortcut(inactivity_shortcut_block)),
         });
 
         let parent_seq_commit = parent_header.accepted_id_merkle_root;
@@ -685,7 +692,8 @@ impl VirtualStateProcessor {
             daa_score: self.genesis.daa_score,
             blue_score,
             // Genesis has no past chain - no inactivity_shortcut is reachable.
-            inactivity_shortcut: ZERO_HASH,
+            // Activation is irrelevant pre-genesis, so None either way.
+            inactivity_shortcut: None,
         });
 
         // Collect per-lane activity leaves from genesis transactions.

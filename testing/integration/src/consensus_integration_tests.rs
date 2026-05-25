@@ -1479,7 +1479,11 @@ fn chain_seq_commit_context_hash(consensus: &TestConsensus, accepting_block: Has
     let header = consensus.get_header(accepting_block).unwrap();
     let parent_header = consensus.get_header(header.direct_parents()[0]).unwrap();
     let meta = consensus.smt_block_metadata(accepting_block);
-    let inactivity_shortcut = inactivity_shortcut_for(consensus, meta.inactivity_shortcut_block());
+    let inactivity_shortcut = consensus
+        .params()
+        .zk_hardening_activation
+        .is_active(header.daa_score)
+        .then(|| inactivity_shortcut_for(consensus, meta.inactivity_shortcut_block()));
     mergeset_context_hash(&MergesetContext {
         timestamp: parent_header.timestamp,
         daa_score: header.daa_score,
@@ -1500,7 +1504,11 @@ fn assert_chain_seq_commit_lane(consensus: &TestConsensus, accepting_block: Hash
     let header = consensus.get_header(accepting_block).unwrap();
     let parent_header = consensus.get_header(header.direct_parents()[0]).unwrap();
     let meta = consensus.smt_block_metadata(accepting_block);
-    let inactivity_shortcut = inactivity_shortcut_for(consensus, meta.inactivity_shortcut_block());
+    let inactivity_shortcut = consensus
+        .params()
+        .zk_hardening_activation
+        .is_active(header.daa_score)
+        .then(|| inactivity_shortcut_for(consensus, meta.inactivity_shortcut_block()));
     let ctx = MergesetContext {
         timestamp: parent_header.timestamp,
         daa_score: header.daa_score,

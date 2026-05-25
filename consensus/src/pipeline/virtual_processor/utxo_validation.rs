@@ -644,7 +644,10 @@ impl VirtualStateProcessor {
             timestamp: parent_header.timestamp,
             daa_score: header.daa_score,
             blue_score: current_blue_score,
-            inactivity_shortcut: self.inactivity_shortcut(inactivity_shortcut_block),
+            inactivity_shortcut: self
+                .zk_hardening_activation
+                .is_active(header.daa_score)
+                .then(|| self.inactivity_shortcut(inactivity_shortcut_block)),
         });
 
         let parent_seq_commit = parent_header.accepted_id_merkle_root;

@@ -60,7 +60,7 @@ fn compute_lane_tip(parent_ref: &Hash, lane_key: &Hash, blocks: &[BlockActivity]
             timestamp: block.timestamp,
             daa_score: block.daa_score,
             blue_score: block.blue_score,
-            inactivity_shortcut: kaspa_hashes::ZERO_HASH,
+            inactivity_shortcut: Some(kaspa_hashes::ZERO_HASH),
         });
         tip =
             lane_tip_next(&LaneTipInput { parent_ref: &tip, lane_key, activity_digest: &builder.finalize(), context_hash: &ctx_hash });
@@ -139,7 +139,7 @@ fn build_chain(n: usize) -> (Hash, Hash, Hash, Vec<BlockActivity>, CommitmentWit
             timestamp: 1_700_000_000 + (i as u64) * 10,
             daa_score: 100_000 + i as u64,
             blue_score,
-            inactivity_shortcut: kaspa_hashes::ZERO_HASH,
+            inactivity_shortcut: Some(kaspa_hashes::ZERO_HASH),
         };
         let ctx_hash = mergeset_context_hash(&ctx);
 
