@@ -691,9 +691,12 @@ impl VirtualStateProcessor {
             timestamp: self.genesis.timestamp,
             daa_score: self.genesis.daa_score,
             blue_score,
-            // Genesis has no past chain - no inactivity_shortcut is reachable.
-            // Activation is irrelevant pre-genesis, so None either way.
-            inactivity_shortcut: None,
+            // Match compute_seq_commit's gating: when hardening is active the
+            // shortcut field must be present (Some) even at genesis, otherwise
+            // the validator's recomputed seq_commit will not match this header
+            // for the first non-genesis block. No real shortcut exists yet, so
+            // we feed ZERO_HASH (same as `inactivity_shortcut(ZERO_HASH)`).
+            inactivity_shortcut: self.zk_hardening_activation.is_active(self.genesis.daa_score).then_some(ZERO_HASH),
         });
 
         // Collect per-lane activity leaves from genesis transactions.
