@@ -103,7 +103,12 @@ mod tests {
     }
 
     fn sample_ctx() -> MergesetContext {
-        MergesetContext { timestamp: 1_700_000_000, daa_score: 1234, blue_score: 250, inactivity_shortcut: Some(Hash::from_bytes([7; 32])) }
+        MergesetContext {
+            timestamp: 1_700_000_000,
+            daa_score: 1234,
+            blue_score: 250,
+            inactivity_shortcut: Some(Hash::from_bytes([7; 32])),
+        }
     }
 
     #[test]

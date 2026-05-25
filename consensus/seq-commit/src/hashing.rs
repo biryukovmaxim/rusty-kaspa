@@ -260,7 +260,12 @@ mod tests {
         // Anchor must contribute: changing it must change the hash.
         assert_ne!(
             actual,
-            mergeset_context_hash(&MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: Some(h(1)) })
+            mergeset_context_hash(&MergesetContext {
+                timestamp: 1000,
+                daa_score: 500,
+                blue_score: 250,
+                inactivity_shortcut: Some(h(1))
+            })
         );
     }
 
@@ -285,8 +290,7 @@ mod tests {
     fn pre_activation_omits_shortcut_from_hash() {
         let pre = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: None };
         let post_zero = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: Some(ZERO_HASH) };
-        let post_h7 =
-            MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: Some(h(7)) };
+        let post_h7 = MergesetContext { timestamp: 1000, daa_score: 500, blue_score: 250, inactivity_shortcut: Some(h(7)) };
         let hpre = mergeset_context_hash(&pre);
         let hpost_zero = mergeset_context_hash(&post_zero);
         let hpost_h7 = mergeset_context_hash(&post_h7);

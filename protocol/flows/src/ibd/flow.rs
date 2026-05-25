@@ -734,11 +734,7 @@ impl IbdFlow {
             inactivity_shortcut,
         };
         verify_smt_metadata(
-            &SmtMetadata {
-                lanes_root: &md.lanes_root,
-                payload_root: &md.payload_root,
-                parent_seq_commit: &md.parent_seq_commit,
-            },
+            &SmtMetadata { lanes_root: &md.lanes_root, payload_root: &md.payload_root, parent_seq_commit: &md.parent_seq_commit },
             &ctx,
             pp_header.accepted_id_merkle_root,
             parent_header.accepted_id_merkle_root,

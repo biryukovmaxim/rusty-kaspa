@@ -1194,11 +1194,7 @@ impl ConsensusApi for Consensus {
         use crate::model::stores::smt_metadata::SmtBlockMetadata;
         self.storage
             .smt_metadata_store
-            .insert_batch(
-                &mut batch,
-                new_pruning_point,
-                SmtBlockMetadata::new(payload_root, inactivity_shortcut_block, actual_count),
-            )
+            .insert_batch(&mut batch, new_pruning_point, SmtBlockMetadata::new(payload_root, inactivity_shortcut_block, actual_count))
             .unwrap();
         self.db.write(batch).unwrap();
 

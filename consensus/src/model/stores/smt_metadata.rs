@@ -198,7 +198,9 @@ mod tests {
         db.put(legacy_row_key(hash_legacy), legacy_bytes).unwrap();
 
         let mut batch = WriteBatch::default();
-        store.insert_batch(&mut batch, hash_versioned, SmtBlockMetadata::new(Hash::from_bytes([1; 32]), Hash::from_bytes([2; 32]), 99)).unwrap();
+        store
+            .insert_batch(&mut batch, hash_versioned, SmtBlockMetadata::new(Hash::from_bytes([1; 32]), Hash::from_bytes([2; 32]), 99))
+            .unwrap();
         db.write(batch).unwrap();
 
         let mut batch = WriteBatch::default();
