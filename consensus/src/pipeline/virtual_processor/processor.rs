@@ -787,18 +787,23 @@ impl VirtualStateProcessor {
     }
 
     /// KIP-21: block hash of the highest chain block at
-    /// `bs <= ghostdag_data.blue_score - finality_depth - 1`. The
-    /// committed `inactivity_shortcut` value is this block's seq_commit (see
+    /// `bs <= ghostdag_data.blue_score - finality_depth - 1`. The committed
+    /// `inactivity_shortcut` value is this block's seq_commit (see
     /// [`Self::inactivity_shortcut`]).
-    /// Returns `ZERO_HASH` when the block is too early for any shortcut
-    /// (`bs <= finality_depth`)
+    ///
+    /// Never returns `ZERO_HASH`. Before a real shortcut block is reachable
+    /// (early chain, or within finality depth of hardening activation), a
+    /// pre-hardening stand-in is returned. Such stand-ins are valid for
+    /// context-hash recomputation but must not be exposed to provers or RPC
+    /// consumers as real shortcut targets.
     pub(super) fn compute_inactivity_shortcut_block(&self, ghostdag_data: &GhostdagData) -> Hash {
+        let selected_parent = ghostdag_data.selected_parent;
+
         if ghostdag_data.blue_score < self.finality_depth + 1 {
-            return ZERO_HASH;
+            return selected_parent;
         }
 
         let target_bs = ghostdag_data.blue_score - self.finality_depth - 1;
-        let selected_parent = ghostdag_data.selected_parent;
 
         let coinbase_lk = kaspa_seq_commit::hashing::lane_key(&kaspa_consensus_core::subnets::SUBNETWORK_ID_COINBASE.into_bytes());
         let bounds = SmtReadBounds::new(target_bs, 0);
@@ -811,26 +816,19 @@ impl VirtualStateProcessor {
             // Post-IBD boundary, "exact at pp": target_bs == pp.bs
             Some(_zero) => {}
             // Post-IBD boundary, "below pp": target_bs < pp.bs and no coinbase
-            // entry exists at that depth in our SMT. Seed from the pp's stored
-            // shortcut and walk forward to target_bs.
+            // entry exists at that depth in our SMT. Fall through to seed the
+            // forward walk from the selected parent's recorded shortcut.
             None => {}
         };
 
-        if selected_parent == self.genesis.hash {
-            return ZERO_HASH;
-        }
+        let search_from = self
+            .smt_metadata_store
+            .get(selected_parent)
+            .map(|md| md.inactivity_shortcut_block())
+            .optional()
+            .unwrap()
+            .unwrap_or(selected_parent);
 
-        let search_from = if let Some(sp_inactivity_shortcut_block) =
-            self.smt_metadata_store.get(selected_parent).map(|md| md.inactivity_shortcut_block()).optional().unwrap()
-            && sp_inactivity_shortcut_block != ZERO_HASH
-        {
-            sp_inactivity_shortcut_block
-        } else {
-            self.headers_store.get_header(selected_parent).unwrap().pruning_point
-        };
-
-        let bs_start = self.headers_store.get_blue_score(search_from).unwrap_or(0); // zero for genesis case
-        assert!(bs_start <= target_bs);
         let mut current = search_from;
         for chain_block in self.reachability_service.forward_chain_iterator(current, selected_parent, true).skip(1) {
             if self.headers_store.get_blue_score(chain_block).unwrap() > target_bs {
@@ -842,13 +840,24 @@ impl VirtualStateProcessor {
     }
 
     /// Derive the `inactivity_shortcut` value committed in
-    /// `MergesetContext.inactivity_shortcut` from its block hash. `ZERO_HASH`
-    /// (no block known) and genesis both yield `ZERO_HASH`.
+    /// `MergesetContext.inactivity_shortcut` from its block hash. Folds to
+    /// `ZERO_HASH` whenever the block cannot be a real shortcut target:
+    /// genesis, blocks too shallow for any block to be at depth
+    /// `finality_depth + 1` past them, or pre-hardening blocks (whose
+    /// seq_commit does not encode a shortcut). Otherwise returns the block's
+    /// seq_commit.
+    ///
+    /// Panics on `ZERO_HASH` input — callers must pass a real block hash.
     pub(super) fn inactivity_shortcut(&self, inactivity_shortcut_block: Hash) -> Hash {
-        if inactivity_shortcut_block == ZERO_HASH || inactivity_shortcut_block == self.genesis.hash {
+        assert_ne!(inactivity_shortcut_block, ZERO_HASH, "inactivity_shortcut block must be a real block hash");
+        if inactivity_shortcut_block == self.genesis.hash {
             return ZERO_HASH;
         }
-        self.headers_store.get_header(inactivity_shortcut_block).unwrap().accepted_id_merkle_root
+        let header = self.headers_store.get_header(inactivity_shortcut_block).unwrap();
+        if header.blue_score < self.finality_depth + 1 || !self.zk_hardening_activation.is_active(header.daa_score) {
+            return ZERO_HASH;
+        }
+        header.accepted_id_merkle_root
     }
 
     /// Get the parent's lanes_root, active_lanes_count, and inactivity_shortcut_block.

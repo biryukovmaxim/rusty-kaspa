@@ -711,17 +711,25 @@ impl IbdFlow {
         // headers_store, then verify against pp_header's seq_commit.
         let md = stream.recv_metadata().await?;
         let parent_header = consensus.async_get_header(pp_header.direct_parents()[0]).await.unwrap();
-        // Resolve inactivity_shortcut iff this pruning point is post-activation; pre-activation
-        // blocks didn't commit it, so the verifier must also omit it from `mergeset_context_hash`.
+        // Mirrors consensus-side `inactivity_shortcut()`: gate on hardening
+        // activation for the pp itself; for the referenced shortcut block,
+        // fold to ZERO_HASH on genesis, blocks too shallow for a real
+        // shortcut depth, or pre-hardening daa_score.
         let inactivity_shortcut = if self.ctx.config.zk_hardening_activation.is_active(pp_header.daa_score) {
-            let shortcut = if md.inactivity_shortcut_block == kaspa_hashes::ZERO_HASH {
+            let shortcut = if md.inactivity_shortcut_block == self.ctx.config.genesis.hash {
                 kaspa_hashes::ZERO_HASH
             } else {
-                consensus
+                let shortcut_header = consensus
                     .async_get_header(md.inactivity_shortcut_block)
                     .await
-                    .map_err(|e| ProtocolError::OtherOwned(format!("inactivity_shortcut_block header not found: {e}")))?
-                    .accepted_id_merkle_root
+                    .map_err(|e| ProtocolError::OtherOwned(format!("inactivity_shortcut_block header not found: {e}")))?;
+                if shortcut_header.blue_score < self.ctx.config.finality_depth() + 1
+                    || !self.ctx.config.zk_hardening_activation.is_active(shortcut_header.daa_score)
+                {
+                    kaspa_hashes::ZERO_HASH
+                } else {
+                    shortcut_header.accepted_id_merkle_root
+                }
             };
             Some(shortcut)
         } else {
