@@ -12,10 +12,6 @@ use kaspa_hashes::{Hash, HasherBase, SeqCommitMerkleBranch};
 pub struct SmtMetadata<'a> {
     pub lanes_root: &'a Hash,
     pub payload_and_ctx_digest: &'a Hash,
-    /// Lets the verifier reconstruct `payload_and_ctx_digest` from
-    /// `mergeset_context_hash(ctx)` and authenticate the claimed
-    /// `ctx.inactivity_shortcut` against the header's `seq_commit`
-    /// (= `accepted_id_merkle_root`).
     pub payload_root: &'a Hash,
     pub parent_seq_commit: &'a Hash,
 }
@@ -42,15 +38,7 @@ pub enum SmtVerifyError {
     ProofError(#[from] kaspa_smt::proof::SmtProofError),
 }
 
-/// Verify that the metadata is consistent with the header's `seq_commit`
-/// (= `accepted_id_merkle_root`).
-///
-/// Beyond the `seq_commit` + parent linkage check, this also rebuilds
-/// `payload_and_ctx_digest` from `mergeset_context_hash(ctx)` and
-/// `metadata.payload_root` to authenticate `ctx.inactivity_shortcut`.
-/// Callers reconstruct `ctx` from header data (timestamp from the PP's
-/// selected parent, daa_score / blue_score from the PP header) plus the
-/// inactivity_shortcut value derived from the wire's block hash.
+/// Verify that the metadata is consistent with the header's `accepted_id_merkle_root` (= seq_commit).
 pub fn verify_smt_metadata(
     metadata: &SmtMetadata<'_>,
     ctx: &MergesetContext,

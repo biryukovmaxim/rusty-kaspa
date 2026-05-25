@@ -8,21 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Per-block SMT metadata stored alongside the seq_commit.
-///
-/// `payload_and_ctx_digest` is `H_seq(context_hash, payload_root)`, the inner
-/// hash of `seq_state_root`. The `lanes_root` is stored in the branch version
-/// store at depth=0 and read via `SmtStores::get_lanes_root`.
-///
-/// `payload_root` is kept so that an IBD importer can reconstruct
-/// `payload_and_ctx_digest` from header fields paired with the derived
-/// `inactivity_shortcut` and thereby authenticate the pruning-point header's
-/// `seq_commit` (= `accepted_id_merkle_root`).
-///
-/// `inactivity_shortcut_block` is the block hash of the highest chain block
-/// at `bs <= block_bs - finality_depth - 1`. The committed
-/// `inactivity_shortcut` value (in `MergesetContext` and on the IBD wire) is
-/// `headers_store(inactivity_shortcut_block).accepted_id_merkle_root`.
-/// `ZERO_HASH` means we don't have the corresponding block
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmtBlockMetadata {
     pub payload_and_ctx_digest: Hash,
