@@ -12,14 +12,24 @@ use crate::{
         },
     },
     processes::{
-        block_depth::BlockDepthManager, coinbase::CoinbaseManager, dagknight::DagknightCounters,
-        dagknight::protocol::DagknightExecutor, dagknight::umc_cascade_persistence::DbUmcCascadeStore,
-        ghostdag::protocol::GhostdagManager, parents_builder::ParentsManager, pruning::PruningPointManager,
-        pruning_proof::PruningProofManager, sync::SyncManager, transaction_validator::TransactionValidator,
-        traversal_manager::DagTraversalManager, window::SampledWindowManager,
+        block_depth::BlockDepthManager,
+        coinbase::CoinbaseManager,
+        dagknight::DagknightCounters,
+        dagknight::protocol::{DagknightData, DagknightExecutor, DagknightExecutorNext},
+        dagknight::umc_cascade_persistence::DbUmcCascadeStore,
+        ghostdag::protocol::GhostdagManager,
+        parents_builder::ParentsManager,
+        pruning::PruningPointManager,
+        pruning_proof::PruningProofManager,
+        sync::SyncManager,
+        transaction_validator::TransactionValidator,
+        traversal_manager::DagTraversalManager,
+        window::SampledWindowManager,
     },
 };
 use kaspa_consensus_core::mass::MassCalculator;
+use kaspa_core::info;
+use kaspa_hashes::Hash;
 use kaspa_txscript::caches::TxScriptCacheCounters;
 use parking_lot::RwLock;
 use std::sync::{Arc, atomic::AtomicBool};
@@ -51,8 +61,45 @@ pub type DbPruningPointManager = PruningPointManager<
 >;
 pub type DbBlockDepthManager = BlockDepthManager<DbDepthStore, DbReachabilityStore, DbGhostdagStore, DbHeadersStore>;
 pub type DbParentsManager = ParentsManager<DbHeadersStore, DbReachabilityStore, MTRelationsService<DbRelationsStore>>;
-pub type DbDagknightExecutor =
+pub type DbDagknightExecutorPrevious =
     DagknightExecutor<DbDagknightStore, DbHeadersStore, MTRelationsService<DbRelationsStore>, DbUmcCascadeStore, DbReachabilityStore>;
+pub type DbDagknightExecutorNext = DagknightExecutorNext<
+    DbDagknightStore,
+    DbHeadersStore,
+    MTRelationsService<DbRelationsStore>,
+    DbUmcCascadeStore,
+    DbReachabilityStore,
+>;
+
+/// The executor active in this consensus instance. Both implementations coexist while the
+/// index-based `DagknightExecutorNext` is verified against the previous one; the variant is
+/// picked at startup (see `ConsensusServices::new`).
+// ponytail: env switch is temporary, becomes moot when the next executor is promoted to the only one
+#[derive(Clone)]
+pub enum DbDagknightExecutor {
+    Previous(DbDagknightExecutorPrevious),
+    Next(DbDagknightExecutorNext),
+}
+
+impl DbDagknightExecutor {
+    pub fn dagknight(&self, parents: &[Hash]) -> DagknightData {
+        match self {
+            Self::Previous(executor) => executor.dagknight(parents),
+            Self::Next(executor) => {
+                let data = executor.dagknight_next(parents);
+                DagknightData {
+                    selected_parent: parents[data.selected_parent as usize],
+                    conflict_ordered_parents: data
+                        .reverse_conflict_ordered_parents
+                        .iter()
+                        .rev()
+                        .map(|&parent| parents[parent as usize])
+                        .collect(),
+                }
+            }
+        }
+    }
+}
 
 pub struct ConsensusServices {
     // Underlying storage
@@ -140,16 +187,32 @@ impl ConsensusServices {
             storage.topology_ghostdag_store.clone(),
         );
 
-        // TODO[DK]: Use a config or ForkActivation to gate this
         let dagknight_counters = Arc::<crate::processes::dagknight::DagknightCounters>::default();
-        let dagknight_executor = storage.dagknight_store.as_ref().map(|dagknight_store| DagknightExecutor {
-            genesis_hash: params.genesis.hash,
-            dagknight_store: dagknight_store.clone(),
-            headers_store: storage.headers_store.clone(),
-            relations_store: Arc::new(RwLock::new(relations_service.clone())),
-            reachability_service: reachability_service.clone(),
-            counters: dagknight_counters.clone(),
-            umc_persistence_store: storage.umc_persistence_store.clone(),
+        // ponytail: env-var switch is temporary, becomes moot when the next executor is promoted to the only one
+        let use_next_executor = std::env::var_os("DK_NEXT").is_some();
+        info!("dagknight executor: {}", if use_next_executor { "next" } else { "previous" });
+        let dagknight_executor = storage.dagknight_store.as_ref().map(|dagknight_store| {
+            if use_next_executor {
+                DbDagknightExecutor::Next(DagknightExecutorNext {
+                    genesis_hash: params.genesis.hash,
+                    dagknight_store: dagknight_store.clone(),
+                    headers_store: storage.headers_store.clone(),
+                    relations_store: relations_service.clone(),
+                    umc_persistence_store: storage.umc_persistence_store.clone(),
+                    reachability_service: reachability_service.clone(),
+                    counters: dagknight_counters.clone(),
+                })
+            } else {
+                DbDagknightExecutor::Previous(DagknightExecutor {
+                    genesis_hash: params.genesis.hash,
+                    dagknight_store: dagknight_store.clone(),
+                    headers_store: storage.headers_store.clone(),
+                    relations_store: Arc::new(RwLock::new(relations_service.clone())),
+                    umc_persistence_store: storage.umc_persistence_store.clone(),
+                    reachability_service: reachability_service.clone(),
+                    counters: dagknight_counters.clone(),
+                })
+            }
         });
 
         let coinbase_manager = CoinbaseManager::new(

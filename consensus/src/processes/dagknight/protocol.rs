@@ -468,10 +468,8 @@ impl<
     R: ReachabilityStoreReader + Clone,
 > DagknightExecutorNext<C, O, D, E, R>
 {
-    // TODO[DK]: drop the allow once this is wired into block processing
     // TODO[DK]: accept slice with unique values so we don't need to verify it again
-    #[allow(dead_code)]
-    fn dagknight_next<'a>(&self, parents: &'a [Hash]) -> DagknightDataNext<'a> {
+    pub fn dagknight_next<'a>(&self, parents: &'a [Hash]) -> DagknightDataNext<'a> {
         /*
             input: a set of block parents
             output: the selected parent + incremental metadata
