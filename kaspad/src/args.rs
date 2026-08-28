@@ -1,4 +1,9 @@
+use crate::libp2p::{Libp2pArgs as Libp2pCliArgs, Libp2pMode, Libp2pRole};
 use clap::{Arg, ArgAction, Command, arg};
+#[cfg(feature = "devnet-prealloc")]
+use kaspa_addresses::Address;
+#[cfg(feature = "devnet-prealloc")]
+use kaspa_consensus_core::tx::{TransactionOutpoint, UtxoEntry};
 use kaspa_consensus_core::{
     config::Config,
     network::{NetworkId, NetworkType},
@@ -6,21 +11,17 @@ use kaspa_consensus_core::{
 use kaspa_core::kaspad_env::version;
 use kaspa_notify::address::tracker::Tracker;
 use kaspa_p2p_flows::user_agent_rule::UserAgentRule;
+#[cfg(feature = "devnet-prealloc")]
+use kaspa_txscript::pay_to_address_script;
 use kaspa_utils::networking::ContextualNetAddress;
 use kaspa_wrpc_server::address::WrpcNetAddress;
 use serde::Deserialize;
 use serde_with::{DisplayFromStr, serde_as};
-use std::{ffi::OsString, fs};
-use toml::from_str;
-
-#[cfg(feature = "devnet-prealloc")]
-use kaspa_addresses::Address;
-#[cfg(feature = "devnet-prealloc")]
-use kaspa_consensus_core::tx::{TransactionOutpoint, UtxoEntry};
-#[cfg(feature = "devnet-prealloc")]
-use kaspa_txscript::pay_to_address_script;
 #[cfg(feature = "devnet-prealloc")]
 use std::sync::Arc;
+use std::{ffi::OsString, fs};
+use std::{net::SocketAddr, path::PathBuf};
+use toml::from_str;
 
 #[serde_as]
 #[derive(Debug, Clone, Deserialize)]
@@ -93,6 +94,8 @@ pub struct Args {
     pub disable_grpc: bool,
     pub ram_scale: f64,
     pub retention_period_days: Option<f64>,
+    #[serde(flatten)]
+    pub libp2p: Libp2pCliArgs,
 
     pub override_params_file: Option<String>,
 
@@ -151,6 +154,7 @@ impl Default for Args {
             disable_grpc: false,
             ram_scale: 1.0,
             retention_period_days: None,
+            libp2p: Default::default(),
             override_params_file: None,
             rocksdb_preset: None,
             rocksdb_wal_dir: None,
@@ -461,6 +465,170 @@ a large RAM (~64GB) can set this value to ~3.0-4.0 and gain superior performance
                        Increase for public RPC nodes with heavy query loads. Example: --rocksdb-cache-size=2048 for 2GB cache.")
         )
         ;
+    let cmd = cmd
+        .arg(
+            Arg::new("libp2p-mode")
+                .long("libp2p-mode")
+                .value_name("MODE")
+                .default_value("bridge")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(Libp2pMode))
+                .help("Libp2p mode: off, bridge (hybrid with TCP fallback), full, helper (helper is an alias for full until a narrower helper-only mode exists)."),
+        )
+        .arg(
+            Arg::new("no-libp2p")
+                .long("no-libp2p")
+                .action(ArgAction::SetTrue)
+                .conflicts_with("libp2p-mode")
+                .help("Disable libp2p entirely (forces --libp2p-mode=off)."),
+        )
+        .arg(
+            Arg::new("libp2p-role")
+                .long("libp2p-role")
+                .value_name("ROLE")
+                .default_value("auto")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(Libp2pRole))
+                .help("Libp2p role: public, private, or auto (auto starts private and promotes after stable public reachability)."),
+        )
+        .arg(
+            Arg::new("libp2p-identity-path")
+                .long("libp2p-identity-path")
+                .value_name("PATH")
+                .require_equals(true)
+                .value_parser(clap::builder::NonEmptyStringValueParser::new())
+                .help("Persist libp2p identity to the given file path; default is ephemeral in-memory identity."),
+        )
+        .arg(
+            Arg::new("libp2p-helper-listen")
+                .long("libp2p-helper-listen")
+                .value_name("IP:PORT")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(SocketAddr))
+                .help("Enable the libp2p helper/control API on the specified socket address. Disabled unless set explicitly."),
+        )
+        .arg(
+            Arg::new("libp2p-listen-port")
+                .long("libp2p-listen-port")
+                .value_name("PORT")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(u16))
+                .help("Dedicated libp2p listen port (defaults to the p2p port + 1)."),
+        )
+        .arg(
+            Arg::new("libp2p-relay-inbound-cap")
+                .long("libp2p-relay-inbound-cap")
+                .value_name("N")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(usize))
+                .help("Soft cap per relay identity for inbound libp2p connections."),
+        )
+        .arg(
+            Arg::new("libp2p-relay-inbound-unknown-cap")
+                .long("libp2p-relay-inbound-unknown-cap")
+                .value_name("N")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(usize))
+                .help("Soft cap for inbound libp2p connections without parsed relay id."),
+        )
+        .arg(
+            Arg::new("libp2p-max-relays")
+                .long("libp2p-max-relays")
+                .value_name("N")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(usize))
+                .help("Maximum number of active relay reservations for auto selection."),
+        )
+        .arg(
+            Arg::new("libp2p-max-peers-per-relay")
+                .long("libp2p-max-peers-per-relay")
+                .value_name("N")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(usize))
+                .help("Maximum peers per relay (eclipse guard)."),
+        )
+        .arg(
+            Arg::new("libp2p-relay-rng-seed")
+                .long("libp2p-relay-rng-seed")
+                .value_name("SEED")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(u64))
+                .help("Optional RNG seed for deterministic relay selection."),
+        )
+        .arg(
+            Arg::new("libp2p-inbound-cap-private")
+                .long("libp2p-inbound-cap-private")
+                .value_name("N")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(usize))
+                .help("Private-role inbound cap for libp2p connections."),
+        )
+        .arg(
+            Arg::new("libp2p-reservations")
+                .long("libp2p-reservations")
+                .value_name("MULTIADDRS")
+                .require_equals(true)
+                .use_value_delimiter(true)
+                .value_parser(clap::value_parser!(String))
+                .help("Comma-separated relay reservation multiaddrs."),
+        )
+        .arg(
+            Arg::new("libp2p-relay-candidates")
+                .long("libp2p-relay-candidates")
+                .value_name("MULTIADDRS")
+                .require_equals(true)
+                .use_value_delimiter(true)
+                .value_parser(clap::value_parser!(String))
+                .help("Comma-separated static relay candidate multiaddrs for auto selection."),
+        )
+        .arg(
+            Arg::new("libp2p-relay-advertise-capacity")
+                .long("libp2p-relay-advertise-capacity")
+                .value_name("N")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(u32))
+                .help("Relay capacity to advertise via relay gossip."),
+        )
+        .arg(
+            Arg::new("libp2p-relay-advertise-ttl-ms")
+                .long("libp2p-relay-advertise-ttl-ms")
+                .value_name("MS")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(u64))
+                .help("Relay TTL (ms) to advertise via relay gossip."),
+        )
+        .arg(
+            Arg::new("libp2p-external-multiaddrs")
+                .long("libp2p-external-multiaddrs")
+                .value_name("MULTIADDRS")
+                .require_equals(true)
+                .use_value_delimiter(true)
+                .value_parser(clap::value_parser!(String))
+                .help("Comma-separated external multiaddrs to advertise via libp2p identify."),
+        )
+        .arg(
+            Arg::new("libp2p-advertise-addresses")
+                .long("libp2p-advertise-addresses")
+                .value_name("IP:PORTS")
+                .require_equals(true)
+                .use_value_delimiter(true)
+                .value_parser(clap::value_parser!(SocketAddr))
+                .help("Comma-separated addresses to advertise for non-libp2p aware peers."),
+        )
+        .arg(
+            Arg::new("libp2p-autonat-allow-private")
+                .long("libp2p-autonat-allow-private")
+                .action(ArgAction::SetTrue)
+                .help("Allow AutoNAT to discover and verify private IP addresses (useful for lab environments)."),
+        )
+        .arg(
+            Arg::new("libp2p-autonat-confidence-threshold")
+                .long("libp2p-autonat-confidence-threshold")
+                .value_name("N")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(usize))
+                .help("AutoNAT confidence threshold for public reachability (number of successful probes required)."),
+        );
 
     #[cfg(feature = "devnet-prealloc")]
     let cmd = cmd
@@ -489,6 +657,7 @@ impl Args {
     {
         let m: clap::ArgMatches = cli().try_get_matches_from(itr)?;
         let mut defaults: Args = Default::default();
+        let no_libp2p = m.get_flag("no-libp2p");
 
         if let Some(config_file) = m.get_one::<String>("configfile") {
             let config_str = fs::read_to_string(config_file)?;
@@ -541,6 +710,77 @@ impl Args {
             disable_grpc: arg_match_unwrap_or::<bool>(&m, "nogrpc", defaults.disable_grpc),
             ram_scale: arg_match_unwrap_or::<f64>(&m, "ram-scale", defaults.ram_scale),
             retention_period_days: m.get_one::<f64>("retention-period-days").cloned().or(defaults.retention_period_days),
+            libp2p: Libp2pCliArgs {
+                libp2p_mode: if no_libp2p {
+                    Libp2pMode::Off
+                } else {
+                    arg_match_unwrap_or::<Libp2pMode>(&m, "libp2p-mode", defaults.libp2p.libp2p_mode)
+                },
+                libp2p_role: arg_match_unwrap_or::<Libp2pRole>(&m, "libp2p-role", defaults.libp2p.libp2p_role),
+                libp2p_mode_set_from_cli: no_libp2p || m.value_source("libp2p-mode") == Some(CommandLine),
+                libp2p_role_set_from_cli: m.value_source("libp2p-role") == Some(CommandLine),
+                libp2p_identity_path: m
+                    .get_one::<String>("libp2p-identity-path")
+                    .cloned()
+                    .map(PathBuf::from)
+                    .or(defaults.libp2p.libp2p_identity_path),
+                libp2p_helper_listen: m
+                    .get_one::<SocketAddr>("libp2p-helper-listen")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_helper_listen),
+                libp2p_listen_port: m.get_one::<u16>("libp2p-listen-port").copied().or(defaults.libp2p.libp2p_listen_port),
+                libp2p_relay_inbound_cap: m
+                    .get_one::<usize>("libp2p-relay-inbound-cap")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_relay_inbound_cap),
+                libp2p_relay_inbound_unknown_cap: m
+                    .get_one::<usize>("libp2p-relay-inbound-unknown-cap")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_relay_inbound_unknown_cap),
+                libp2p_max_relays: m.get_one::<usize>("libp2p-max-relays").copied().or(defaults.libp2p.libp2p_max_relays),
+                libp2p_max_peers_per_relay: m
+                    .get_one::<usize>("libp2p-max-peers-per-relay")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_max_peers_per_relay),
+                libp2p_relay_rng_seed: m.get_one::<u64>("libp2p-relay-rng-seed").copied().or(defaults.libp2p.libp2p_relay_rng_seed),
+                libp2p_inbound_cap_private: m
+                    .get_one::<usize>("libp2p-inbound-cap-private")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_inbound_cap_private),
+                libp2p_reservations: m
+                    .get_many::<String>("libp2p-reservations")
+                    .map(|vals| vals.cloned().collect())
+                    .unwrap_or(defaults.libp2p.libp2p_reservations),
+                libp2p_relay_candidates: m
+                    .get_many::<String>("libp2p-relay-candidates")
+                    .map(|vals| vals.cloned().collect())
+                    .unwrap_or(defaults.libp2p.libp2p_relay_candidates),
+                libp2p_external_multiaddrs: m
+                    .get_many::<String>("libp2p-external-multiaddrs")
+                    .map(|vals| vals.cloned().collect())
+                    .unwrap_or(defaults.libp2p.libp2p_external_multiaddrs),
+                libp2p_advertise_addresses: m
+                    .get_many::<SocketAddr>("libp2p-advertise-addresses")
+                    .map(|vals| vals.copied().collect())
+                    .unwrap_or(defaults.libp2p.libp2p_advertise_addresses),
+                libp2p_relay_advertise_capacity: m
+                    .get_one::<u32>("libp2p-relay-advertise-capacity")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_relay_advertise_capacity),
+                libp2p_relay_advertise_ttl_ms: m
+                    .get_one::<u64>("libp2p-relay-advertise-ttl-ms")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_relay_advertise_ttl_ms),
+                libp2p_autonat_allow_private: arg_match_unwrap_or::<bool>(
+                    &m,
+                    "libp2p-autonat-allow-private",
+                    defaults.libp2p.libp2p_autonat_allow_private,
+                ),
+                libp2p_autonat_confidence_threshold: m
+                    .get_one::<usize>("libp2p-autonat-confidence-threshold")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_autonat_confidence_threshold),
+            },
 
             #[cfg(feature = "devnet-prealloc")]
             num_prealloc_utxos: m.get_one::<u64>("num-prealloc-utxos").cloned(),
@@ -563,7 +803,7 @@ impl Args {
         Ok(args)
     }
 }
-
+use clap::parser::ValueSource::CommandLine;
 use clap::parser::ValueSource::DefaultValue;
 use std::marker::{Send, Sync};
 fn arg_match_unwrap_or<T: Clone + Send + Sync + 'static>(m: &clap::ArgMatches, arg_id: &str, default: T) -> T {
@@ -588,7 +828,8 @@ fn validate_ua_rules(rules: &[String]) -> Result<(), clap::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::Args;
+    use super::*;
+    use std::io::Write;
 
     #[test]
     fn parses_ua_rules() {
@@ -602,6 +843,43 @@ mod tests {
         let err = Args::parse(["kaspad", "--ua-rule=reject;regex:*"]).unwrap_err();
 
         assert!(err.to_string().contains("invalid --ua-rule"));
+    }
+
+    #[test]
+    fn parse_defaults_libp2p_mode_to_bridge() {
+        let args = Args::parse(["kaspad"]).expect("parse should succeed");
+        assert_eq!(args.libp2p.libp2p_mode, Libp2pMode::Bridge);
+        assert!(!args.libp2p.libp2p_mode_set_from_cli);
+    }
+
+    #[test]
+    fn parse_marks_explicit_libp2p_mode_as_cli_set() {
+        let args = Args::parse(["kaspad", "--libp2p-mode=bridge"]).expect("parse should succeed");
+        assert_eq!(args.libp2p.libp2p_mode, Libp2pMode::Bridge);
+        assert!(args.libp2p.libp2p_mode_set_from_cli);
+    }
+
+    #[test]
+    fn parse_no_libp2p_forces_off_and_marks_cli_set() {
+        let args = Args::parse(["kaspad", "--no-libp2p"]).expect("parse should succeed");
+        assert_eq!(args.libp2p.libp2p_mode, Libp2pMode::Off);
+        assert!(args.libp2p.libp2p_mode_set_from_cli);
+    }
+
+    #[test]
+    fn parse_no_libp2p_conflicts_with_explicit_libp2p_mode() {
+        let err = Args::parse(["kaspad", "--no-libp2p", "--libp2p-mode=bridge"]).expect_err("parse should fail");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn parse_configfile_without_libp2p_mode_defaults_to_bridge() {
+        let mut config = tempfile::NamedTempFile::new().expect("tempfile should be created");
+        writeln!(config, "devnet = true").expect("config write should succeed");
+        let config_path = config.path().to_str().expect("tempfile path should be valid UTF-8");
+
+        let args = Args::parse(["kaspad", "--configfile", config_path]).expect("parse should succeed");
+        assert_eq!(args.libp2p.libp2p_mode, Libp2pMode::Bridge);
     }
 }
 

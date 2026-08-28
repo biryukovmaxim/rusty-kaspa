@@ -1,24 +1,97 @@
 use kaspa_database::{
     prelude::DB,
     prelude::{CachePolicy, StoreError, StoreResult},
-    prelude::{CachedDbAccess, DirectDbWriter},
+    prelude::{CachedDbAccess, DbKey, DirectDbWriter},
     registry::DatabaseStorePrefixes,
 };
 use kaspa_utils::mem_size::MemSizeEstimator;
-use serde::{Deserialize, Serialize};
+use kaspa_utils::networking::{IpAddress, RelayRole};
+use rocksdb::{Direction, IteratorMode, ReadOptions};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::net::Ipv6Addr;
 use std::{error::Error, fmt::Display, sync::Arc};
 
 use super::AddressKey;
 use crate::NetAddress;
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Entry {
     pub connection_failed_count: u64,
     pub address: NetAddress,
 }
 
 impl MemSizeEstimator for Entry {}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct RelayMetadataNetAddressV1 {
+    ip: IpAddress,
+    port: u16,
+    services: u64,
+    relay_port: Option<u16>,
+    relay_capacity: Option<u32>,
+    relay_ttl_ms: Option<u64>,
+    relay_role: Option<RelayRole>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct RelayMetadataEntryV1 {
+    connection_failed_count: u64,
+    address: RelayMetadataNetAddressV1,
+}
+
+impl From<RelayMetadataEntryV1> for Entry {
+    fn from(value: RelayMetadataEntryV1) -> Self {
+        let mut address = NetAddress::new(value.address.ip, value.address.port);
+        address.set_services(value.address.services);
+        address.set_relay_port(value.address.relay_port);
+        address.set_relay_capacity(value.address.relay_capacity);
+        address.set_relay_ttl_ms(value.address.relay_ttl_ms);
+        address.set_relay_role(value.address.relay_role);
+        Self { connection_failed_count: value.connection_failed_count, address }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct LegacyNetAddress {
+    ip: IpAddress,
+    port: u16,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct LegacyEntry {
+    connection_failed_count: u64,
+    address: LegacyNetAddress,
+}
+
+impl From<LegacyEntry> for Entry {
+    fn from(value: LegacyEntry) -> Self {
+        Self { connection_failed_count: value.connection_failed_count, address: NetAddress::new(value.address.ip, value.address.port) }
+    }
+}
+
+fn deserialize_with_full_consumption<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Result<T, Box<bincode::ErrorKind>> {
+    let value: T = bincode::deserialize(bytes)?;
+    let canonical = bincode::serialize(&value)?;
+    if canonical.len() != bytes.len() {
+        return Err(Box::new(bincode::ErrorKind::Custom("trailing bytes after fallback decode".to_string())));
+    }
+    Ok(value)
+}
+
+pub struct LoadedEntry {
+    pub key: AddressKey,
+    pub entry: Entry,
+    pub needs_rewrite: bool,
+}
+
+fn strip_persisted_relay_advertisement(mut entry: Entry) -> LoadedEntry {
+    let needs_rewrite = entry.address.has_relay_advertisement();
+    if needs_rewrite {
+        entry.address.clear_relay_advertisement();
+    }
+    let key = AddressKey::from(&entry.address);
+    LoadedEntry { key, entry, needs_rewrite }
+}
 
 pub trait AddressesStoreReader {
     #[allow(dead_code)]
@@ -83,18 +156,47 @@ impl DbAddressesStore {
         Self { db: Arc::clone(&db), access: CachedDbAccess::new(db, cache_policy, DatabaseStorePrefixes::Addresses.into()) }
     }
 
-    pub fn iterator(&self) -> impl Iterator<Item = Result<(AddressKey, Entry), Box<dyn Error>>> + '_ {
-        self.access.iterator().map(|iter_result| match iter_result {
-            Ok((key_bytes, connection_failed_count)) => match <[u8; ADDRESS_KEY_SIZE]>::try_from(&key_bytes[..]) {
-                Ok(address_key_slice) => {
-                    let addr_key = DbAddressKey(address_key_slice);
-                    let address: AddressKey = addr_key.into();
-                    Ok((address, connection_failed_count))
+    pub fn iterator_with_legacy_migration(&self) -> impl Iterator<Item = Result<LoadedEntry, Box<dyn Error>>> + '_ {
+        let prefix: Vec<u8> = DatabaseStorePrefixes::Addresses.into();
+        let prefix_key = DbKey::prefix_only(&prefix);
+        let mut read_opts = ReadOptions::default();
+        read_opts.set_iterate_range(rocksdb::PrefixRange(prefix_key.as_ref()));
+        self.db.iterator_opt(IteratorMode::From(prefix_key.as_ref(), Direction::Forward), read_opts).map(
+            move |iter_result| -> Result<LoadedEntry, Box<dyn Error>> {
+                let (key, data_bytes) = match iter_result {
+                    Ok(data) => data,
+                    Err(err) => return Err(err.into()),
+                };
+                let key_slice = &key[prefix_key.prefix_len()..];
+                let address_key_slice: [u8; ADDRESS_KEY_SIZE] =
+                    key_slice.try_into().map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+                let addr_key = DbAddressKey(address_key_slice);
+                match bincode::deserialize::<Entry>(&data_bytes) {
+                    Ok(entry) => {
+                        let loaded = strip_persisted_relay_advertisement(entry);
+                        let needs_rewrite = loaded.needs_rewrite || AddressKey::from(addr_key) != loaded.key;
+                        Ok(LoadedEntry { needs_rewrite, ..loaded })
+                    }
+                    Err(primary_err) => match deserialize_with_full_consumption::<RelayMetadataEntryV1>(&data_bytes) {
+                        Ok(metadata_entry) => {
+                            let loaded = strip_persisted_relay_advertisement(metadata_entry.into());
+                            Ok(LoadedEntry { needs_rewrite: true, ..loaded })
+                        }
+                        Err(_) => match deserialize_with_full_consumption::<LegacyEntry>(&data_bytes) {
+                            Ok(legacy_entry) => {
+                                let loaded = strip_persisted_relay_advertisement(legacy_entry.into());
+                                Ok(LoadedEntry { needs_rewrite: true, ..loaded })
+                            }
+                            Err(_) => Err(primary_err.into()),
+                        },
+                    },
                 }
-                Err(e) => Err(e.into()),
             },
-            Err(e) => Err(e),
-        })
+        )
+    }
+
+    pub fn clear(&mut self) -> StoreResult<()> {
+        self.access.delete_all(DirectDbWriter::new(&self.db))
     }
 }
 
@@ -116,5 +218,114 @@ impl AddressesStore for DbAddressesStore {
     fn set_failed_count(&mut self, key: AddressKey, connection_failed_count: u64) -> StoreResult<()> {
         let entry = self.get(key)?;
         self.set(key, Entry { connection_failed_count, address: entry.address })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use kaspa_database::{create_temp_db, prelude::ConnBuilder};
+    use kaspa_utils::networking::{IpAddress, NET_ADDRESS_SERVICE_LIBP2P_RELAY};
+
+    use super::*;
+
+    #[test]
+    fn iterator_migrates_legacy_entries() {
+        let (db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(16));
+        let address = NetAddress::new(IpAddress::from_str("1.2.3.4").unwrap(), 16111);
+        let key = AddressKey::from(&address);
+        let db_key = DbKey::new(&Vec::<u8>::from(DatabaseStorePrefixes::Addresses), DbAddressKey::from(key));
+        let legacy_entry =
+            LegacyEntry { connection_failed_count: 7, address: LegacyNetAddress { ip: address.ip, port: address.port } };
+        let legacy_bytes = bincode::serialize(&legacy_entry).unwrap();
+        db.put(db_key, legacy_bytes).unwrap();
+
+        let store = DbAddressesStore::new(db.clone(), CachePolicy::Empty);
+        let loaded = store.iterator_with_legacy_migration().next().unwrap().unwrap();
+
+        assert!(loaded.needs_rewrite);
+        assert!(loaded.key == key);
+        assert_eq!(loaded.entry.connection_failed_count, 7);
+        assert_eq!(loaded.entry.address.ip, address.ip);
+        assert_eq!(loaded.entry.address.port, address.port);
+        drop(store);
+        drop(db);
+        drop(db_lifetime);
+    }
+
+    #[test]
+    fn iterator_strips_relay_metadata_from_persisted_entries() {
+        let (db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(16));
+        let entry = Entry {
+            connection_failed_count: 3,
+            address: NetAddress::new(IpAddress::from_str("4.3.2.1").unwrap(), 16111)
+                .with_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY | 0b100)
+                .with_relay_port(Some(16112))
+                .with_relay_capacity(Some(64))
+                .with_relay_ttl_ms(Some(15_000))
+                .with_relay_role(Some(RelayRole::Public)),
+        };
+        let key = AddressKey::from(&entry.address);
+        let db_key = DbKey::new(&Vec::<u8>::from(DatabaseStorePrefixes::Addresses), DbAddressKey::from(key));
+        let bytes = bincode::serialize(&entry).unwrap();
+        db.put(db_key, bytes).unwrap();
+
+        let store = DbAddressesStore::new(db.clone(), CachePolicy::Empty);
+        let loaded = store.iterator_with_legacy_migration().next().unwrap().unwrap();
+
+        assert!(loaded.needs_rewrite);
+        assert!(loaded.key == key);
+        assert_eq!(loaded.entry.connection_failed_count, entry.connection_failed_count);
+        assert_eq!(loaded.entry.address.ip, entry.address.ip);
+        assert_eq!(loaded.entry.address.port, entry.address.port);
+        assert_eq!(loaded.entry.address.services, 0b100);
+        assert_eq!(loaded.entry.address.relay_port, None);
+        assert_eq!(loaded.entry.address.relay_capacity, None);
+        assert_eq!(loaded.entry.address.relay_ttl_ms, None);
+        assert_eq!(loaded.entry.address.relay_role, None);
+        drop(store);
+        drop(db);
+        drop(db_lifetime);
+    }
+
+    #[test]
+    fn iterator_strips_relay_metadata_from_compat_entries() {
+        let (db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(16));
+        let compat_entry = RelayMetadataEntryV1 {
+            connection_failed_count: 11,
+            address: RelayMetadataNetAddressV1 {
+                ip: IpAddress::from_str("5.6.7.8").unwrap(),
+                port: 16111,
+                services: 0b101,
+                relay_port: Some(16112),
+                relay_capacity: Some(128),
+                relay_ttl_ms: Some(15_000),
+                relay_role: Some(RelayRole::Public),
+            },
+        };
+        let key = AddressKey::from(NetAddress::new(compat_entry.address.ip, compat_entry.address.port));
+        let db_key = DbKey::new(&Vec::<u8>::from(DatabaseStorePrefixes::Addresses), DbAddressKey::from(key));
+        let compat_bytes = bincode::serialize(&compat_entry).unwrap();
+        db.put(db_key, compat_bytes).unwrap();
+
+        let store = DbAddressesStore::new(db.clone(), CachePolicy::Empty);
+        let loaded = store.iterator_with_legacy_migration().next().unwrap().unwrap();
+
+        assert!(loaded.needs_rewrite);
+        assert!(loaded.key == key);
+        assert_eq!(loaded.entry.connection_failed_count, compat_entry.connection_failed_count);
+        assert_eq!(loaded.entry.address.ip, compat_entry.address.ip);
+        assert_eq!(loaded.entry.address.port, compat_entry.address.port);
+        assert_eq!(loaded.entry.address.services, compat_entry.address.services & !NET_ADDRESS_SERVICE_LIBP2P_RELAY);
+        assert_eq!(loaded.entry.address.relay_port, None);
+        assert_eq!(loaded.entry.address.relay_capacity, None);
+        assert_eq!(loaded.entry.address.relay_ttl_ms, None);
+        assert_eq!(loaded.entry.address.relay_role, None);
+        assert_eq!(loaded.entry.address.libp2p_peer_id, None);
+        assert_eq!(loaded.entry.address.relay_circuit_hint, None);
+        drop(store);
+        drop(db);
+        drop(db_lifetime);
     }
 }

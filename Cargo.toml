@@ -1,6 +1,77 @@
 [workspace]
 resolver = "2"
 members = [
+    "bridge",
+    "build-info",
+    "cli",
+    "components/addressmanager",
+    "components/connectionmanager",
+    "components/consensusmanager",
+    "components/p2p-libp2p",
+    "consensus",
+    "consensus/client",
+    "consensus/core",
+    "consensus/notify",
+    "consensus/pow",
+    "consensus/seq-commit",
+    "consensus/smt-store",
+    "consensus/wasm",
+    "core",
+    "crypto/addresses",
+    "crypto/hashes",
+    "crypto/merkle",
+    "crypto/muhash",
+    "crypto/smt",
+    "crypto/txscript",
+    "crypto/txscript/errors",
+    "crypto/txscript/zk-sdk",
+    "daemon",
+    "database",
+    "database/rocknroll",
+    "indexes/core",
+    "indexes/processor",
+    "indexes/utxoindex",
+    "kaspad",
+    "math",
+    "metrics/core",
+    "metrics/perf_monitor",
+    "mining",
+    "mining/errors",
+    "notify",
+    "protocol/flows",
+    "protocol/p2p",
+    "rothschild",
+    "rpc/core",
+    "rpc/grpc/client",
+    "rpc/grpc/core",
+    "rpc/grpc/examples/simple_client",
+    "rpc/grpc/server",
+    "rpc/macros",
+    "rpc/service",
+    "rpc/wrpc/client",
+    "rpc/wrpc/examples/simple_client",
+    "rpc/wrpc/examples/subscriber",
+    "rpc/wrpc/examples/vcc_v2",
+    "rpc/wrpc/proxy",
+    "rpc/wrpc/server",
+    "rpc/wrpc/wasm",
+    "simpa",
+    "system-info",
+    "testing/integration",
+    "utils",
+    "utils/alloc",
+    "utils/tower",
+    "wallet/bip32",
+    "wallet/core",
+    "wallet/keys",
+    "wallet/macros",
+    "wallet/native",
+    "wallet/pskt",
+    "wallet/wasm",
+    "wasm",
+    "wasm/core",
+]
+default-members = [
     "daemon",
     "cli",
     "core",
@@ -16,8 +87,6 @@ members = [
     "consensus/client",
     "consensus/notify",
     "consensus/pow",
-    "consensus/seq-commit",
-    "consensus/smt-store",
     "consensus/wasm",
     "kaspad",
     "simpa",
@@ -28,7 +97,6 @@ members = [
     "crypto/muhash",
     "crypto/addresses",
     "crypto/merkle",
-    "crypto/smt",
     "notify",
     "indexes/core",
     "indexes/processor",
@@ -39,14 +107,12 @@ members = [
     "rpc/grpc/core",
     "rpc/grpc/client",
     "rpc/grpc/server",
-    "rpc/grpc/examples/simple_client",
     "rpc/wrpc/server",
     "rpc/wrpc/client",
     "rpc/wrpc/proxy",
     "rpc/wrpc/wasm",
     "rpc/wrpc/examples/subscriber",
     "rpc/wrpc/examples/simple_client",
-    "rpc/wrpc/examples/vcc_v2",
     "mining",
     "mining/errors",
     "protocol/p2p",
@@ -55,6 +121,7 @@ members = [
     "components/connectionmanager",
     "components/consensusmanager",
     "bridge",
+    "components/p2p-libp2p",
     "database",
     "database/rocknroll",
     "crypto/txscript",
@@ -152,6 +219,7 @@ kaspa-wrpc-wasm = { version = "2.0.1", path = "rpc/wrpc/wasm" }
 kaspa-wrpc-example-subscriber = { version = "2.0.1", path = "rpc/wrpc/examples/subscriber" }
 kaspad = { version = "2.0.1", path = "kaspad" }
 kaspa-alloc = { version = "2.0.1", path = "utils/alloc" }
+kaspa-p2p-libp2p = { version = "2.0.1", path = "components/p2p-libp2p" }
 
 # external
 aes = "0.8.3"
@@ -254,6 +322,7 @@ separator = "0.4.1"
 seqlock = "0.2.0"
 serde = { version = "1.0.190", features = ["derive", "rc", "alloc"], default-features = false }
 serde-value = "0.7.0"
+serde_with = "3.7.0"
 serde-wasm-bindgen = "0.6.1"
 serde_bytes = "0.11.12"
 serde_json = "1.0.107"

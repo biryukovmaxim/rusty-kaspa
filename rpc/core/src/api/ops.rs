@@ -144,6 +144,8 @@ pub enum RpcApiOps {
     GetBlockRewardInfo = 152,
     /// Get Seq-Commit Lane Proof
     GetSeqCommitLaneProof = 153,
+    /// Get libp2p status (mode/identity/peer id)
+    GetLibp2pStatus = 154,
 }
 
 impl RpcApiOps {

@@ -1,31 +1,12 @@
+use std::net::{IpAddr, SocketAddr};
 use std::{fs, path::PathBuf, process::exit, sync::Arc, time::Duration};
 
+use crate::args::Args;
+use crate::libp2p::libp2p_config_from_args;
 use async_channel::unbounded;
-use kaspa_build_info::git;
-use kaspa_consensus_core::{
-    config::ConfigBuilder,
-    constants::TRANSIENT_BYTE_TO_MASS_FACTOR,
-    errors::config::{ConfigError, ConfigResult},
-    mining_rules::MiningRules,
-};
-use kaspa_consensus_notify::{root::ConsensusNotificationRoot, service::NotifyService};
-use kaspa_core::{core::Core, debug, info};
-use kaspa_core::{kaspad_env::version, task::tick::TickService};
-use kaspa_database::{
-    prelude::{CachePolicy, DbWriter, DirectDbWriter, RocksDbPreset},
-    registry::DatabaseStorePrefixes,
-};
-use kaspa_grpc_server::service::GrpcService;
-use kaspa_notify::{address::tracker::Tracker, subscription::context::SubscriptionContext};
-use kaspa_p2p_lib::Hub;
-use kaspa_p2p_mining::rule_engine::MiningRuleEngine;
-use kaspa_rpc_service::service::RpcCoreService;
-use kaspa_system_info::SystemInfo;
-use kaspa_txscript::caches::TxScriptCacheCounters;
-use kaspa_utils::networking::ContextualNetAddress;
-use kaspa_utils_tower::counters::TowerConnectionCounters;
-
 use kaspa_addressmanager::AddressManager;
+use kaspa_build_info::git;
+use kaspa_connectionmanager::{Libp2pRoleConfig, set_libp2p_role_config};
 use kaspa_consensus::{
     consensus::factory::MultiConsensusManagementStore, model::stores::headers::DbHeadersStore, pipeline::monitor::ConsensusMonitor,
 };
@@ -34,35 +15,52 @@ use kaspa_consensus::{
     params::{OverrideParams, Params},
     pipeline::ProcessingCounters,
 };
+use kaspa_consensus_core::{
+    config::ConfigBuilder,
+    constants::TRANSIENT_BYTE_TO_MASS_FACTOR,
+    errors::config::{ConfigError, ConfigResult},
+    mining_rules::MiningRules,
+};
+use kaspa_consensus_notify::{root::ConsensusNotificationRoot, service::NotifyService};
 use kaspa_consensusmanager::ConsensusManager;
 use kaspa_core::task::runtime::AsyncRuntime;
+use kaspa_core::{core::Core, debug, info};
+use kaspa_core::{kaspad_env::version, task::tick::TickService};
+use kaspa_database::{
+    prelude::{CachePolicy, DbWriter, DirectDbWriter, RocksDbPreset},
+    registry::DatabaseStorePrefixes,
+};
+use kaspa_grpc_server::service::GrpcService;
 use kaspa_index_processor::service::IndexService;
 use kaspa_mining::{
     MiningCounters,
     manager::{MiningManager, MiningManagerProxy},
     monitor::MiningMonitor,
 };
+use kaspa_notify::{address::tracker::Tracker, subscription::context::SubscriptionContext};
 use kaspa_p2p_flows::{flow_context::FlowContext, service::P2pService};
-
+use kaspa_p2p_lib::Hub;
+use kaspa_p2p_mining::rule_engine::MiningRuleEngine;
 use kaspa_perf_monitor::{builder::Builder as PerfMonitorBuilder, counters::CountersSnapshot};
+use kaspa_rpc_core::GetLibp2pStatusResponse;
+use kaspa_rpc_service::service::RpcCoreService;
+use kaspa_system_info::SystemInfo;
+use kaspa_txscript::caches::TxScriptCacheCounters;
+use kaspa_utils::networking::ContextualNetAddress;
+use kaspa_utils::networking::{NET_ADDRESS_SERVICE_LIBP2P_RELAY, NetAddress, RelayRole};
+use kaspa_utils_tower::counters::TowerConnectionCounters;
 use kaspa_utxoindex::{UtxoIndex, api::UtxoIndexProxy};
 use kaspa_wrpc_server::service::{Options as WrpcServerOptions, WebSocketCounters as WrpcServerCounters, WrpcEncoding, WrpcService};
 
-/// Desired soft FD limit that needs to be configured
-/// for the kaspad process.
+/// The desired soft limit for file descriptors.
+///
+/// Increase this value if you expect the node to handle a large number of connections.
 pub const DESIRED_DAEMON_SOFT_FD_LIMIT: u64 = 8 * 1024;
-/// Minimum acceptable soft FD limit for the kaspad
-/// process. (Rusty Kaspa will operate with the minimal
-/// acceptable limit of `4096`, but a setting below
-/// this value may impact the database performance).
+/// The minimum soft limit for file descriptors required to operate.
 pub const MINIMUM_DAEMON_SOFT_FD_LIMIT: u64 = 4 * 1024;
 
-/// If set, the retention period days must be at least this value
-/// (otherwise it is meaningless since pruning periods are typically at least 2 days long)
 const MINIMUM_RETENTION_PERIOD_DAYS: f64 = 2.0;
 const ONE_GIGABYTE: f64 = 1_000_000_000.0;
-
-use crate::args::Args;
 
 const DEFAULT_DATA_DIR: &str = "datadir";
 const CONSENSUS_DB: &str = "consensus";
@@ -84,6 +82,72 @@ pub fn get_app_dir() -> PathBuf {
     return get_home_dir().join("rusty-kaspa");
     #[cfg(not(target_os = "windows"))]
     return get_home_dir().join(".rusty-kaspa");
+}
+struct Libp2pAdvertisement {
+    services: u64,
+    relay_port: Option<u16>,
+    relay_capacity: Option<u32>,
+    relay_ttl_ms: Option<u64>,
+    relay_role: Option<RelayRole>,
+}
+fn libp2p_advertisement(config: &kaspa_p2p_libp2p::Config) -> Libp2pAdvertisement {
+    let advertise = config.mode.is_enabled()
+        && matches!(
+            config.mode.effective(),
+            kaspa_p2p_libp2p::Mode::Full | kaspa_p2p_libp2p::Mode::Bridge | kaspa_p2p_libp2p::Mode::Helper
+        )
+        && matches!(config.role, kaspa_p2p_libp2p::Role::Public);
+    let services = if advertise { NET_ADDRESS_SERVICE_LIBP2P_RELAY } else { 0 };
+    let relay_port = if advertise { config.listen_addresses.first().map(|addr| addr.port()) } else { None };
+    let relay_capacity = if advertise { config.relay_advertise_capacity } else { None };
+    let relay_ttl_ms = if advertise { config.relay_advertise_ttl_ms } else { None };
+    let relay_role =
+        if config.mode.is_enabled() { if advertise { Some(RelayRole::Public) } else { Some(RelayRole::Private) } } else { None };
+    Libp2pAdvertisement { services, relay_port, relay_capacity, relay_ttl_ms, relay_role }
+}
+fn parse_ip_tcp_from_multiaddr(value: &str) -> Option<SocketAddr> {
+    let parts: Vec<&str> = value.split('/').filter(|part| !part.is_empty()).collect();
+    let mut ip: Option<IpAddr> = None;
+    let mut port: Option<u16> = None;
+    for idx in 0..parts.len().saturating_sub(1) {
+        match parts[idx] {
+            "ip4" | "ip6" if ip.is_none() => {
+                if let Ok(parsed) = parts[idx + 1].parse::<IpAddr>() {
+                    ip = Some(parsed);
+                }
+            }
+            "tcp" if port.is_none() => {
+                if let Ok(parsed) = parts[idx + 1].parse::<u16>() {
+                    port = Some(parsed);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    match (ip, port) {
+        (Some(ip), Some(port)) => Some(SocketAddr::new(ip, port)),
+        _ => None,
+    }
+}
+fn libp2p_fallback_advertise_address(config: &kaspa_p2p_libp2p::Config) -> Option<NetAddress> {
+    if let Some(socket) = config.advertise_addresses.first() {
+        return Some((*socket).into());
+    }
+
+    config.external_multiaddrs.iter().find_map(|value| parse_ip_tcp_from_multiaddr(value).map(Into::into))
+}
+
+fn resolve_connection_limits(
+    connect_mode: bool,
+    outbound_target: usize,
+    inbound_limit: usize,
+    libp2p_connect_bootstrap_mode: bool,
+) -> (usize, usize) {
+    if connect_mode && !libp2p_connect_bootstrap_mode { (0, 0) } else { (outbound_target, inbound_limit) }
+}
+fn uses_libp2p_outbound_connector(mode: kaspa_p2p_libp2p::Mode) -> bool {
+    !matches!(mode.effective(), kaspa_p2p_libp2p::Mode::Off)
 }
 
 pub fn validate_args(args: &Args) -> ConfigResult<()> {
@@ -563,12 +627,58 @@ Do you confirm? (y/n)";
     let connect_peers = args.connect_peers.iter().map(|x| x.normalize(config.default_p2p_port())).collect::<Vec<_>>();
     let add_peers = args.add_peers.iter().map(|x| x.normalize(config.default_p2p_port())).collect();
     let p2p_server_addr = args.listen.unwrap_or(ContextualNetAddress::unspecified()).normalize(config.default_p2p_port());
-    // connect_peers means no DNS seeding and no outbound/inbound peers
-    let outbound_target = if connect_peers.is_empty() { args.outbound_target } else { 0 };
-    let inbound_limit = if connect_peers.is_empty() { args.inbound_limit } else { 0 };
-    let dns_seeders = if connect_peers.is_empty() && !args.disable_dns_seeding { config.dns_seeders } else { &[] };
-
     let grpc_server_addr = args.rpclisten.unwrap_or(ContextualNetAddress::loopback()).normalize(config.default_rpc_port());
+    let (libp2p_config, libp2p_status, libp2p_peer_id, outbound_connector, libp2p_init_service, libp2p_provider_cell) = {
+        let cfg = libp2p_config_from_args(&args.libp2p, &app_dir, SocketAddr::new(p2p_server_addr.ip.into(), p2p_server_addr.port));
+        let runtime = crate::libp2p::libp2p_runtime_from_config(&cfg);
+        let status: GetLibp2pStatusResponse = crate::libp2p::libp2p_status_from_config(&cfg, runtime.peer_id.clone());
+        let outbound: Arc<dyn kaspa_p2p_lib::OutboundConnector> =
+            if uses_libp2p_outbound_connector(cfg.mode) { runtime.outbound.clone() } else { Arc::new(kaspa_p2p_lib::TcpConnector) };
+        (cfg, status, runtime.peer_id.clone(), outbound, runtime.init_service, runtime.provider_cell)
+    };
+    let (
+        libp2p_services,
+        libp2p_relay_port,
+        libp2p_relay_capacity,
+        libp2p_relay_ttl_ms,
+        libp2p_relay_role,
+        libp2p_relay_inbound_cap,
+        libp2p_relay_inbound_unknown_cap,
+    ) = {
+        let advert = libp2p_advertisement(&libp2p_config);
+        let relay_inbound_cap = if matches!(libp2p_config.role, kaspa_p2p_libp2p::Role::Private | kaspa_p2p_libp2p::Role::Auto) {
+            Some(libp2p_config.max_peers_per_relay)
+        } else {
+            libp2p_config.relay_inbound_cap
+        };
+        (
+            advert.services,
+            advert.relay_port,
+            advert.relay_capacity,
+            advert.relay_ttl_ms,
+            advert.relay_role,
+            relay_inbound_cap,
+            libp2p_config.relay_inbound_unknown_cap,
+        )
+    };
+    let libp2p_advertise_address = libp2p_fallback_advertise_address(&libp2p_config);
+    {
+        let is_private = libp2p_config.mode.is_enabled()
+            && matches!(libp2p_config.role, kaspa_p2p_libp2p::Role::Private | kaspa_p2p_libp2p::Role::Auto);
+        set_libp2p_role_config(Libp2pRoleConfig { is_private, libp2p_inbound_cap_private: libp2p_config.libp2p_inbound_cap_private });
+    }
+
+    let connect_mode = !connect_peers.is_empty();
+    let libp2p_connect_bootstrap_mode = connect_mode
+        && libp2p_config.mode.is_enabled()
+        && matches!(libp2p_config.role, kaspa_p2p_libp2p::Role::Private | kaspa_p2p_libp2p::Role::Auto);
+
+    // `--connect` always disables DNS seeding.
+    // For TCP-only mode we keep strict connect-only semantics (no extra peer manager dials).
+    // For libp2p private/auto we keep peer manager active so relay-hint gossip can form hole-punch paths.
+    let (outbound_target, inbound_limit) =
+        resolve_connection_limits(connect_mode, args.outbound_target, args.inbound_limit, libp2p_connect_bootstrap_mode);
+    let dns_seeders = if !connect_mode && !args.disable_dns_seeding { config.dns_seeders } else { &[] };
 
     let core = Arc::new(Core::new());
 
@@ -674,7 +784,25 @@ Do you confirm? (y/n)";
         notification_root,
         hub.clone(),
         mining_rule_engine.clone(),
+        outbound_connector.clone(),
+        libp2p_services,
+        libp2p_relay_port,
+        libp2p_relay_capacity,
+        libp2p_relay_ttl_ms,
+        libp2p_relay_role,
+        libp2p_peer_id.clone(),
+        libp2p_advertise_address,
+        None,
+        libp2p_relay_inbound_cap,
+        libp2p_relay_inbound_unknown_cap,
     ));
+    let libp2p_node_service = if libp2p_config.mode.is_enabled() {
+        libp2p_provider_cell.clone().map(|cell| {
+            Arc::new(crate::libp2p::Libp2pNodeService::new(libp2p_config.clone(), cell, flow_context.clone(), libp2p_peer_id.clone()))
+        })
+    } else {
+        None
+    };
     let p2p_service = Arc::new(P2pService::new(
         flow_context.clone(),
         connect_peers,
@@ -705,6 +833,7 @@ Do you confirm? (y/n)";
         grpc_tower_counters.clone(),
         system_info,
         mining_rule_engine.clone(),
+        libp2p_status,
     ));
     let grpc_service_broadcasters: usize = 3; // TODO: add a command line argument or derive from other arg/config/host-related fields
     let grpc_service = if !args.disable_grpc {
@@ -733,6 +862,12 @@ Do you confirm? (y/n)";
     async_runtime.register(rpc_core_service.clone());
     if let Some(grpc_service) = grpc_service {
         async_runtime.register(grpc_service)
+    }
+    if let Some(libp2p_init_service) = libp2p_init_service {
+        async_runtime.register(libp2p_init_service);
+    }
+    if let Some(libp2p_node_service) = libp2p_node_service {
+        async_runtime.register(libp2p_node_service);
     }
     async_runtime.register(p2p_service);
     async_runtime.register(consensus_monitor);
@@ -769,4 +904,79 @@ Do you confirm? (y/n)";
     core.bind(async_runtime);
 
     (core, rpc_core_service)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kaspa_p2p_libp2p::{Config as AdapterConfig, ConfigBuilder as AdapterConfigBuilder, Mode as AdapterMode, Role as AdapterRole};
+    use std::net::SocketAddr;
+
+    #[test]
+    fn libp2p_advertisement_respects_role() {
+        let cfg_public = AdapterConfigBuilder::new()
+            .mode(AdapterMode::Bridge)
+            .role(AdapterRole::Public)
+            .listen_addresses(vec!["127.0.0.1:18080".parse().unwrap()])
+            .build();
+        let advert = libp2p_advertisement(&cfg_public);
+        assert_eq!(advert.services, NET_ADDRESS_SERVICE_LIBP2P_RELAY);
+        assert_eq!(advert.relay_port, Some(18080));
+        assert_eq!(advert.relay_role, Some(RelayRole::Public));
+
+        let cfg_private = AdapterConfig { role: AdapterRole::Private, ..cfg_public.clone() };
+        let advert_private = libp2p_advertisement(&cfg_private);
+        assert_eq!(advert_private.services, 0);
+        assert_eq!(advert_private.relay_port, None);
+        assert_eq!(advert_private.relay_role, Some(RelayRole::Private));
+    }
+
+    #[test]
+    fn parse_ip_tcp_from_multiaddr_extracts_socket_addr() {
+        let parsed = parse_ip_tcp_from_multiaddr("/ip4/10.0.3.61/tcp/16112/p2p/12D3KooWRelay").expect("expected ip/tcp components");
+        assert_eq!(parsed, "10.0.3.61:16112".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn fallback_advertise_address_uses_external_multiaddr() {
+        let config = AdapterConfigBuilder::new().external_multiaddrs(vec!["/ip4/10.0.3.62/tcp/16112".to_string()]).build();
+        let advertised = libp2p_fallback_advertise_address(&config).expect("expected fallback address");
+        assert_eq!(SocketAddr::from(advertised), "10.0.3.62:16112".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn fallback_advertise_address_prefers_explicit_advertise_socket() {
+        let config = AdapterConfigBuilder::new()
+            .external_multiaddrs(vec!["/ip4/10.0.3.62/tcp/16112".to_string()])
+            .advertise_addresses(vec!["203.0.113.10:17112".parse::<SocketAddr>().unwrap()])
+            .build();
+        let advertised = libp2p_fallback_advertise_address(&config).expect("expected fallback address");
+        assert_eq!(SocketAddr::from(advertised), "203.0.113.10:17112".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn connect_mode_keeps_legacy_limits_without_libp2p_bootstrap() {
+        let (outbound, inbound) = resolve_connection_limits(true, 8, 128, false);
+        assert_eq!((outbound, inbound), (0, 0));
+    }
+
+    #[test]
+    fn connect_mode_keeps_peer_manager_for_libp2p_bootstrap() {
+        let (outbound, inbound) = resolve_connection_limits(true, 8, 128, true);
+        assert_eq!((outbound, inbound), (8, 128));
+    }
+
+    #[test]
+    fn non_connect_mode_keeps_configured_limits() {
+        let (outbound, inbound) = resolve_connection_limits(false, 8, 128, false);
+        assert_eq!((outbound, inbound), (8, 128));
+    }
+
+    #[test]
+    fn bridge_mode_uses_libp2p_outbound_connector() {
+        assert!(!uses_libp2p_outbound_connector(AdapterMode::Off));
+        assert!(uses_libp2p_outbound_connector(AdapterMode::Full));
+        assert!(uses_libp2p_outbound_connector(AdapterMode::Helper));
+        assert!(uses_libp2p_outbound_connector(AdapterMode::Bridge));
+    }
 }
