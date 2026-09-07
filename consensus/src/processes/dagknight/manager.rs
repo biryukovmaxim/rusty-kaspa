@@ -754,24 +754,24 @@ mod tests {
         assert!(!map.contains_key(&key), "Lock should be cleaned up after all external references are dropped");
     }
 
-    /// Test that `find_last_known_tips` correctly uses chain ancestry (committed)
+    ////// Test that `find_last_known_tips` correctly uses chain ancestry (committed)
     /// vs DAG ancestry (free_search) when traversing back from tips.
     ///
     /// DAG structure:
     ///
-    ///         A <= B <= D -- F
-    ///          \       /
-    ///            \  /
-    ///        Z <- C <= E -- W
-    ///         \    \   /
-    ///           \   \ /
+    ///         A <= B <= D <= F
+    ///          \           /
+    ///            \       /
+    ///        Z <- C <= E <= W
+    ///         \    \      /
+    ///           \   \   /
     ///            Y <= X
     ///
     /// Selected parents:
     /// - A: ORIGIN, B: A, D: B, Z: ORIGIN
     /// - C: A (agrees with A), E: C
     /// - Y: Z, X: Y (X does NOT agree with A - its chain goes X→Y→Z→ORIGIN)
-    /// - F, W: tips (no selected parent yet)
+    /// - F: D, W: E
     ///
     /// Parents:
     /// - A:[ORIGIN], B:[A], D:[B], F:[D,E]
@@ -785,9 +785,10 @@ mod tests {
     /// F and W are tips (no records)
     ///
     /// TEST with tips = [F, W]:
+    /// - committed search with nca = B: find_last_known_tips returns [D]
+    ///   (F is in-region via F→D→B; W is out-of-region)
     /// - committed search with nca = C: find_last_known_tips returns [E]
-    ///   (F's chain is F→E→C; D is in B's branch and W is out-of-zone entirely - both
-    ///   skipped on dequeue, so D and X are never reached)
+    ///   (W is in-region via W→E→C; F is out-of-region via F→D→B, so D is never rooted)
     /// - free search: find_last_known_tips returns [D, E, X]
     ///   (F→D,E; W→X,E; all are DAG ancestors)
     #[test]
@@ -821,8 +822,8 @@ mod tests {
             builder.add_block_with_selected_parent(DagBlock::new(hash_e, vec![hash_c]), hash_c);
             builder.add_block_with_selected_parent(DagBlock::new(hash_y, vec![hash_z]), hash_z);
             builder.add_block_with_selected_parent(DagBlock::new(hash_x, vec![hash_y, hash_c]), hash_y);
-            builder.add_block(DagBlock::new(hash_f, vec![hash_d, hash_e])); // Tip
-            builder.add_block(DagBlock::new(hash_w, vec![hash_x, hash_e])); // Tip
+            builder.add_block_with_selected_parent(DagBlock::new(hash_f, vec![hash_d, hash_e]), hash_d); // Tip
+            builder.add_block_with_selected_parent(DagBlock::new(hash_w, vec![hash_x, hash_e]), hash_e); // Tip
 
             // Insert headers with valid bits
             for (hash, parents) in [
@@ -887,17 +888,17 @@ mod tests {
         // Tips are F and W (no records yet)
         let tips = vec![hash_f, hash_w];
 
-        // Committed search is scoped by the NCA: C covers F's chain
-        // (F→E→C - add_block selects E as F's selected parent by height tie) but not
-        // D (D→B→A, sibling branch) nor the foreign tip W (W→X→Y→Z→ORIGIN), so both
-        // are skipped on dequeue and D/X are never rooted
-        let (roots_committed, _) = manager_committed.find_last_known_tips(&tips, hash_c);
-        let (roots_free, _) = manager_free.find_last_known_tips(&tips, ());
+        // First coloring for one subgroup
+        let (roots_committed_with_hash_b, _) = manager_committed.find_last_known_tips(&tips, hash_b);
+        assert_eq!(roots_committed_with_hash_b.len(), 1, "Committed LKT with NCA=B should find D only");
+        assert!(roots_committed_with_hash_b.contains(&hash_d));
 
-        assert_eq!(roots_committed.len(), 1, "Committed (nca=C) should find only E");
-        assert!(roots_committed.contains(&hash_e));
-        assert!(!roots_committed.contains(&hash_d), "D should not be in committed roots (not under nca=C)");
-        assert!(!roots_committed.contains(&hash_x), "X should not be in committed roots");
+        // Second coloring for another subgroup
+        let (roots_committed_with_hash_c, _) = manager_committed.find_last_known_tips(&tips, hash_c);
+        assert_eq!(roots_committed_with_hash_c.len(), 1, "Committed LKT with NCA=C should find E only");
+        assert!(roots_committed_with_hash_c.contains(&hash_e));
+
+        let (roots_free, _) = manager_free.find_last_known_tips(&tips, ());
 
         assert_eq!(roots_free.len(), 3, "Free search should find D, E, X");
         assert!(roots_free.contains(&hash_d));

@@ -82,7 +82,7 @@ impl DagknightKey {
 
 impl fmt::Display for DagknightKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", &self.bytes)
+        write!(f, "{:?}", self.bytes)
     }
 }
 
