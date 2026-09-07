@@ -1,4 +1,4 @@
-use crate::processes::dagknight::tie_breaking::DagknightTieBreaker;
+use crate::processes::dagknight::tie_breaking::{DagknightTieBreaker, TieBreaker, TieBreakingContext};
 #[cfg(feature = "baseline-debugging")]
 use crate::processes::dagknight::umc_baseline::BaselineUmcVoter;
 use crate::processes::dagknight::umc_voting::{UmcVoter, UmcVotingContext};
@@ -183,7 +183,7 @@ impl<
 
                     if agreement_grouping.iter().map(|group| &group.common_ancestor).all_equal() {
                         // There is exactly one group, we don't rank; the loop head re-derives the
-                        // conflict genesis from this same subgroup to skip to the next level
+                        // top-most common chain ancestor of this same subgroup as the next conflict genesis
                         agreement_grouping.into_iter().map(|group| group.parent).collect()
                     } else {
                         // Pick a "winner" among these subgroups
@@ -293,7 +293,9 @@ impl<
         subgroups: &[GroupMetadata],
     ) -> usize {
         debug!("Winning groups had rank k = {}", subgroups[0].k);
-        let mutual_k = subgroups[0].k;
+        let k = subgroups[0].k;
+        let all_tips: SmallVec<[Hash; 20]> = agreement_grouping.iter().map(|group| parents[group.parent as usize]).collect();
+        let ctx = TieBreakingContext { conflict_genesis, all_tips: &all_tips, parents, subgroups, k };
 
         // TODO[DK]: use references for relations/reachability as well once the traits are implemented for &T
         DagknightTieBreaker::new(
@@ -302,13 +304,7 @@ impl<
             self.relations_store.clone(),
             self.reachability_service.clone(),
         )
-        .tie_break(
-            conflict_genesis,
-            agreement_grouping.iter().map(|group| &parents[group.parent as usize]),
-            subgroups,
-            parents,
-            mutual_k,
-        )
+        .tie_break(&ctx)
     }
 
     /// Follows the Calculate-Rank algorithm in the DK paper: returns the best
@@ -342,7 +338,9 @@ impl<
             }
         };
 
-        RankSearcher::search(evaluate).map(|result| result.result).unwrap_or_default()
+        RankSearcher::search(evaluate)
+            .expect("some k must satisfy UMC since the entire conflict zone is a K(k) cluster at worst")
+            .result
     }
 
     /// Applies a coloring to the conflict zone, and determines if the

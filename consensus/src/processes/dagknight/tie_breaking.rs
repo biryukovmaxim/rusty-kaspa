@@ -32,6 +32,29 @@ pub struct ReferenceCluster {
     pub chain_blocks: Vec<Hash>,
 }
 
+/// Input data for a tie-breaking call.
+pub struct TieBreakingContext<'a> {
+    /// The latest common chain ancestor of all competing tips (conflict genesis).
+    pub conflict_genesis: Hash,
+    /// All competing tips of the current conflict level (the deduplicated subgroup parents).
+    pub all_tips: &'a [Hash],
+    /// The full set of parents the subgroup member indices refer to.
+    pub parents: &'a [Hash],
+    /// The tied subgroups, each agreeing on a common chain ancestor above the conflict genesis.
+    pub subgroups: &'a [GroupMetadata<'a>],
+    /// The mutual rank `k` shared by all tied subgroups.
+    pub k: KType,
+}
+
+/// Trait for tie-breaking logic, isolating it from the DAGKnight executor for testability.
+/// Mirrors the `UmcVoter` trait in `umc_voting.rs`.
+pub trait TieBreaker {
+    /// Breaks the tie among competing subgroups that share the same rank.
+    ///
+    /// Returns the index of the winning subgroup
+    fn tie_break(&self, ctx: &TieBreakingContext<'_>) -> usize;
+}
+
 /// DAGKnight tie-breaker implementing Algorithm 4 of the paper. Holds only the
 /// stores needed for tie-breaking, not the full executor.
 pub struct DagknightTieBreaker<
@@ -116,10 +139,13 @@ impl<
 
     /// Computes the k'-chain conditioned on the virtual block agreeing with a specific subgroup.
     ///
+    /// `next_chain_ancestor` is the subgroup's agreed chain ancestor above `conflict_genesis`.
+    ///
     /// Returns the chain blocks from virtual towards conflict_genesis (inclusive).
     fn compute_subgroup_chain_blocks<'a, 'b, P, T>(
         &self,
         conflict_genesis: Hash,
+        next_chain_ancestor: Hash,
         group_tips: P,
         all_tips: T,
         k_prime: KType,
@@ -136,8 +162,6 @@ impl<
         let group_tips = once(first_tip).chain(group_tips);
         let all_tips = all_tips.into_iter();
 
-        // Calculate the subgroup's next chain ancestor above conflict_genesis
-        let subgroup_nca = self.reachability_service.get_next_chain_ancestor(*first_tip, conflict_genesis);
         let conflict_zone_manager = ConflictZoneManager::committed_search(
             k_prime,
             conflict_genesis,
@@ -146,7 +170,7 @@ impl<
             relations_service,
             &self.reachability_service,
         );
-        conflict_zone_manager.fill_zone_data(all_tips.clone(), subgroup_nca);
+        conflict_zone_manager.fill_zone_data(all_tips.clone(), next_chain_ancestor);
 
         // Condition virtual on the group: force selected parent from group_tips
         let subgroup_virtual_sp = conflict_zone_manager.find_selected_parent(group_tips);
@@ -183,6 +207,7 @@ impl<
     fn compute_high_rank_witnesses<'a, 'b, P, T>(
         &self,
         conflict_genesis: Hash,
+        next_chain_ancestor: Hash,
         group_tips: P,
         all_tips: T,
         f_cluster: &BlockHashSet,
@@ -198,7 +223,7 @@ impl<
 
         // TODO[DK]: Revisit - as it only checks k - 1 against the reference block
         let k_prime = k.saturating_sub(1);
-        let chain = self.compute_subgroup_chain_blocks(conflict_genesis, group_tips, all_tips, k_prime);
+        let chain = self.compute_subgroup_chain_blocks(conflict_genesis, next_chain_ancestor, group_tips, all_tips, k_prime);
 
         for &b in f_cluster.iter() {
             if self.count_anticone_with_chain(b, &chain) > k_prime {
@@ -218,19 +243,15 @@ impl<
     /// 1. Compute reference cluster F using free search at g(k) = floor(sqrt(k))
     /// 2. For each subgroup, compute C_i = high-rank witnesses against F
     /// 3. Select the subgroup whose max(C_i) is earliest (argmin by blue_work, ties by hash)
-    pub fn tie_break<'a, T>(
+    fn tie_break_alg4(
         &self,
         conflict_genesis: Hash,
-        all_tips: T,
-        subgroups: &[GroupMetadata],
+        all_tips: &[Hash],
         parents: &[Hash],
+        subgroups: &[GroupMetadata],
         k: KType,
-    ) -> usize
-    where
-        T: IntoIterator<Item = &'a Hash>,
-        T::IntoIter: Clone,
-    {
-        let all_tips = all_tips.into_iter();
+    ) -> usize {
+        let all_tips = all_tips.iter();
 
         // Step 1: Compute reference cluster F using free search with g(k) = floor(sqrt(k))
         let g_k = k.isqrt() as KType;
@@ -241,14 +262,30 @@ impl<
         let mut group_scores: Vec<(usize, SortableBlock, Hash)> = Vec::with_capacity(subgroups.len());
 
         for (idx, group_metadata) in subgroups.iter().enumerate() {
+            // The subgroup is uniform in its members' common ancestor
+            let next_chain_ancestor = group_metadata.subgroup[0].common_ancestor;
             let group_tips = group_metadata.subgroup.iter().map(|group| &parents[group.parent as usize]);
-            let max_c_i = self.compute_high_rank_witnesses(conflict_genesis, group_tips, all_tips.clone(), &f_cluster, k);
+            let max_c_i =
+                self.compute_high_rank_witnesses(conflict_genesis, next_chain_ancestor, group_tips, all_tips.clone(), &f_cluster, k);
 
             group_scores.push((idx, max_c_i, group_metadata.selected_parent.hash));
         }
 
         // Step 3: Select winner
         group_scores.iter().min_by(|(_, a, ah), (_, b, bh)| a.cmp(b).then_with(|| ah.cmp(bh))).map(|(idx, _, _)| *idx).unwrap()
+    }
+}
+
+impl<
+    C: DagknightStore + DagknightStoreReader,
+    O: HeaderStoreReader,
+    D: RelationsStoreReader + Clone,
+    R: ReachabilityStoreReader + Clone,
+> TieBreaker for DagknightTieBreaker<C, O, D, R>
+{
+    fn tie_break(&self, ctx: &TieBreakingContext<'_>) -> usize {
+        let TieBreakingContext { conflict_genesis, all_tips, parents, subgroups, k } = *ctx;
+        self.tie_break_alg4(conflict_genesis, all_tips, parents, subgroups, k)
     }
 }
 
@@ -400,7 +437,8 @@ mod tests {
         let all_tips = vec![dag.hash_x, dag.hash_d];
 
         // Conditioned on [X]: must follow reachability chain X → Y → Z → A
-        let chain_x = tie_breaker.compute_subgroup_chain_blocks(dag.hash_a, &[dag.hash_x], &all_tips, 2);
+        let nca_x = dag.reachability_service.get_next_chain_ancestor(dag.hash_x, dag.hash_a);
+        let chain_x = tie_breaker.compute_subgroup_chain_blocks(dag.hash_a, nca_x, &[dag.hash_x], &all_tips, 2);
         assert_eq!(chain_x.len(), 4, "X conditioned chain should have 4 blocks: X, Y, Z, A");
         assert_eq!(chain_x[0], dag.hash_x, "virtual selected parent is X");
         assert_eq!(chain_x[1], dag.hash_y, "X's committed parent must be Y");
@@ -408,7 +446,8 @@ mod tests {
         assert_eq!(chain_x[3], dag.hash_a, "Z's committed parent is genesis A");
 
         // Conditioned on [D]: must follow reachability chain D → C → B → A
-        let chain_d = tie_breaker.compute_subgroup_chain_blocks(dag.hash_a, &[dag.hash_d], &all_tips, 2);
+        let nca_d = dag.reachability_service.get_next_chain_ancestor(dag.hash_d, dag.hash_a);
+        let chain_d = tie_breaker.compute_subgroup_chain_blocks(dag.hash_a, nca_d, &[dag.hash_d], &all_tips, 2);
         assert_eq!(chain_d.len(), 4, "D conditioned chain should have 4 blocks: D, C, B, A");
         assert_eq!(chain_d[0], dag.hash_d, "virtual selected parent is D");
         assert_eq!(chain_d[1], dag.hash_c, "D's committed parent must be C");
@@ -567,10 +606,12 @@ mod tests {
         let f_cluster = ref_cluster.blues;
 
         // Compute C_i for [X] side
-        let c_x = tie_breaker.compute_high_rank_witnesses(dag.hash_a, &[dag.hash_x], &all_tips, &f_cluster, 4);
+        let nca_x = dag.reachability_service.get_next_chain_ancestor(dag.hash_x, dag.hash_a);
+        let c_x = tie_breaker.compute_high_rank_witnesses(dag.hash_a, nca_x, &[dag.hash_x], &all_tips, &f_cluster, 4);
 
         // Compute C_i for [D] side
-        let c_d = tie_breaker.compute_high_rank_witnesses(dag.hash_a, &[dag.hash_d], &all_tips, &f_cluster, 4);
+        let nca_d = dag.reachability_service.get_next_chain_ancestor(dag.hash_d, dag.hash_a);
+        let c_d = tie_breaker.compute_high_rank_witnesses(dag.hash_a, nca_d, &[dag.hash_d], &all_tips, &f_cluster, 4);
 
         // All non-genesis blocks in C_i must be a subset of F
         assert!(f_cluster.contains(&c_x.hash), "X's witness must be in F");
@@ -604,8 +645,23 @@ mod tests {
             GroupMetadata { subgroup: &sg_x, k: mutual_k, selected_parent: sp_x },
         ];
 
-        let output_forward = tie_breaker.tie_break(dag.hash_a, &all_tips, &subgroups_forward, &parents, mutual_k);
-        let output_reversed = tie_breaker.tie_break(dag.hash_a, &all_tips, &subgroups_reversed, &parents, mutual_k);
+        let ctx_forward = TieBreakingContext {
+            conflict_genesis: dag.hash_a,
+            all_tips: &all_tips,
+            parents: &parents,
+            subgroups: &subgroups_forward,
+            k: mutual_k,
+        };
+        let output_forward = tie_breaker.tie_break(&ctx_forward);
+
+        let ctx_reversed = TieBreakingContext {
+            conflict_genesis: dag.hash_a,
+            all_tips: &all_tips,
+            parents: &parents,
+            subgroups: &subgroups_reversed,
+            k: mutual_k,
+        };
+        let output_reversed = tie_breaker.tie_break(&ctx_reversed);
 
         // The winning subgroup *content* must be the same
         assert_eq!(
