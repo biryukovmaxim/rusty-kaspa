@@ -17,20 +17,18 @@ use crate::{
     errors::{UtxoIndexError, UtxoIndexResult},
     model::UtxoSetByScriptPublicKey,
     stores::{
-        db_metadata::{
-            CovenantIndexDbMetaData, CovenantIndexDbMetaStore, CovenantIndexDbMetaStoreReader, DbCovenantIndexDbMetaStore,
-            DbUtxoIndexDbMetaStore, UtxoIndexDbMetaData, UtxoIndexDbMetaStore, UtxoIndexDbMetaStoreReader,
-        },
+        db_metadata::{DbUtxoIndexDbMetaStore, UtxoIndexDbMetaData, UtxoIndexDbMetaStore, UtxoIndexDbMetaStoreReader},
         indexed_utxos::{DbUtxoSetByScriptPublicKeyStore, UtxoSetByScriptPublicKeyStore, UtxoSetByScriptPublicKeyStoreReader},
         indexed_utxos_by_covenant_id::{DbUtxoSetByCovenantIdStore, UtxoSetByCovenantIdStore, UtxoSetByCovenantIdStoreReader},
         supply::{CirculatingSupplyStore, CirculatingSupplyStoreReader, DbCirculatingSupplyStore},
-        tips::{DbUtxoIndexTipsStore, UtxoIndexTipsStore, UtxoIndexTipsStoreReader},
+        tips::{
+            CovenantIndexTipsStore, CovenantIndexTipsStoreReader, DbCovenantIndexTipsStore, DbUtxoIndexTipsStore, UtxoIndexTipsStore,
+            UtxoIndexTipsStoreReader,
+        },
     },
 };
 
 pub const UTXOINDEX_DB_VERSION: u16 = 1;
-
-pub const COVENANT_INDEX_DB_VERSION: u16 = 1;
 
 #[derive(Clone)]
 pub struct Store {
@@ -39,7 +37,7 @@ pub struct Store {
     db_version_store: DbUtxoIndexDbMetaStore,
     utxos_by_script_public_key_store: DbUtxoSetByScriptPublicKeyStore,
     utxos_by_covenant_id_store: DbUtxoSetByCovenantIdStore,
-    covenant_db_meta_store: DbCovenantIndexDbMetaStore,
+    covenant_tips_store: DbCovenantIndexTipsStore,
 }
 
 impl Store {
@@ -54,7 +52,7 @@ impl Store {
                 CachePolicy::Empty,
                 DbUtxoSetByScriptPublicKeyStore::new(db.clone(), CachePolicy::Empty),
             ),
-            covenant_db_meta_store: DbCovenantIndexDbMetaStore::new(db),
+            covenant_tips_store: DbCovenantIndexTipsStore::new(db),
         }
     }
 
@@ -177,31 +175,30 @@ impl Store {
         covenant_res
     }
 
-    /// Drops every covenant row and its version marker so the next startup backfill re-runs.
+    /// Drops every covenant row and its tips so the next startup backfill re-runs.
     fn reset_covenant_store(&mut self) -> StoreResult<()> {
         self.utxos_by_covenant_id_store.delete_all()?;
-        self.covenant_db_meta_store.remove()
+        self.covenant_tips_store.remove()
     }
 
-    /// Drops the covenant version marker so the next enabled startup backfills the
-    /// covenant store from the then-current address store.
-    pub fn invalidate_covenant_index(&mut self) -> UtxoIndexResult<()> {
-        self.covenant_db_meta_store.remove()?;
-        Ok(())
-    }
-
-    /// Brings the covenant store up to date with the address store: when the covenant
-    /// version marker is missing or stale, every covenant row is rebuilt from the
-    /// address store contents and the current marker is written.
+    /// Brings the covenant store up to date with the address store: when the covenant tips do
+    /// not match the utxoindex tips, every covenant row is rebuilt from the address store
+    /// contents and the tips are aligned. While the covenant index is disabled the covenant
+    /// tips stay behind, so re-enabling rebuilds only when the utxoindex has progressed since.
     pub fn migrate_covenant_index(&mut self) -> UtxoIndexResult<()> {
-        if let Ok(meta) = self.covenant_db_meta_store.get()
-            && meta.version == COVENANT_INDEX_DB_VERSION
+        if let (Ok(covenant_tips), Ok(utxoindex_tips)) = (self.covenant_tips_store.get(), self.utxoindex_tips_store.get())
+            && covenant_tips == utxoindex_tips
         {
             return Ok(());
         }
         self.reset_covenant_store()?;
         self.utxos_by_covenant_id_store.backfill_from_address_store()?;
-        self.covenant_db_meta_store.set(CovenantIndexDbMetaData { version: COVENANT_INDEX_DB_VERSION })?;
+        match self.utxoindex_tips_store.get() {
+            Ok(tips) => self.covenant_tips_store.set_tips((*tips).clone())?,
+            // no utxoindex tips to align with; the reset above left the covenant tips absent too
+            Err(kaspa_database::prelude::StoreError::KeyNotFound(_)) => {}
+            Err(err) => return Err(UtxoIndexError::StoreAccessError(err)),
+        }
         Ok(())
     }
 
@@ -237,6 +234,12 @@ impl Store {
         res
     }
 
+    /// Commits the covenant store's sync position; a failed write leaves the covenant tips
+    /// behind, so the next startup backfills from the address store
+    pub fn set_covenant_tips(&mut self, tips: BlockHashSet) -> StoreResult<()> {
+        self.covenant_tips_store.set_tips(tips)
+    }
+
     /// Resets the utxoindex database:
     pub fn delete_all(&mut self) -> StoreResult<()> {
         // TODO: explore possibility of deleting and replacing whole db, currently there is an issue because of file lock and db being in an arc.
@@ -248,7 +251,7 @@ impl Store {
         self.db_version_store.remove()?;
         self.utxos_by_script_public_key_store.delete_all()?;
         self.utxos_by_covenant_id_store.delete_all()?;
-        self.covenant_db_meta_store.remove()?;
+        self.covenant_tips_store.remove()?;
 
         trace!("[{0}] clearing utxoindex database - success!", IDENT);
 
@@ -345,7 +348,7 @@ mod tests {
         let covenant_added = covenant_changes(id, vec![(spk.clone(), 4, outpoint)], false);
         store.update_utxo_state(&added, &UtxoSetByScriptPublicKey::new(), &covenant_added, false).unwrap();
 
-        // no marker was written by the update path, so the migration redoes the covenant
+        // no covenant tips were written by the update path, so the migration redoes the covenant
         // rows from the address store and yields the identical set
         store.migrate_covenant_index().unwrap();
         let page = store.get_utxos_by_covenant_ids_page(vec![id], 0..=u64::MAX, None, None, None, None).unwrap();
@@ -355,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn test_migration_skips_when_marker_is_current() {
+    fn test_migration_skips_when_tips_match() {
         let (_db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
         let mut store = Store::new(db);
 
@@ -366,14 +369,14 @@ mod tests {
         let added = address_set(id, vec![(spk.clone(), 4, outpoint, 1234)]);
         let covenant_added = covenant_changes(id, vec![(spk.clone(), 4, outpoint)], false);
         store.update_utxo_state(&added, &UtxoSetByScriptPublicKey::new(), &covenant_added, false).unwrap();
+        store.set_tips(std::iter::once(Hash::from_u64_word(11)).collect(), false).unwrap();
         store.migrate_covenant_index().unwrap();
 
+        // an address row re-added without its covenant counterpart leaves the covenant
+        // store stale; with the tips still matching the migration leaves it untouched
         let removed = address_set(id, vec![(spk.clone(), 4, outpoint, 1234)]);
         let covenant_removed = covenant_changes(id, vec![(spk.clone(), 4, outpoint)], true);
         store.update_utxo_state(&UtxoSetByScriptPublicKey::new(), &removed, &covenant_removed, false).unwrap();
-
-        // an address row re-added without its covenant counterpart leaves the covenant
-        // store stale; with a current marker the migration leaves it untouched
         let readded = address_set(id, vec![(spk.clone(), 4, outpoint, 1234)]);
         store.update_utxo_state(&readded, &UtxoSetByScriptPublicKey::new(), &CovenantUtxoChanges::new(), false).unwrap();
         store.migrate_covenant_index().unwrap();
@@ -382,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn test_migration_without_marker_drops_stale_rows() {
+    fn test_migration_without_tips_drops_stale_rows() {
         let (_db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
         let mut store = Store::new(db);
 
@@ -406,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn test_invalidation_forces_backfill_on_next_enabled_startup() {
+    fn test_migrate_backfills_after_utxoindex_progressed() {
         let (_db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
         let mut store = Store::new(db);
 
@@ -422,11 +425,33 @@ mod tests {
         store.update_utxo_state(&added, &UtxoSetByScriptPublicKey::new(), &covenant_added, false).unwrap();
         store.migrate_covenant_index().unwrap();
 
-        // a disabled startup drops the marker so the next enabled startup backfills;
-        // stale rows accumulated meanwhile do not survive that backfill
-        store.invalidate_covenant_index().unwrap();
+        // the utxoindex progresses while the covenant index is disabled; rows accumulated
+        // meanwhile do not survive the next enabled startup's backfill
+        store.set_tips(std::iter::once(Hash::from_u64_word(11)).collect(), false).unwrap();
         store.migrate_covenant_index().unwrap();
         let page = store.get_utxos_by_covenant_ids_page(vec![stale_id], 0..=u64::MAX, None, None, None, None).unwrap();
         assert!(page.entries().is_empty() || page.entries()[0].1.is_empty());
+    }
+
+    #[test]
+    fn test_migrate_skips_when_utxoindex_did_not_progress() {
+        let (_db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
+        let mut store = Store::new(db);
+
+        let id = Hash::from_slice(&[1u8; 32]);
+        let spk = ScriptPublicKey::from_vec(0, vec![0x01]);
+        let outpoint = TransactionOutpoint::new(Hash::from_u64_word(7), 0);
+
+        let added = address_set(id, vec![(spk.clone(), 4, outpoint, 1234)]);
+        let covenant_added = covenant_changes(id, vec![(spk.clone(), 4, outpoint)], false);
+        store.update_utxo_state(&added, &UtxoSetByScriptPublicKey::new(), &covenant_added, false).unwrap();
+        let tips: BlockHashSet = std::iter::once(Hash::from_u64_word(11)).collect();
+        store.set_tips(tips.clone(), false).unwrap();
+        store.set_covenant_tips(tips).unwrap();
+
+        // with the tips still matching, a disabled run leaves the covenant store untouched
+        store.migrate_covenant_index().unwrap();
+        let page = store.get_utxos_by_covenant_ids_page(vec![id], 0..=u64::MAX, None, None, None, None).unwrap();
+        assert_eq!(page.entries()[0].1.len(), 1);
     }
 }

@@ -45,3 +45,43 @@ impl UtxoIndexTipsStore for DbUtxoIndexTipsStore {
         self.access.remove(DirectDbWriter::new(&self.db))
     }
 }
+
+/// Reader API for `CovenantIndexTipsStore`.
+pub trait CovenantIndexTipsStoreReader {
+    fn get(&self) -> StoreResult<Arc<BlockHashSet>>;
+}
+
+pub trait CovenantIndexTipsStore: CovenantIndexTipsStoreReader {
+    fn set_tips(&mut self, new_tips: BlockHashSet) -> StoreResult<()>;
+    fn remove(&mut self) -> Result<(), StoreError>;
+}
+
+/// A DB + cache implementation of `CovenantIndexTipsStore` trait, holding the utxoindex tips
+/// the covenant store was last maintained at
+#[derive(Clone)]
+pub struct DbCovenantIndexTipsStore {
+    db: Arc<DB>,
+    access: CachedDbItem<Arc<BlockHashSet>>,
+}
+
+impl DbCovenantIndexTipsStore {
+    pub fn new(db: Arc<DB>) -> Self {
+        Self { db: Arc::clone(&db), access: CachedDbItem::new(db, DatabaseStorePrefixes::UtxoIndexCovenantTips.into()) }
+    }
+}
+
+impl CovenantIndexTipsStoreReader for DbCovenantIndexTipsStore {
+    fn get(&self) -> StoreResult<Arc<BlockHashSet>> {
+        self.access.read()
+    }
+}
+
+impl CovenantIndexTipsStore for DbCovenantIndexTipsStore {
+    fn set_tips(&mut self, new_tips: BlockHashSet) -> Result<(), StoreError> {
+        self.access.write(DirectDbWriter::new(&self.db), &Arc::new(new_tips))
+    }
+
+    fn remove(&mut self) -> Result<(), StoreError> {
+        self.access.remove(DirectDbWriter::new(&self.db))
+    }
+}

@@ -76,7 +76,7 @@ pub enum DatabaseStorePrefixes {
     CirculatingSupply = 194,
     UtxoIndexDbVersion = 195,
     UtxoIndexCovenant = 196,
-    UtxoIndexCovenantDbVersion = 197,
+    UtxoIndexCovenantTips = 198,
 
     // ---- SMT Versioned Store ----
     SmtBranchVersions = 71,

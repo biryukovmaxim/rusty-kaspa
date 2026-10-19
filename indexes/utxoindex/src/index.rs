@@ -62,8 +62,6 @@ impl UtxoIndex {
         }
         if utxoindex.covenant_index {
             utxoindex.store.migrate_covenant_index()?;
-        } else {
-            utxoindex.store.invalidate_covenant_index()?;
         }
         let utxoindex = Arc::new(RwLock::new(utxoindex));
         consensus_manager.register_consensus_reset_handler(Arc::new(UtxoIndexConsensusResetHandler::new(Arc::downgrade(&utxoindex))));
@@ -154,7 +152,10 @@ impl UtxoIndexApi for UtxoIndex {
         }
 
         // Commit new consensus virtual tips.
-        self.store.set_tips(utxoindex_changes.tips, false)?; //we expect new tips with every virtual!
+        self.store.set_tips(utxoindex_changes.tips.clone(), false)?; //we expect new tips with every virtual!
+        if self.covenant_index {
+            self.store.set_covenant_tips(utxoindex_changes.tips)?;
+        }
 
         // Return the resulting changes in utxoindex.
         Ok(utxoindex_changes.utxo_changes)
@@ -241,7 +242,10 @@ impl UtxoIndexApi for UtxoIndex {
         self.monotonic_circulating_supply = circulating_supply;
 
         trace!("[{0}] committing consensus tips {consensus_tips:?} from consensus db", IDENT);
-        self.store.set_tips(consensus_tips, true)?;
+        self.store.set_tips(consensus_tips.clone(), true)?;
+        if self.covenant_index {
+            self.store.set_covenant_tips(consensus_tips)?;
+        }
         self.store.ensure_db_version_current()?;
 
         Ok(())
