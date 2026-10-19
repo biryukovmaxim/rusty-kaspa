@@ -107,7 +107,9 @@ impl MemSizeEstimator for CovenantIndexEntry {}
 pub trait UtxoSetByCovenantIdStoreReader {
     /// Get an ordered page of UTXOs for multiple covenant ids with an optional DAA-score range,
     /// optional script public key bounds, and cursor pagination. Ids are traversed in request order;
-    /// amount and is_coinbase are resolved per row from the address store.
+    /// amount and is_coinbase are resolved per row from the address store. The limit bounds rows
+    /// scanned from the store, so a page can hold fewer than `limit` entries when script public
+    /// key bounds filter scanned rows out.
     fn get_utxos_by_covenant_ids_page(
         &self,
         covenant_ids: Vec<Hash>,
@@ -203,9 +205,31 @@ impl UtxoSetByCovenantIdStoreReader for DbUtxoSetByCovenantIdStore {
             None => CovenantUtxoPageCursor::new(first, *daa_score_range.start(), None, TransactionOutpoint::EMPTY),
         };
 
-        // one key range per covenant id, traversed in request order; the first range resumes at
-        // the cursor. Each range gets its own seek pass, since request order need not be ascending.
-        let first_start = match &cursor.script_public_key {
+        // bounds compare on the bucket encoding, matching store key order; they tighten the range
+        // corners only, so interior daa scores still need the per-row filter below
+        let from_bucket = from_spk.as_ref().map(ScriptPublicKeyBucket::from);
+        let to_bucket = to_spk.as_ref().map(ScriptPublicKeyBucket::from);
+        let bottom_outpoint = TransactionOutpointKey::from(&TransactionOutpoint::EMPTY);
+        let top_outpoint = TransactionOutpointKey::from(&TransactionOutpoint::new(Hash::from_slice(&[0xFF; HASH_SIZE]), u32::MAX));
+        let range_for = |id: Hash| {
+            let start = match &from_bucket {
+                Some(bucket) => {
+                    CovenantUtxoEntryDbKey::new(id, DaaScoreKey::from(*daa_score_range.start()), bucket.clone(), bottom_outpoint)
+                }
+                None => CovenantUtxoEntryDbKey::prefix_start(id, *daa_score_range.start()),
+            };
+            let end = match &to_bucket {
+                Some(bucket) => {
+                    CovenantUtxoEntryDbKey::new(id, DaaScoreKey::from(*daa_score_range.end()), bucket.clone(), top_outpoint)
+                }
+                None => CovenantUtxoEntryDbKey::range_end(id, *daa_score_range.end()),
+            };
+            start..=end
+        };
+
+        // the first range resumes at the cursor, lifted to the from-spk bound when the cursor
+        // sits below it; ids after the first always start at the range bottom
+        let mut first_start = match &cursor.script_public_key {
             Some(script_public_key) => CovenantUtxoEntryDbKey::new(
                 cursor.covenant_id,
                 DaaScoreKey::from(cursor.daa_score),
@@ -214,47 +238,59 @@ impl UtxoSetByCovenantIdStoreReader for DbUtxoSetByCovenantIdStore {
             ),
             None => CovenantUtxoEntryDbKey::prefix_start(cursor.covenant_id, cursor.daa_score),
         };
-        let key_ranges = std::iter::once(first_start..=CovenantUtxoEntryDbKey::range_end(first, *daa_score_range.end())).chain(
-            covenant_ids.into_iter().skip(1).map(|id| {
-                CovenantUtxoEntryDbKey::prefix_start(id, *daa_score_range.start())
-                    ..=CovenantUtxoEntryDbKey::range_end(id, *daa_score_range.end())
-            }),
-        );
+        if let Some(bucket) = &from_bucket
+            && first_start
+                < CovenantUtxoEntryDbKey::new(cursor.covenant_id, DaaScoreKey::from(cursor.daa_score), bucket.clone(), bottom_outpoint)
+        {
+            first_start =
+                CovenantUtxoEntryDbKey::new(cursor.covenant_id, DaaScoreKey::from(cursor.daa_score), bucket.clone(), bottom_outpoint);
+        }
+        let key_ranges = std::iter::once(first_start..=CovenantUtxoEntryDbKey::range_end(first, *daa_score_range.end()))
+            .chain(covenant_ids.iter().skip(1).map(|id| range_for(*id)));
 
         let extended_limit = limit.map(|l| l.saturating_add(1)).unwrap_or(usize::MAX);
-        // bounds compare on the bucket encoding, matching store key order
-        let from_bucket = from_spk.as_ref().map(ScriptPublicKeyBucket::from);
-        let to_bucket = to_spk.as_ref().map(ScriptPublicKeyBucket::from);
-        let mut rows: Vec<(Hash, ScriptPublicKey, UtxoEntryKeySuffixRecord, CompactUtxoEntry)> = key_ranges
-            .flat_map(|key_range| self.access.multi_range_seek_iterator(std::iter::once(key_range)))
+        let mut scanned: Vec<(Hash, ScriptPublicKey, UtxoEntryKeySuffixRecord)> = self
+            .access
+            .multi_range_seek_iterator(key_ranges)
             .map(|res| {
                 let (key, _) = res.unwrap();
                 CovenantUtxoEntryDbKey::from_bytes(key.to_vec()).extract_data()
             })
-            .filter(|(_, script_public_key, _)| {
-                let bucket = ScriptPublicKeyBucket::from(script_public_key);
-                from_bucket.as_ref().is_none_or(|f| bucket.as_ref() >= f.as_ref())
-                    && to_bucket.as_ref().is_none_or(|t| bucket.as_ref() <= t.as_ref())
-            })
             .take(extended_limit)
-            .map(|(covenant_id, script_public_key, suffix)| {
-                let entry = self.address_store.get_compact_utxo_entry(
-                    &script_public_key,
-                    suffix.daa_score(),
-                    suffix.transaction_outpoint(),
-                )?;
-                debug_assert_eq!(entry.covenant_id, Some(covenant_id));
-                Ok((covenant_id, script_public_key, suffix, entry))
-            })
-            .collect::<Result<Vec<_>, UtxoIndexError>>()?;
+            .collect();
 
-        // the limit + 1 probe row is dropped and returned as the resume position
-        let next_cursor = if rows.len() < extended_limit {
+        // the limit + 1 probe row is dropped and returned as the resume position; the limit caps
+        // scanned rows, so rows dropped by the spk bounds consume it
+        let next_cursor = if scanned.len() < extended_limit {
             None
         } else {
-            let (covenant_id, script_public_key, suffix, _) = rows.pop().unwrap();
-            Some(CovenantUtxoPageCursor::new(covenant_id, suffix.daa_score(), Some(script_public_key), *suffix.transaction_outpoint()))
+            let (covenant_id, script_public_key, suffix) = scanned.last().unwrap();
+            let cursor = CovenantUtxoPageCursor::new(
+                *covenant_id,
+                suffix.daa_score(),
+                Some(script_public_key.clone()),
+                *suffix.transaction_outpoint(),
+            );
+            scanned.pop();
+            Some(cursor)
         };
+
+        let bounded = from_bucket.is_some() || to_bucket.is_some();
+        let mut rows: Vec<(Hash, ScriptPublicKey, UtxoEntryKeySuffixRecord, CompactUtxoEntry)> = Vec::with_capacity(scanned.len());
+        for (covenant_id, script_public_key, suffix) in scanned {
+            if bounded {
+                let bucket = ScriptPublicKeyBucket::from(&script_public_key);
+                if from_bucket.as_ref().is_none_or(|f| bucket.as_ref() < f.as_ref())
+                    || to_bucket.as_ref().is_none_or(|t| bucket.as_ref() > t.as_ref())
+                {
+                    continue;
+                }
+            }
+            let entry =
+                self.address_store.get_compact_utxo_entry(&script_public_key, suffix.daa_score(), suffix.transaction_outpoint())?;
+            debug_assert_eq!(entry.covenant_id, Some(covenant_id));
+            rows.push((covenant_id, script_public_key, suffix, entry));
+        }
 
         let mut entries: CovenantUtxoEntriesByGroup = Vec::new();
         for (covenant_id, script_public_key, suffix, entry) in rows {
@@ -584,13 +620,17 @@ mod tests {
         let (groups, _) = page_entries(&store, vec![id], 2..=6, None, None, None, None);
         assert_eq!(groups, vec![(id, vec![2, 3, 4, 5, 6])]);
 
-        // spk bounds skip non-matching rows without counting them toward the limit
+        // spk bounds filter scanned rows, which still consume the scan budget: with limit 2 each
+        // page scans two rows and holds at most the matching one
         let mut cursor = None;
         let mut pages = vec![];
         loop {
             let (groups, next) =
-                page_entries(&store, vec![id], 0..=u64::MAX, Some(script_high.clone()), Some(script_high.clone()), cursor, Some(1));
-            pages.push(groups[0].1.clone());
+                page_entries(&store, vec![id], 0..=u64::MAX, Some(script_high.clone()), Some(script_high.clone()), cursor, Some(2));
+            if let Some((_, daa_scores)) = groups.first() {
+                assert_eq!(daa_scores.len(), 1, "a budgeted page holds at most one matching row here");
+                pages.push(daa_scores.clone());
+            }
             cursor = match next {
                 Some(c) => Some(c),
                 None => break,
