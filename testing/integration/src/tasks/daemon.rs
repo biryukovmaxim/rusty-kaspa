@@ -91,7 +91,7 @@ impl DaemonArgs {
         }
         if self.utxoindex {
             args.push("--utxoindex".to_owned());
-            args.push("--covenant-index".to_owned());
+            args.push("--covenantindex".to_owned());
         }
         args
     }

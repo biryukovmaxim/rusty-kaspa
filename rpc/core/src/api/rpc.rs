@@ -407,7 +407,7 @@ pub trait RpcApi: Sync + Send + AnySync {
     /// Requests UTXOs for multiple covenant ids, optionally filtered by an inclusive
     /// DAA-score range and inclusive address bounds. Ids are traversed in request order.
     ///
-    /// This call is only available when this node was started with `--utxoindex --covenant-index`.
+    /// This call is only available when this node was started with `--utxoindex --covenantindex`.
     async fn get_utxos_by_covenant_ids(
         &self,
         covenant_ids: Vec<RpcHash>,

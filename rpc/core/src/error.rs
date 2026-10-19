@@ -72,7 +72,7 @@ pub enum RpcError {
     #[error("Method unavailable. Run the node with the --utxoindex argument.")]
     NoUtxoIndex,
 
-    #[error("Method unavailable. Run the node with the --covenant-index argument.")]
+    #[error("Method unavailable. Run the node with the --covenantindex argument.")]
     NoCovenantIndex,
 
     #[error("Method unavailable. No connection manager is currently available.")]

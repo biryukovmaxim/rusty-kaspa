@@ -350,9 +350,9 @@ pub fn cli() -> Command {
         )
         .arg(arg!(--utxoindex "Enable the UTXO index").env("KASPAD_UTXOINDEX"))
         .arg(
-            Arg::new("covenant-index")
-                .long("covenant-index")
-                .env("KASPAD_COVENANT_INDEX")
+            Arg::new("covenantindex")
+                .long("covenantindex")
+                .env("KASPAD_COVENANTINDEX")
                 .action(ArgAction::SetTrue)
                 .help("Enable the covenant UTXO index (requires --utxoindex)"),
         )
@@ -533,7 +533,7 @@ impl Args {
             enable_unsynced_mining: arg_match_unwrap_or::<bool>(&m, "enable-unsynced-mining", defaults.enable_unsynced_mining),
             enable_mainnet_mining: arg_match_unwrap_or::<bool>(&m, "enable-mainnet-mining", defaults.enable_mainnet_mining),
             utxoindex: arg_match_unwrap_or::<bool>(&m, "utxoindex", defaults.utxoindex),
-            covenant_index: arg_match_unwrap_or::<bool>(&m, "covenant-index", defaults.covenant_index),
+            covenant_index: arg_match_unwrap_or::<bool>(&m, "covenantindex", defaults.covenant_index),
             testnet: arg_match_unwrap_or::<bool>(&m, "testnet", defaults.testnet),
             testnet_suffix: arg_match_unwrap_or::<u32>(&m, "netsuffix", defaults.testnet_suffix),
             devnet: arg_match_unwrap_or::<bool>(&m, "devnet", defaults.devnet),
@@ -573,7 +573,7 @@ impl Args {
         validate_ua_rules(&args.ua_rule)?;
 
         if args.covenant_index && !args.utxoindex {
-            return Err(clap::Error::raw(clap::error::ErrorKind::ValueValidation, "--covenant-index requires --utxoindex"));
+            return Err(clap::Error::raw(clap::error::ErrorKind::ValueValidation, "--covenantindex requires --utxoindex"));
         }
 
         Ok(args)
@@ -608,10 +608,10 @@ mod tests {
 
     #[test]
     fn rejects_covenant_index_without_utxoindex() {
-        let err = Args::parse(["kaspad", "--covenant-index"]).unwrap_err();
-        assert!(err.to_string().contains("--covenant-index requires --utxoindex"));
+        let err = Args::parse(["kaspad", "--covenantindex"]).unwrap_err();
+        assert!(err.to_string().contains("--covenantindex requires --utxoindex"));
 
-        Args::parse(["kaspad", "--covenant-index", "--utxoindex"]).unwrap();
+        Args::parse(["kaspad", "--covenantindex", "--utxoindex"]).unwrap();
     }
 
     #[test]
