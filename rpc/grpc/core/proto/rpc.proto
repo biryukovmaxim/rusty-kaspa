@@ -622,7 +622,7 @@ message RpcGetUtxosByCovenantIdsCursor {
   // Leaving this blank takes the first covenant id of the request's list as the start id.
   optional string startCovenantId = 1;
   // Cursor start DAA score for startCovenantId; omitted starts from fromDaaScore.
-  uint64 startDaaScore = 2;
+  optional uint64 startDaaScore = 2;
   // Cursor start address; omitted starts from the bottom of the (covenant id, DAA score) range.
   optional string startAddress = 3;
   // transaction outpoint
@@ -630,7 +630,6 @@ message RpcGetUtxosByCovenantIdsCursor {
 }
 
 message RpcUtxosByCovenantIdsEntry {
-  string covenantId = 1;
   string address = 2;
   RpcOutpoint outpoint = 3;
   RpcUtxoEntry utxoEntry = 4;
@@ -639,7 +638,7 @@ message RpcUtxosByCovenantIdsEntry {
 // GetUtxosByCovenantIdsRequestMessage requests UTXOs for multiple covenant ids,
 // optionally bounded by an inclusive DAA-score range and inclusive address bounds.
 //
-// This call is only available when this kaspad was started with `--utxoindex --covenant-index`.
+// This call is only available when this kaspad was started with `--utxoindex --covenantindex`.
 message GetUtxosByCovenantIdsRequestMessage {
   // Covenant ids to query UTXOs for. Note an empty set of covenant ids is considered an invalid query.
   // max covenant ids without requiring --unsafe-rpc flag on the node is 5_000

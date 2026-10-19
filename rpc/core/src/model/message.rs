@@ -1594,7 +1594,6 @@ impl Deserializer for GetUtxosByAddressesV2Response {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcUtxosByCovenantIdsEntry {
-    pub covenant_id: RpcHash,
     pub address: Option<RpcAddress>,
     pub outpoint: RpcTransactionOutpoint,
     pub utxo_entry: RpcUtxoEntry,
@@ -1603,7 +1602,6 @@ pub struct RpcUtxosByCovenantIdsEntry {
 impl Serializer for RpcUtxosByCovenantIdsEntry {
     fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
         store!(u8, &1, writer)?; // version
-        store!(RpcHash, &self.covenant_id, writer)?;
         store!(Option<RpcAddress>, &self.address, writer)?;
         serialize!(RpcTransactionOutpoint, &self.outpoint, writer)?;
         serialize!(RpcUtxoEntry, &self.utxo_entry, writer)
@@ -1613,11 +1611,10 @@ impl Serializer for RpcUtxosByCovenantIdsEntry {
 impl Deserializer for RpcUtxosByCovenantIdsEntry {
     fn deserialize<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
         let _version: u8 = load!(u8, reader)?;
-        let covenant_id = load!(RpcHash, reader)?;
         let address = load!(Option<RpcAddress>, reader)?;
         let outpoint = deserialize!(RpcTransactionOutpoint, reader)?;
         let utxo_entry = deserialize!(RpcUtxoEntry, reader)?;
-        Ok(Self { covenant_id, address, outpoint, utxo_entry })
+        Ok(Self { address, outpoint, utxo_entry })
     }
 }
 

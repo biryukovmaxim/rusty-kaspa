@@ -585,7 +585,7 @@ mod mockery {
 
     impl Mock for RpcUtxosByCovenantIdsEntry {
         fn mock() -> Self {
-            RpcUtxosByCovenantIdsEntry { covenant_id: mock(), address: mock(), outpoint: mock(), utxo_entry: mock() }
+            RpcUtxosByCovenantIdsEntry { address: mock(), outpoint: mock(), utxo_entry: mock() }
         }
     }
 

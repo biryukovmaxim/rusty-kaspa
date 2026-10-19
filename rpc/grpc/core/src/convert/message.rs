@@ -951,7 +951,13 @@ try_from!(item: &protowire::GetUtxosByCovenantIdsRequestMessage, kaspa_rpc_core:
         to_daa_score: item.to_daa_score,
         from_address: item.from_address.as_deref().map(|address| address.try_into()).transpose()?,
         to_address: item.to_address.as_deref().map(|address| address.try_into()).transpose()?,
-        cursor: item.cursor.clone().map(|c| c.try_into()).transpose()?,
+        cursor: item.cursor.clone().map(|c| {
+            // an omitted cursor daa score starts from the request's from-daa-score bound
+            let start_daa_score = c.start_daa_score.unwrap_or(item.from_daa_score.unwrap_or(0));
+            let mut cursor: kaspa_rpc_core::RpcGetUtxosByCovenantIdsCursor = c.try_into()?;
+            cursor.start_daa_score = start_daa_score;
+            Ok::<_, RpcError>(cursor)
+        }).transpose()?,
         limit: item.limit.map(|l| l.try_into()).transpose()?,
     }
 });

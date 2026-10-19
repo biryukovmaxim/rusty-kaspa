@@ -34,7 +34,7 @@ try_from!(item: protowire::RpcGetUtxosByAddressesCursor, kaspa_rpc_core::RpcGetU
 from!(item: &kaspa_rpc_core::RpcGetUtxosByCovenantIdsCursor, protowire::RpcGetUtxosByCovenantIdsCursor, {
     Self {
         start_covenant_id: item.start_covenant_id.as_ref().map(|id| id.to_string()),
-        start_daa_score: item.start_daa_score,
+        start_daa_score: Some(item.start_daa_score),
         start_address: item.start_address.as_ref().map(|address| address.to_string()),
         start_outpoint: item.start_outpoint.as_ref().map(|o| o.into()),
     }
@@ -47,7 +47,7 @@ from!(item: &kaspa_rpc_core::RpcGetUtxosByCovenantIdsCursor, protowire::RpcGetUt
 try_from!(item: protowire::RpcGetUtxosByCovenantIdsCursor, kaspa_rpc_core::RpcGetUtxosByCovenantIdsCursor, {
     Self {
         start_covenant_id: item.start_covenant_id.as_deref().map(kaspa_rpc_core::RpcHash::from_str).transpose()?,
-        start_daa_score: item.start_daa_score,
+        start_daa_score: item.start_daa_score.unwrap_or_default(),
         start_address: item.start_address.as_deref().map(|address| address.try_into()).transpose()?,
         start_outpoint: item.start_outpoint.as_ref().map(|o| o.try_into()).transpose()?,
     }

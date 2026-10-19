@@ -59,10 +59,9 @@ pub fn ordered_utxo_set_into_rpc(item: &OrderedUtxoEntries, prefix: Prefix) -> V
 
 pub fn ordered_covenant_utxo_set_into_rpc(item: &OrderedCovenantUtxoEntries, prefix: Prefix) -> Vec<RpcUtxosByCovenantIdsEntry> {
     item.iter()
-        .flat_map(|(covenant_id, rows)| {
+        .flat_map(|(_, rows)| {
             rows.iter()
                 .map(|(script_public_key, utxo_key_suffix_record, entry)| RpcUtxosByCovenantIdsEntry {
-                    covenant_id: *covenant_id,
                     address: extract_script_pub_key_address(script_public_key, prefix).ok(),
                     outpoint: (*utxo_key_suffix_record.transaction_outpoint()).into(),
                     utxo_entry: RpcUtxoEntry::new(

@@ -201,7 +201,6 @@ from!(item: &kaspa_rpc_core::RpcUtxosByAddressesEntry, protowire::RpcUtxosByAddr
 
 from!(item: &kaspa_rpc_core::RpcUtxosByCovenantIdsEntry, protowire::RpcUtxosByCovenantIdsEntry, {
     Self {
-        covenant_id: item.covenant_id.to_string(),
         address: item.address.as_ref().map_or("".to_string(), |x| x.into()),
         outpoint: Some((&item.outpoint).into()),
         utxo_entry: Some((&item.utxo_entry).into()),
@@ -462,7 +461,6 @@ try_from!(item: &protowire::RpcUtxosByAddressesEntry, kaspa_rpc_core::RpcUtxosBy
 try_from!(item: &protowire::RpcUtxosByCovenantIdsEntry, kaspa_rpc_core::RpcUtxosByCovenantIdsEntry, {
     let address = if item.address.is_empty() { None } else { Some(item.address.as_str().try_into()?) };
     Self {
-        covenant_id: RpcHash::from_str(&item.covenant_id)?,
         address,
         outpoint: item
             .outpoint
@@ -518,7 +516,6 @@ mod tests {
     #[test]
     fn test_rpc_utxos_by_covenant_ids_entry_roundtrip() {
         let entry = kaspa_rpc_core::RpcUtxosByCovenantIdsEntry {
-            covenant_id: kaspa_consensus_core::Hash::from_bytes([2; 32]),
             address: None,
             outpoint: kaspa_rpc_core::RpcTransactionOutpoint {
                 transaction_id: kaspa_consensus_core::Hash::from_bytes([1; 32]),
@@ -534,7 +531,6 @@ mod tests {
         };
         let protowire: protowire::RpcUtxosByCovenantIdsEntry = (&entry).into();
         let decoded: kaspa_rpc_core::RpcUtxosByCovenantIdsEntry = (&protowire).try_into().unwrap();
-        assert_eq!(decoded.covenant_id, entry.covenant_id);
         assert_eq!(decoded.address, None);
         assert_eq!(decoded.outpoint, entry.outpoint);
         assert_eq!(decoded.utxo_entry, entry.utxo_entry);
