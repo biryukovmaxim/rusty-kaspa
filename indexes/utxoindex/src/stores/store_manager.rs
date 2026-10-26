@@ -46,6 +46,8 @@ impl Store {
             utxoindex_tips_store: DbUtxoIndexTipsStore::new(db.clone(), DatabaseStorePrefixes::UtxoIndexScriptPublicKeyTips),
             circulating_supply_store: DbCirculatingSupplyStore::new(db.clone()),
             db_version_store: DbUtxoIndexDbMetaStore::new(db.clone()),
+            // index rows are consumed by ordered scans over mostly distinct keys, so a read
+            // cache would mostly pin the scanned key space in memory without reuse
             utxos_by_script_public_key_store: DbUtxoSetByScriptPublicKeyStore::new(db.clone(), CachePolicy::Empty),
             utxos_by_covenant_id_store: DbUtxoSetByCovenantIdStore::new(
                 db.clone(),
