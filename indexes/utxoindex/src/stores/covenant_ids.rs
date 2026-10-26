@@ -321,8 +321,8 @@ impl DbUtxoSetByCovenantIdStore {
                     iter.next();
                     return Some(Ok(CovenantRow::Row(covenant_id, script_public_key, suffix)));
                 }
-                while bucket_index < spk_buckets.len() && spk_buckets[bucket_index].as_ref() < key.spk_bucket() {
-                    bucket_index += 1;
+                if bucket_index < spk_buckets.len() && spk_buckets[bucket_index].as_ref() < key.spk_bucket() {
+                    bucket_index += spk_buckets[bucket_index..].partition_point(|bucket| bucket.as_ref() < key.spk_bucket());
                 }
                 let Some(bucket) = spk_buckets.get(bucket_index) else {
                     // past the last bucket, no match remains at this daa score: skip to the next one
