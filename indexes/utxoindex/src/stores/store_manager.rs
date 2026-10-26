@@ -120,14 +120,14 @@ impl Store {
         daa_score_range: RangeInclusive<u64>,
         script_public_keys: &[ScriptPublicKey],
         cursor: Option<CovenantUtxoPageCursor>,
-        limit: Option<usize>,
+        budget: Option<usize>,
     ) -> UtxoIndexResult<OrderedCovenantUtxoEntriesPage> {
         self.utxos_by_covenant_id_store.get_utxos_by_covenant_ids_page(
             covenant_ids,
             daa_score_range,
             script_public_keys,
             cursor,
-            limit,
+            budget,
         )
     }
 

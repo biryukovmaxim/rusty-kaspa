@@ -48,7 +48,7 @@ pub trait UtxoIndexApi: Send + Sync + Debug {
         daa_score_range: RangeInclusive<u64>,
         script_public_keys: &[ScriptPublicKey],
         cursor: Option<CovenantUtxoPageCursor>,
-        limit: Option<usize>,
+        budget: Option<usize>,
     ) -> UtxoIndexResult<OrderedCovenantUtxoEntriesPage>;
 
     fn get_balance_by_script_public_keys(&self, script_public_keys: ScriptPublicKeys) -> StoreResult<BalanceByScriptPublicKey>;
@@ -118,10 +118,10 @@ impl UtxoIndexProxy {
         daa_score_range: RangeInclusive<u64>,
         script_public_keys: Vec<ScriptPublicKey>,
         cursor: Option<CovenantUtxoPageCursor>,
-        limit: Option<usize>,
+        budget: Option<usize>,
     ) -> UtxoIndexResult<OrderedCovenantUtxoEntriesPage> {
         spawn_blocking(move || {
-            self.inner.read().get_utxos_by_covenant_ids_page(covenant_ids, daa_score_range, &script_public_keys, cursor, limit)
+            self.inner.read().get_utxos_by_covenant_ids_page(covenant_ids, daa_score_range, &script_public_keys, cursor, budget)
         })
         .await
         .unwrap()

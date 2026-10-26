@@ -1631,8 +1631,8 @@ pub struct GetUtxosByCovenantIdsRequest {
     pub to_daa_score: Option<u64>,
     /// Cursor start position; None starts from the beginning.
     pub cursor: Option<RpcGetUtxosByCovenantIdsCursor>,
-    /// Maximum number of entries to return; None defaults to 1k entries. >5k entries requires `--unsaferpc` flag on a default node.
-    pub limit: Option<usize>,
+    /// Budget of weighted db operations spent for the page; a seek costs 10 units, an iterator advance costs 1. None defaults to 1k units. Entries per page never exceed the budget. >5k units requires `--unsaferpc` flag on a default node.
+    pub budget: Option<usize>,
 }
 
 impl GetUtxosByCovenantIdsRequest {
@@ -1642,9 +1642,9 @@ impl GetUtxosByCovenantIdsRequest {
         from_daa_score: Option<u64>,
         to_daa_score: Option<u64>,
         cursor: Option<RpcGetUtxosByCovenantIdsCursor>,
-        limit: Option<usize>,
+        budget: Option<usize>,
     ) -> Self {
-        Self { covenant_ids, script_public_keys, from_daa_score, to_daa_score, cursor, limit }
+        Self { covenant_ids, script_public_keys, from_daa_score, to_daa_score, cursor, budget }
     }
 }
 
@@ -1656,7 +1656,7 @@ impl Serializer for GetUtxosByCovenantIdsRequest {
         store!(Option<u64>, &self.from_daa_score, writer)?;
         store!(Option<u64>, &self.to_daa_score, writer)?;
         store!(Option<RpcGetUtxosByCovenantIdsCursor>, &self.cursor, writer)?;
-        store!(Option<usize>, &self.limit, writer)?;
+        store!(Option<usize>, &self.budget, writer)?;
         Ok(())
     }
 }
@@ -1669,8 +1669,8 @@ impl Deserializer for GetUtxosByCovenantIdsRequest {
         let from_daa_score = load!(Option<u64>, reader)?;
         let to_daa_score = load!(Option<u64>, reader)?;
         let cursor = load!(Option<RpcGetUtxosByCovenantIdsCursor>, reader)?;
-        let limit = load!(Option<usize>, reader)?;
-        Ok(Self { covenant_ids, script_public_keys, from_daa_score, to_daa_score, cursor, limit })
+        let budget = load!(Option<usize>, reader)?;
+        Ok(Self { covenant_ids, script_public_keys, from_daa_score, to_daa_score, cursor, budget })
     }
 }
 

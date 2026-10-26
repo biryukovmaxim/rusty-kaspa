@@ -90,6 +90,13 @@ impl CovenantUtxoKeyView<'_> {
     }
 }
 
+/// A row of the covenant page stream, or the terminal signal carrying the resume position
+/// once the page's db-ops budget is spent.
+enum CovenantRow {
+    Row(Hash, ScriptPublicKey, UtxoEntryKeySuffixRecord),
+    BudgetExhausted(CovenantUtxoPageCursor),
+}
+
 /// The covenant index carries no payload; values exist only to satisfy the db access layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CovenantIndexEntry;
@@ -104,14 +111,16 @@ pub trait UtxoSetByCovenantIdStoreReader {
     /// ascending covenant id order regardless of request order; rows within an id follow store
     /// key order; amount and is_coinbase are resolved per row from the script public key store.
     /// An empty script public key list includes rows of every script public key. A cursor
-    /// resumes at its covenant id, skipping ids that sort before it.
+    /// resumes at its covenant id, skipping ids that sort before it. `budget` bounds the
+    /// weighted db-op cost (seeks cost [SEEK_OP_COST] units, advances [ADVANCE_OP_COST])
+    /// spent for the page; the number of returned entries never exceeds it.
     fn get_utxos_by_covenant_ids_page(
         &self,
         covenant_ids: Vec<Hash>,
         daa_score_range: RangeInclusive<u64>,
         script_public_keys: &[ScriptPublicKey],
         cursor: Option<CovenantUtxoPageCursor>,
-        limit: Option<usize>,
+        budget: Option<usize>,
     ) -> UtxoIndexResult<OrderedCovenantUtxoEntriesPage>;
 }
 
@@ -136,6 +145,14 @@ pub struct DbUtxoSetByCovenantIdStore {
 }
 
 const COVENANT_BACKFILL_BATCH_SIZE: usize = 2048;
+
+/// Page budget of weighted db-op costs when the caller supplies no budget.
+const DEFAULT_COVENANT_PAGE_DB_OPS_BUDGET: usize = 5_000;
+
+/// Relative db cost of a seek against an iterator advance: a seek descends the LSM stack
+/// across candidate files while an advance stays within the loaded data block.
+const SEEK_OP_COST: usize = 10;
+const ADVANCE_OP_COST: usize = 1;
 
 impl DbUtxoSetByCovenantIdStore {
     pub fn new(db: Arc<DB>, cache_policy: CachePolicy, spk_store: DbUtxoSetByScriptPublicKeyStore) -> Self {
@@ -193,13 +210,19 @@ impl DbUtxoSetByCovenantIdStore {
     /// next requested id's prefix bottom. The iterator is bounded to the key space from the
     /// start key to the highest requested id's daa range end, so it never leaves the store's
     /// prefix.
+    ///
+    /// Seeks and advances consume weighted costs ([SEEK_OP_COST] and [ADVANCE_OP_COST])
+    /// from `db_ops_budget`; once the budget is spent, the iterator yields the current
+    /// position as [CovenantRow::BudgetExhausted] and ends. The initial positioning seek
+    /// does not count.
     fn iterate_covenant_rows<'a>(
         &'a self,
         covenant_ids: Vec<Hash>,
         daa_score_range: RangeInclusive<u64>,
         spk_buckets: &'a [ScriptPublicKeyBucket],
         start: CovenantUtxoEntryDbKey,
-    ) -> impl Iterator<Item = StoreResult<(Hash, ScriptPublicKey, UtxoEntryKeySuffixRecord)>> + 'a {
+        db_ops_budget: usize,
+    ) -> impl Iterator<Item = StoreResult<CovenantRow>> + 'a {
         assert!(*daa_score_range.end() < u64::MAX);
         let prefix = self.access.prefix().to_vec();
         let from_daa_score = *daa_score_range.start();
@@ -220,6 +243,7 @@ impl DbUtxoSetByCovenantIdStore {
         let mut current_daa_score: Option<u64> = None;
         let mut bucket_index = 0usize;
         let mut done = false;
+        let mut db_ops = 0usize;
 
         // the current covenant id's pass is over; continue with the next requested one
         macro_rules! seek_next_covenant_id {
@@ -229,6 +253,7 @@ impl DbUtxoSetByCovenantIdStore {
                         covenant_id = next_id;
                         current_daa_score = None;
                         bucket_index = 0;
+                        db_ops += SEEK_OP_COST;
                         iter.seek(DbKey::new(&prefix, CovenantUtxoEntryDbKey::prefix_start(covenant_id, from_daa_score)).as_ref());
                         continue;
                     }
@@ -265,6 +290,17 @@ impl DbUtxoSetByCovenantIdStore {
                 if daa_score > to_daa_score {
                     seek_next_covenant_id!();
                 }
+                // the budget is spent at a validated position: hand it over as the resume point
+                if db_ops >= db_ops_budget {
+                    done = true;
+                    let (covenant_id, script_public_key, suffix) = key.extract_data();
+                    return Some(Ok(CovenantRow::BudgetExhausted(CovenantUtxoPageCursor::new(
+                        covenant_id,
+                        suffix.daa_score(),
+                        script_public_key,
+                        *suffix.transaction_outpoint(),
+                    ))));
+                }
                 if current_daa_score != Some(daa_score) {
                     current_daa_score = Some(daa_score);
                     bucket_index = 0;
@@ -272,6 +308,7 @@ impl DbUtxoSetByCovenantIdStore {
                     if let Some(first_bucket) = spk_buckets.first()
                         && key.spk_bucket() < first_bucket.as_ref()
                     {
+                        db_ops += SEEK_OP_COST;
                         iter.seek(
                             DbKey::new(&prefix, CovenantUtxoEntryDbKey::spk_start(covenant_id, daa_score, first_bucket)).as_ref(),
                         );
@@ -280,25 +317,29 @@ impl DbUtxoSetByCovenantIdStore {
                 }
                 if spk_buckets.is_empty() {
                     let (_, script_public_key, suffix) = key.extract_data();
+                    db_ops += ADVANCE_OP_COST;
                     iter.next();
-                    return Some(Ok((covenant_id, script_public_key, suffix)));
+                    return Some(Ok(CovenantRow::Row(covenant_id, script_public_key, suffix)));
                 }
                 while bucket_index < spk_buckets.len() && spk_buckets[bucket_index].as_ref() < key.spk_bucket() {
                     bucket_index += 1;
                 }
                 let Some(bucket) = spk_buckets.get(bucket_index) else {
                     // past the last bucket, no match remains at this daa score: skip to the next one
+                    db_ops += SEEK_OP_COST;
                     iter.seek(DbKey::new(&prefix, CovenantUtxoEntryDbKey::prefix_start(covenant_id, daa_score + 1)).as_ref());
                     continue;
                 };
                 if bucket.as_ref() != key.spk_bucket() {
                     // keys below the current bucket remain at this daa score: seek up to it
+                    db_ops += SEEK_OP_COST;
                     iter.seek(DbKey::new(&prefix, CovenantUtxoEntryDbKey::spk_start(covenant_id, daa_score, bucket)).as_ref());
                     continue;
                 }
                 let (_, script_public_key, suffix) = key.extract_data();
+                db_ops += ADVANCE_OP_COST;
                 iter.next();
-                return Some(Ok((covenant_id, script_public_key, suffix)));
+                return Some(Ok(CovenantRow::Row(covenant_id, script_public_key, suffix)));
             }
         })
     }
@@ -311,7 +352,7 @@ impl UtxoSetByCovenantIdStoreReader for DbUtxoSetByCovenantIdStore {
         daa_score_range: RangeInclusive<u64>,
         script_public_keys: &[ScriptPublicKey],
         cursor: Option<CovenantUtxoPageCursor>,
-        limit: Option<usize>,
+        budget: Option<usize>,
     ) -> UtxoIndexResult<OrderedCovenantUtxoEntriesPage> {
         // daa scores never reach u64::MAX in practice, so the effective range end is capped at
         // u64::MAX - 1; this keeps the + 1 of the exclusive upper iterator bound overflow-free
@@ -349,26 +390,26 @@ impl UtxoSetByCovenantIdStoreReader for DbUtxoSetByCovenantIdStore {
         spk_buckets.sort_unstable();
         spk_buckets.dedup();
 
-        let extended_limit = limit.map(|l| l.saturating_add(1)).unwrap_or(usize::MAX);
+        let db_ops_budget = budget.unwrap_or(DEFAULT_COVENANT_PAGE_DB_OPS_BUDGET);
         let mut rows: Vec<(Hash, ScriptPublicKey, UtxoEntryKeySuffixRecord, CompactUtxoEntry)> = Vec::new();
-        for res in self.iterate_covenant_rows(covenant_ids, daa_score_range, &spk_buckets, start) {
-            let (covenant_id, script_public_key, suffix) = res?;
-            let entry =
-                self.spk_store.get_compact_utxo_entry(&script_public_key, suffix.daa_score(), suffix.transaction_outpoint())?;
-            debug_assert_eq!(entry.covenant_id, Some(covenant_id));
-            rows.push((covenant_id, script_public_key, suffix, entry));
-            if rows.len() == extended_limit {
-                break;
+        let mut next_cursor = None;
+        for res in self.iterate_covenant_rows(covenant_ids, daa_score_range, &spk_buckets, start, db_ops_budget) {
+            match res? {
+                CovenantRow::Row(covenant_id, script_public_key, suffix) => {
+                    let entry = self.spk_store.get_compact_utxo_entry(
+                        &script_public_key,
+                        suffix.daa_score(),
+                        suffix.transaction_outpoint(),
+                    )?;
+                    debug_assert_eq!(entry.covenant_id, Some(covenant_id));
+                    rows.push((covenant_id, script_public_key, suffix, entry));
+                }
+                CovenantRow::BudgetExhausted(cursor) => {
+                    next_cursor = Some(cursor);
+                    break;
+                }
             }
         }
-
-        // the limit + 1 probe row is dropped and returned as the resume position
-        let next_cursor = if rows.len() < extended_limit {
-            None
-        } else {
-            let (covenant_id, script_public_key, suffix, _) = rows.pop().unwrap();
-            Some(CovenantUtxoPageCursor::new(covenant_id, suffix.daa_score(), script_public_key, *suffix.transaction_outpoint()))
-        };
 
         Ok(OrderedCovenantUtxoEntriesPage::new(Arc::new(rows), next_cursor))
     }
@@ -581,11 +622,32 @@ mod tests {
         daa_score_range: RangeInclusive<u64>,
         script_public_keys: &[ScriptPublicKey],
         cursor: Option<CovenantUtxoPageCursor>,
-        limit: Option<usize>,
+        budget: Option<usize>,
     ) -> (Vec<(Hash, u64)>, Option<CovenantUtxoPageCursor>) {
-        let page = store.get_utxos_by_covenant_ids_page(covenant_ids, daa_score_range, script_public_keys, cursor, limit).unwrap();
+        let page = store.get_utxos_by_covenant_ids_page(covenant_ids, daa_score_range, script_public_keys, cursor, budget).unwrap();
         let rows = page.entries().iter().map(|(covenant_id, _, suffix, _)| (*covenant_id, suffix.daa_score())).collect();
         (rows, page.next_cursor().cloned())
+    }
+
+    /// Pages a query until the cursor runs out, returning the daa scores of each page's rows.
+    fn drain_pages(
+        store: &DbUtxoSetByCovenantIdStore,
+        covenant_ids: Vec<Hash>,
+        daa_score_range: RangeInclusive<u64>,
+        script_public_keys: &[ScriptPublicKey],
+        budget: Option<usize>,
+    ) -> Vec<Vec<u64>> {
+        let mut cursor = None;
+        let mut pages = vec![];
+        loop {
+            let (rows, next) = page_entries(store, covenant_ids.clone(), daa_score_range.clone(), script_public_keys, cursor, budget);
+            pages.push(rows.iter().map(|(_, daa)| *daa).collect());
+            cursor = match next {
+                Some(c) => Some(c),
+                None => break,
+            };
+        }
+        pages
     }
 
     #[test]
@@ -621,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn test_page_limit_and_next_cursor() {
+    fn test_page_db_ops_budget_and_next_cursor() {
         let (_db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
         let mut spk_store = DbUtxoSetByScriptPublicKeyStore::new(db.clone(), CachePolicy::Empty);
         let mut store = DbUtxoSetByCovenantIdStore::new(db, CachePolicy::Empty, DbUtxoSetByScriptPublicKeyStore::clone(&spk_store));
@@ -634,6 +696,7 @@ mod tests {
             (1..=5u64).map(|daa| (id, daa, script_public_key.clone(), create_outpoint(daa, 0), daa * 100)).collect(),
         );
 
+        // a budget of 2 ops yields 2 unfiltered rows, one advance each
         let (page1, cursor1) = page_entries(&store, vec![id], 0..=u64::MAX, &[], None, Some(2));
         assert_eq!(page1, vec![(id, 1), (id, 2)]);
         let cursor1 = cursor1.unwrap();
@@ -647,6 +710,107 @@ mod tests {
         let (page3, cursor3) = page_entries(&store, vec![id], 0..=u64::MAX, &[], Some(cursor2), Some(2));
         assert_eq!(page3, vec![(id, 5)]);
         assert!(cursor3.is_none());
+    }
+
+    #[test]
+    fn test_page_db_ops_budget_drains_exactly_once() {
+        let (_db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
+        let mut spk_store = DbUtxoSetByScriptPublicKeyStore::new(db.clone(), CachePolicy::Empty);
+        let mut store = DbUtxoSetByCovenantIdStore::new(db, CachePolicy::Empty, DbUtxoSetByScriptPublicKeyStore::clone(&spk_store));
+
+        let id = Hash::from_slice(&[1u8; HASH_SIZE]);
+        let script_public_key = ScriptPublicKey::from_vec(0, vec![0x01]);
+        populate(
+            &mut spk_store,
+            &mut store,
+            (1..=50u64).map(|daa| (id, daa, script_public_key.clone(), create_outpoint(daa, 0), daa)).collect(),
+        );
+
+        // a budget of 7 ops returns 7 unfiltered rows per page; draining collects every row once
+        let pages = drain_pages(&store, vec![id], 0..=u64::MAX, &[], Some(7));
+        let collected: Vec<u64> = pages.iter().flatten().copied().collect();
+        assert_eq!(collected, (1..=50u64).collect::<Vec<_>>());
+        assert_eq!(pages.iter().map(Vec::len).collect::<Vec<_>>(), vec![7, 7, 7, 7, 7, 7, 7, 1]);
+    }
+
+    #[test]
+    fn test_page_db_ops_budget_empty_pages_advance_cursor() {
+        let (_db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
+        let mut spk_store = DbUtxoSetByScriptPublicKeyStore::new(db.clone(), CachePolicy::Empty);
+        let mut store = DbUtxoSetByCovenantIdStore::new(db, CachePolicy::Empty, DbUtxoSetByScriptPublicKeyStore::clone(&spk_store));
+
+        let id = Hash::from_slice(&[1u8; HASH_SIZE]);
+        let script_low = ScriptPublicKey::from_vec(0, vec![0x01]);
+        let script_high = ScriptPublicKey::from_vec(0, vec![0x02]);
+        populate(
+            &mut spk_store,
+            &mut store,
+            (1..=9u64)
+                .map(|daa| {
+                    let script = if daa % 4 == 1 { script_high.clone() } else { script_low.clone() };
+                    (id, daa, script, create_outpoint(daa, 0), daa)
+                })
+                .collect(),
+        );
+
+        // a budget of 1 op cannot both seek past the low rows and return a row: pages come
+        // back empty with cursors advancing to the next high row
+        let pages = drain_pages(&store, vec![id], 0..=u64::MAX, std::slice::from_ref(&script_high), Some(1));
+        assert_eq!(pages, vec![vec![1], vec![], vec![], vec![], vec![5], vec![], vec![], vec![], vec![9]]);
+    }
+
+    #[test]
+    fn test_covenant_iterator_budget_signal() {
+        let (_db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
+        let mut spk_store = DbUtxoSetByScriptPublicKeyStore::new(db.clone(), CachePolicy::Empty);
+        let mut store = DbUtxoSetByCovenantIdStore::new(db, CachePolicy::Empty, DbUtxoSetByScriptPublicKeyStore::clone(&spk_store));
+
+        let id = Hash::from_slice(&[1u8; HASH_SIZE]);
+        let script_low = ScriptPublicKey::from_vec(0, vec![0x01]);
+        let script_high = ScriptPublicKey::from_vec(0, vec![0x02]);
+        populate(
+            &mut spk_store,
+            &mut store,
+            (1..=7u64)
+                .map(|daa| {
+                    let script = if daa % 2 == 0 { script_high.clone() } else { script_low.clone() };
+                    (id, daa, script, create_outpoint(daa, 0), daa)
+                })
+                .collect(),
+        );
+
+        // one advance per unfiltered row: budget 4 stops with a cursor at the fifth row
+        let mut iter = store.iterate_covenant_rows(vec![id], 0..=(u64::MAX - 1), &[], CovenantUtxoEntryDbKey::prefix_start(id, 0), 4);
+        let mut daa_scores = vec![];
+        loop {
+            match iter.next().unwrap().unwrap() {
+                CovenantRow::Row(_, _, suffix) => daa_scores.push(suffix.daa_score()),
+                CovenantRow::BudgetExhausted(cursor) => {
+                    assert_eq!((cursor.covenant_id, cursor.daa_score), (id, 5));
+                    break;
+                }
+            }
+        }
+        assert_eq!(daa_scores, vec![1, 2, 3, 4]);
+        assert!(iter.next().is_none());
+
+        // a seek costs 10 units: budget 20 covers one seek-plus-advance pair and ends
+        // mid-gap with a cursor at the next candidate
+        let high_buckets = [ScriptPublicKeyBucket::from(&script_high)];
+        let mut iter =
+            store.iterate_covenant_rows(vec![id], 0..=(u64::MAX - 1), &high_buckets, CovenantUtxoEntryDbKey::prefix_start(id, 0), 20);
+        let mut daa_scores = vec![];
+        loop {
+            match iter.next().unwrap().unwrap() {
+                CovenantRow::Row(_, _, suffix) => daa_scores.push(suffix.daa_score()),
+                CovenantRow::BudgetExhausted(cursor) => {
+                    assert_eq!((cursor.covenant_id, cursor.daa_score), (id, 4));
+                    break;
+                }
+            }
+        }
+        assert_eq!(daa_scores, vec![2]);
+        assert!(iter.next().is_none());
     }
 
     #[test]
@@ -673,18 +837,10 @@ mod tests {
         let (rows, _) = page_entries(&store, vec![id], 2..=6, &[], None, None);
         assert_eq!(rows, vec![(id, 2), (id, 3), (id, 4), (id, 5), (id, 6)]);
 
-        // an spk list keeps only the matching rows, without counting others toward the limit
-        let mut cursor = None;
-        let mut pages: Vec<Vec<u64>> = vec![];
-        loop {
-            let (rows, next) = page_entries(&store, vec![id], 0..=u64::MAX, std::slice::from_ref(&script_high), cursor, Some(1));
-            pages.push(rows.iter().map(|(_, daa)| *daa).collect());
-            cursor = match next {
-                Some(c) => Some(c),
-                None => break,
-            };
-        }
-        assert_eq!(pages, vec![vec![2], vec![4], vec![6]]);
+        // an spk list keeps only the matching rows; seeks past non-matching rows consume
+        // budget, yielding empty pages whose cursors advance to the next candidate
+        let pages = drain_pages(&store, vec![id], 0..=u64::MAX, std::slice::from_ref(&script_high), Some(1));
+        assert_eq!(pages, vec![vec![], vec![2], vec![], vec![4], vec![], vec![6], vec![]]);
     }
 
     #[test]
@@ -777,9 +933,9 @@ mod tests {
         daa_score_range: RangeInclusive<u64>,
         script_public_keys: &[ScriptPublicKey],
         cursor: Option<CovenantUtxoPageCursor>,
-        limit: Option<usize>,
+        budget: Option<usize>,
     ) -> (Vec<PageRow>, Option<CovenantUtxoPageCursor>) {
-        let page = store.get_utxos_by_covenant_ids_page(covenant_ids, daa_score_range, script_public_keys, cursor, limit).unwrap();
+        let page = store.get_utxos_by_covenant_ids_page(covenant_ids, daa_score_range, script_public_keys, cursor, budget).unwrap();
         let rows = page
             .entries()
             .iter()
@@ -942,7 +1098,7 @@ mod tests {
         let (full, _) = page_rows(&store, vec![id], 0..=u64::MAX, &[script_a.clone(), script_b.clone()], None, None);
         assert_eq!(full.len(), 7);
 
-        // limit-2 pages concatenate to the unpaginated query, no duplicates, no skips
+        // budget-2 pages concatenate to the unpaginated query, no duplicates, no skips
         let mut collected = vec![];
         let mut cursor = None;
         let mut page_count = 0;
@@ -1045,7 +1201,7 @@ mod tests {
     }
 
     #[test]
-    fn test_page_limit_on_id_boundary_resumes_at_next_covenant_id() {
+    fn test_page_budget_on_id_boundary_resumes_at_next_covenant_id() {
         let (_db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
         let mut spk_store = DbUtxoSetByScriptPublicKeyStore::new(db.clone(), CachePolicy::Empty);
         let mut store = DbUtxoSetByCovenantIdStore::new(db, CachePolicy::Empty, DbUtxoSetByScriptPublicKeyStore::clone(&spk_store));
@@ -1070,7 +1226,7 @@ mod tests {
         let (full, _) = page_rows(&store, vec![id_a, id_b], 0..=u64::MAX, &[], None, None);
         assert_eq!(full.len(), 4);
 
-        // the probe row past the id_a boundary orients the cursor at id_b
+        // the budget ends past the id_a boundary, orienting the cursor at id_b
         let (page1, cursor1) = page_rows(&store, vec![id_a, id_b], 0..=u64::MAX, &[], None, Some(2));
         assert_eq!(page1, vec![(id_a, 1, vec![0x01]), (id_a, 2, vec![0x01])]);
         let cursor1 = cursor1.unwrap();
@@ -1164,7 +1320,7 @@ mod tests {
                 .collect(),
         );
 
-        // limit-2 pages resubmitted with the full original unsorted list concatenate to the single query
+        // budget-2 pages resubmitted with the full original unsorted list concatenate to the single query
         let original_request = vec![id_c, id_a, id_b];
         let (full, _) = page_rows(&store, original_request.clone(), 0..=u64::MAX, &[], None, None);
         assert_eq!(full.len(), 6);
@@ -1298,7 +1454,7 @@ mod tests {
         let (rows, _) = page_entries(&store, request.clone(), 0..=u64::MAX, &[], None, None);
         assert_eq!(rows, vec![(id_a, 1), (id_a, 2), (id_c, 5), (id_c, 6)]);
 
-        // limit-2 pages across the gap concatenate to the single query
+        // budget-2 pages across the gap concatenate to the single query
         let (full, _) = page_rows(&store, request.clone(), 0..=u64::MAX, &[], None, None);
         assert_eq!(full.len(), 4);
         let mut collected = vec![];
@@ -1315,7 +1471,7 @@ mod tests {
     }
 
     #[test]
-    fn test_page_limit_spans_multiple_id_boundaries() {
+    fn test_page_budget_spans_multiple_id_boundaries() {
         let (_db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
         let mut spk_store = DbUtxoSetByScriptPublicKeyStore::new(db.clone(), CachePolicy::Empty);
         let mut store = DbUtxoSetByCovenantIdStore::new(db, CachePolicy::Empty, DbUtxoSetByScriptPublicKeyStore::clone(&spk_store));
@@ -1337,8 +1493,9 @@ mod tests {
             ],
         );
 
-        // one limit-3 page holds three ids' rows, the cursor orients at the fourth id's row
-        let (rows, next_cursor) = page_rows(&store, vec![id_d, id_b, id_a, id_c], 0..=u64::MAX, &[], None, Some(3));
+        // a budget-25 page holds three ids' rows: three advances plus two id-boundary
+        // seeks at 10 units each; the cursor orients at the fourth id's row
+        let (rows, next_cursor) = page_rows(&store, vec![id_d, id_b, id_a, id_c], 0..=u64::MAX, &[], None, Some(25));
         assert_eq!(rows, vec![(id_a, 1, vec![0x01]), (id_b, 2, vec![0x02]), (id_c, 3, vec![0x01])]);
         let cursor = next_cursor.unwrap();
         assert_eq!((cursor.covenant_id, cursor.daa_score), (id_d, 4));
@@ -1551,7 +1708,7 @@ mod tests {
         let (explicit, _) = page_rows(&store, vec![id], 0..=u64::MAX - 1, &[], None, None);
         assert_eq!(explicit, open);
 
-        // limit-1 pages resume through the capped boundary
+        // budget-1 pages resume through the capped boundary
         let mut collected = vec![];
         let mut cursor = None;
         loop {

@@ -396,7 +396,7 @@ impl Rpc {
 
                 let args = argv;
 
-                const USAGE: &str = "Usage: rpc get-utxos-by-covenant-ids <covenant_id>... [--from-daa=<from_daa_score>] [--to-daa=<to_daa_score>] [--spks=<script_public_key_csv>] [--start-covenant-id=<covenant_id>] [--start-daa-score=<daa_score>] [--start-spk=<script_public_key>] [--start-tx-id=<transaction_id>] [--start-outpoint-index=<index>] [--limit=<limit>]";
+                const USAGE: &str = "Usage: rpc get-utxos-by-covenant-ids <covenant_id>... [--from-daa=<from_daa_score>] [--to-daa=<to_daa_score>] [--spks=<script_public_key_csv>] [--start-covenant-id=<covenant_id>] [--start-daa-score=<daa_score>] [--start-spk=<script_public_key>] [--start-tx-id=<transaction_id>] [--start-outpoint-index=<index>] [--budget=<budget>]";
 
                 let mut covenant_ids = Vec::new();
                 let mut from_daa_score = None;
@@ -407,7 +407,7 @@ impl Rpc {
                 let mut start_script_public_key = None;
                 let mut start_outpoint_transaction_id = None;
                 let mut start_outpoint_index = None;
-                let mut limit = None;
+                let mut budget = None;
 
                 for arg in args {
                     let Some((flag, value)) = arg.strip_prefix("--").and_then(|flag| flag.split_once('=')) else {
@@ -428,7 +428,7 @@ impl Rpc {
                         "start-spk" => start_script_public_key = Some(RpcScriptPublicKey::from_str(value)?),
                         "start-tx-id" => start_outpoint_transaction_id = Some(RpcHash::from_hex(value)?),
                         "start-outpoint-index" => start_outpoint_index = Some(value.parse::<u32>()?),
-                        "limit" => limit = Some(value.parse::<usize>()?),
+                        "budget" => budget = Some(value.parse::<usize>()?),
                         _ => return Err(Error::custom(USAGE)),
                     }
                 }
@@ -468,7 +468,7 @@ impl Rpc {
                             from_daa_score,
                             to_daa_score,
                             cursor,
-                            limit,
+                            budget,
                         ),
                     )
                     .await?;

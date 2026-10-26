@@ -57,9 +57,9 @@ use kaspa_p2p_lib::common::ProtocolError;
 use kaspa_p2p_mining::rule_engine::MiningRuleEngine;
 use kaspa_perf_monitor::{Monitor as PerfMonitor, counters::CountersSnapshot};
 use kaspa_rpc_core::api::rpc::{
-    DEFAULT_GET_UTXOS_BY_ADDRESSES_V2_LIMIT, DEFAULT_GET_UTXOS_BY_COVENANT_IDS_LIMIT,
+    DEFAULT_GET_UTXOS_BY_ADDRESSES_V2_LIMIT, DEFAULT_GET_UTXOS_BY_COVENANT_IDS_DB_OPS,
     MAX_SAFE_GET_UTXOS_BY_ADDRESSES_V2_ADDRESS_COUNT, MAX_SAFE_GET_UTXOS_BY_ADDRESSES_V2_PAGE_SIZE,
-    MAX_SAFE_GET_UTXOS_BY_COVENANT_IDS_FILTER_COUNT, MAX_SAFE_GET_UTXOS_BY_COVENANT_IDS_PAGE_SIZE,
+    MAX_SAFE_GET_UTXOS_BY_COVENANT_IDS_DB_OPS, MAX_SAFE_GET_UTXOS_BY_COVENANT_IDS_FILTER_COUNT,
 };
 use kaspa_rpc_core::{
     Notification, RpcError, RpcResult,
@@ -933,7 +933,7 @@ NOTE: This error usually indicates an RPC conversion error between the node and 
             return Err(RpcError::InvalidGetUtxosByCovenantIdsRequest(UtxoIndexError::QueryingEmptyCovenantIdSet.to_string()));
         }
 
-        let limit = request.limit.unwrap_or(DEFAULT_GET_UTXOS_BY_COVENANT_IDS_LIMIT);
+        let budget = request.budget.unwrap_or(DEFAULT_GET_UTXOS_BY_COVENANT_IDS_DB_OPS);
 
         if !self.config.unsafe_rpc
             && (request.covenant_ids.len() > MAX_SAFE_GET_UTXOS_BY_COVENANT_IDS_FILTER_COUNT
@@ -941,12 +941,12 @@ NOTE: This error usually indicates an RPC conversion error between the node and 
         {
             return Err(RpcError::UnavailableInSafeMode);
         }
-        if !self.config.unsafe_rpc && (limit > MAX_SAFE_GET_UTXOS_BY_COVENANT_IDS_PAGE_SIZE) {
+        if !self.config.unsafe_rpc && (budget > MAX_SAFE_GET_UTXOS_BY_COVENANT_IDS_DB_OPS) {
             return Err(RpcError::UnavailableInSafeMode);
         }
 
-        if limit == 0 {
-            return Err(RpcError::InvalidGetUtxosByCovenantIdsRequest("limit must be greater than zero".to_string()));
+        if budget == 0 {
+            return Err(RpcError::InvalidGetUtxosByCovenantIdsRequest("budget must be greater than zero".to_string()));
         }
 
         // A request carries either a full cursor (echoed from a previous response's nextCursor)
@@ -986,7 +986,7 @@ NOTE: This error usually indicates an RPC conversion error between the node and 
                 from_daa_score..=to_daa_score,
                 request.script_public_keys.clone(),
                 cursor,
-                Some(limit),
+                Some(budget),
             )
             .await
             .map_err(|e| RpcError::InvalidGetUtxosByCovenantIdsRequest(e.to_string()))?;

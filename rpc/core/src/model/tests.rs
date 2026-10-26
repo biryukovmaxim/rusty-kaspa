@@ -1097,7 +1097,7 @@ mod mockery {
                 from_daa_score: mock(),
                 to_daa_score: mock(),
                 cursor: mock(),
-                limit: Some(7),
+                budget: Some(7),
             }
         }
     }

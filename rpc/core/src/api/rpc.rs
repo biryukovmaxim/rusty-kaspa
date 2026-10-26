@@ -23,9 +23,9 @@ pub const MAX_SAFE_GET_UTXOS_BY_ADDRESSES_V2_ADDRESS_COUNT: usize = 5_000;
 pub const DEFAULT_GET_UTXOS_BY_ADDRESSES_V2_LIMIT: usize = 1_000;
 
 // constants pertaining to the get_utxos_by_covenant_ids RPC method
-pub const MAX_SAFE_GET_UTXOS_BY_COVENANT_IDS_PAGE_SIZE: usize = 5_000;
+pub const MAX_SAFE_GET_UTXOS_BY_COVENANT_IDS_DB_OPS: usize = 5_000;
 pub const MAX_SAFE_GET_UTXOS_BY_COVENANT_IDS_FILTER_COUNT: usize = 5_000;
-pub const DEFAULT_GET_UTXOS_BY_COVENANT_IDS_LIMIT: usize = 1_000;
+pub const DEFAULT_GET_UTXOS_BY_COVENANT_IDS_DB_OPS: usize = 1_000;
 
 /// Client RPC Api
 ///
@@ -417,11 +417,11 @@ pub trait RpcApi: Sync + Send + AnySync {
         from_daa_score: Option<u64>,
         to_daa_score: Option<u64>,
         cursor: Option<RpcGetUtxosByCovenantIdsCursor>,
-        limit: Option<usize>,
+        budget: Option<usize>,
     ) -> RpcResult<GetUtxosByCovenantIdsResponse> {
         self.get_utxos_by_covenant_ids_call(
             None,
-            GetUtxosByCovenantIdsRequest::new(covenant_ids, script_public_keys, from_daa_score, to_daa_score, cursor, limit),
+            GetUtxosByCovenantIdsRequest::new(covenant_ids, script_public_keys, from_daa_score, to_daa_score, cursor, budget),
         )
         .await
     }

@@ -363,7 +363,7 @@ from!(item: &kaspa_rpc_core::GetUtxosByCovenantIdsRequest, protowire::GetUtxosBy
         to_daa_score: item.to_daa_score,
         script_public_keys: item.script_public_keys.iter().map(|x| x.into()).collect(),
         cursor: item.cursor.as_ref().map(|cursor| cursor.into()),
-        limit: item.limit.map(|l| l.try_into().unwrap_or(usize::MAX as u64)),
+        budget: item.budget.map(|l| l.try_into().unwrap_or(usize::MAX as u64)),
     }
 });
 from!(item: RpcResult<&kaspa_rpc_core::GetUtxosByCovenantIdsResponse>, protowire::GetUtxosByCovenantIdsResponseMessage, {
@@ -950,7 +950,7 @@ try_from!(item: &protowire::GetUtxosByCovenantIdsRequestMessage, kaspa_rpc_core:
         to_daa_score: item.to_daa_score,
         script_public_keys: item.script_public_keys.iter().map(|x| x.try_into()).collect::<Result<Vec<_>, _>>()?,
         cursor: item.cursor.clone().map(|c| c.try_into()).transpose()?,
-        limit: item.limit.map(|l| l.try_into()).transpose()?,
+        budget: item.budget.map(|l| l.try_into()).transpose()?,
     }
 });
 try_from!(item: &protowire::GetUtxosByCovenantIdsResponseMessage, RpcResult<kaspa_rpc_core::GetUtxosByCovenantIdsResponse>, {

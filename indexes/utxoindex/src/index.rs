@@ -101,10 +101,10 @@ impl UtxoIndexApi for UtxoIndex {
         daa_score_range: RangeInclusive<u64>,
         script_public_keys: &[ScriptPublicKey],
         cursor: Option<CovenantUtxoPageCursor>,
-        limit: Option<usize>,
+        budget: Option<usize>,
     ) -> UtxoIndexResult<OrderedCovenantUtxoEntriesPage> {
         trace!("[{0}] retrieving utxos by daa-score range for {1} covenant ids (paged)", IDENT, covenant_ids.len());
-        self.store.get_utxos_by_covenant_ids_page(covenant_ids, daa_score_range, script_public_keys, cursor, limit)
+        self.store.get_utxos_by_covenant_ids_page(covenant_ids, daa_score_range, script_public_keys, cursor, budget)
     }
 
     /// Retrieve utxos by script public keys from the utxoindex db.

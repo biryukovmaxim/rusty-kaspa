@@ -653,9 +653,10 @@ message GetUtxosByCovenantIdsRequestMessage {
   repeated RpcScriptPublicKey scriptPublicKeys = 4;
   // if omitted, starts from scratch.
   optional RpcGetUtxosByCovenantIdsCursor Cursor = 5;
-  // limit on the number of entries to return; omitted means default limit of 1_000
-  // max limit without requiring --unsafe-rpc flag on the node is 5_000
-  optional uint64 limit = 6;
+  // budget of weighted db operations spent for the page; a seek costs 10 units, an iterator advance costs 1
+  // omitted means default budget of 1_000 units; entries per page never exceed the budget
+  // max budget without requiring --unsafe-rpc flag on the node is 5_000
+  optional uint64 budget = 6;
 }
 
 message GetUtxosByCovenantIdsResponseMessage {
