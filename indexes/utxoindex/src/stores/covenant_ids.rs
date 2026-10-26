@@ -190,9 +190,9 @@ impl DbUtxoSetByCovenantIdStore {
     /// preferring seeks over scans: crossing into a new daa score rewinds to the first
     /// bucket, a key past the last bucket skips to the next daa score, and keys below the
     /// current bucket seek up to it. When a covenant id's pass ends, the iterator seeks the
-    /// next requested id's prefix bottom. The iterator is bounded to the key space spanned
-    /// by the lowest and highest requested ids and the daa score range, so it never leaves
-    /// the store's prefix.
+    /// next requested id's prefix bottom. The iterator is bounded to the key space from the
+    /// start key to the highest requested id's daa range end, so it never leaves the store's
+    /// prefix.
     fn iterate_covenant_rows<'a>(
         &'a self,
         covenant_ids: Vec<Hash>,
@@ -200,20 +200,20 @@ impl DbUtxoSetByCovenantIdStore {
         spk_buckets: &'a [ScriptPublicKeyBucket],
         start: CovenantUtxoEntryDbKey,
     ) -> impl Iterator<Item = StoreResult<(Hash, ScriptPublicKey, UtxoEntryKeySuffixRecord)>> + 'a {
+        assert!(*daa_score_range.end() < u64::MAX);
         let prefix = self.access.prefix().to_vec();
         let from_daa_score = *daa_score_range.start();
         let to_daa_score = *daa_score_range.end();
-        // ids are sorted ascending, so the first and last one span the requested key space
-        let min_id = *covenant_ids.first().expect("at least one covenant id");
         let max_id = *covenant_ids.last().expect("at least one covenant id");
-        let lower = DbKey::new(&prefix, CovenantUtxoEntryDbKey::prefix_start(min_id, from_daa_score));
+        // the start key (cursor position or the first id's prefix bottom) is the lowest key of interest
+        let lower = DbKey::new(&prefix, start);
         // the query entry caps the range end at u64::MAX - 1, keeping the + 1 overflow-free
-        let upper = DbKey::new(&prefix, CovenantUtxoEntryDbKey::prefix_start(max_id, to_daa_score + 1));
+        let upper = DbKey::new(&prefix, CovenantUtxoEntryDbKey::prefix_start(max_id, to_daa_score.saturating_add(1)));
         let mut read_opts = ReadOptions::default();
         read_opts.set_iterate_lower_bound(lower.as_ref());
         read_opts.set_iterate_upper_bound(upper.as_ref());
         let mut iter = self.db.raw_iterator_opt(read_opts);
-        iter.seek(DbKey::new(&prefix, start).as_ref());
+        iter.seek_to_first();
 
         let mut pending_covenant_ids = covenant_ids.into_iter();
         let mut covenant_id = pending_covenant_ids.next().expect("at least one covenant id");
