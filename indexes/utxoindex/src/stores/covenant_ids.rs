@@ -250,7 +250,10 @@ impl DbUtxoSetByCovenantIdStore {
                         done = true;
                         return Some(Err(StoreError::DbError(e)));
                     }
-                    seek_next_covenant_id!();
+                    // past the exclusive upper bound: requested ids sort ascending, so no
+                    // remaining one can hold rows below it
+                    done = true;
+                    return None;
                 }
                 let raw_key = iter.key().expect("a valid iterator holds a key");
                 let key = CovenantUtxoKeyView(&raw_key[prefix.len()..]);
