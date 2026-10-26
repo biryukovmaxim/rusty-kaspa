@@ -319,7 +319,7 @@ impl UtxoSetByCovenantIdStoreReader for DbUtxoSetByCovenantIdStore {
 
         // ids and buckets are seeked in ascending store key order
         let mut covenant_ids = covenant_ids;
-        covenant_ids.sort();
+        covenant_ids.sort_unstable();
         covenant_ids.dedup();
         let Some(first) = covenant_ids.first().copied() else {
             return Err(UtxoIndexError::QueryingEmptyCovenantIdSet);
@@ -346,7 +346,7 @@ impl UtxoSetByCovenantIdStoreReader for DbUtxoSetByCovenantIdStore {
         let covenant_ids = covenant_ids.split_off(resume);
 
         let mut spk_buckets: Vec<ScriptPublicKeyBucket> = script_public_keys.iter().map(ScriptPublicKeyBucket::from).collect();
-        spk_buckets.sort();
+        spk_buckets.sort_unstable();
         spk_buckets.dedup();
 
         let extended_limit = limit.map(|l| l.saturating_add(1)).unwrap_or(usize::MAX);
