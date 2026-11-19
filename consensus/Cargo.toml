@@ -25,7 +25,7 @@ kaspa-consensus-notify.workspace = true
 kaspa-consensusmanager.workspace = true
 kaspa-core.workspace = true
 kaspa-database.workspace = true
-kaspa-hashes.workspace = true
+kaspa-hashes = { workspace = true, features = ["zerocopy"] }
 kaspa-math.workspace = true
 kaspa-merkle.workspace = true
 kaspa-muhash.workspace = true
@@ -39,6 +39,7 @@ kaspa-txscript-errors.workspace = true
 kaspa-utils = { workspace = true, features = ["sim"] }
 log.workspace = true
 num-traits.workspace = true
+zerocopy.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
 rayon.workspace = true

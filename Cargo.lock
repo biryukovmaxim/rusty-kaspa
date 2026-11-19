@@ -3174,6 +3174,7 @@ dependencies = [
  "smallvec",
  "thiserror 2.0.18",
  "tokio",
+ "zerocopy 0.8.42",
 ]
 
 [[package]]

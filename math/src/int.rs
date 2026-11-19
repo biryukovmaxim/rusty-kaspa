@@ -144,6 +144,15 @@ impl<T: PartialOrd + PartialEq<u64>> PartialOrd for SignedInteger<T> {
     }
 }
 
+impl<T: Ord + PartialEq<u64>> Ord for SignedInteger<T> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // `partial_cmp` above is total: every sign/magnitude branch returns `Some`,
+        // and it agrees with `Eq` (negative and positive zero compare Equal).
+        self.partial_cmp(other).unwrap()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{Uint192, int::SignedInteger};
@@ -177,5 +186,28 @@ mod tests {
         assert!(from_u64(100) < from_u64(1000));
         assert!(from_u64(1000) >= from_u64(1000));
         assert!(from_u64(100) <= from_u64(100));
+    }
+
+    #[test]
+    fn test_ord_consistent_with_partial_ord() {
+        let neg_zero = from_u64(0) - from_u64(5) + from_u64(5); // -0: negative flag, zero magnitude
+        let values = [
+            from_u64(1000) - from_u64(2000), // -1000
+            neg_zero,                        // -0
+            from_u64(0),                     // +0
+            from_u64(1),
+            from_u64(1000),
+        ];
+        for (i, a) in values.iter().enumerate() {
+            for (j, b) in values.iter().enumerate() {
+                let ord = a.cmp(b);
+                assert_eq!(a.partial_cmp(b), Some(ord), "partial_cmp must agree with cmp at ({i}, {j})");
+                assert_eq!(a == b, ord == std::cmp::Ordering::Equal, "Eq must agree with Ord at ({i}, {j})");
+                if i >= j {
+                    assert_ne!(ord, std::cmp::Ordering::Less, "expected non-Less ordering at ({i}, {j})");
+                }
+            }
+        }
+        assert_eq!(neg_zero.cmp(&from_u64(0)), std::cmp::Ordering::Equal); // -0 == +0 under Ord
     }
 }

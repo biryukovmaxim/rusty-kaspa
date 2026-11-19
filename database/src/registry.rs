@@ -90,6 +90,14 @@ pub enum DatabaseStorePrefixes {
     DagKnight = 80,
     DagKnightUMC = 81,
 
+    // ---- DagKnight UMC tree ----
+    // Node records: `prefix(1) | k(2 BE) | h(2 BE) | j(8 BE) | rev_version(8 BE)`
+    DagKnightUmcNodes = 82,
+    // Published-state metadata: `prefix(1) | k(2 BE) | rev_version(8 BE)`
+    DagKnightUmcVersions = 83,
+    // Singleton version-id counter: `prefix(1)`, value `u64` BE
+    DagKnightUmcMeta = 84,
+
     // ---- Separator ----
     /// Reserved as a separator
     Separator = SEPARATOR,

@@ -19,6 +19,7 @@ pub mod tie_breaking;
 pub mod umc_baseline;
 pub mod umc_cascade;
 pub mod umc_cascade_persistence;
+pub mod umc_tree;
 pub mod umc_voting;
 
 pub struct GroupMetadata {
