@@ -39,6 +39,14 @@ pub struct TreeBuilder<'a, T: Clone, S: Score, St: UmcTreeStore<T, S>> {
     blue_count: u64,
 }
 
+/// One reachability probe: the leaf value `leaf` tested for ancestry of the incoming `block`.
+pub struct AncestryProbe<'a, T> {
+    /// Candidate leaf value.
+    pub leaf: &'a T,
+    /// Incoming block under test.
+    pub block: &'a T,
+}
+
 impl<'a, T: Clone, S: Score, St: UmcTreeStore<T, S>> TreeBuilder<'a, T, S, St> {
     /// Allocate a version and open a builder over `store`: from scratch, or
     /// extending the published `anchor_version` state.
@@ -97,6 +105,19 @@ impl<'a, T: Clone, S: Score, St: UmcTreeStore<T, S>> TreeBuilder<'a, T, S, St> {
         self.scan_ref(self.root, a, b, f);
     }
 
+    /// Index of the latest leaf that is a DAG ancestor of `x`, or `None` when no leaf qualifies. Read-only.
+    ///
+    /// Assumes the caller's blue set is a K-cluster: the ancestors of `x` form a prefix of the leaves with at most `k` holes, each within `2k-1` of the true answer.
+    pub fn latest_blue_ancestor(&self, x: &T, is_ancestor: &impl Fn(AncestryProbe<'_, T>) -> bool) -> Option<u64> {
+        if self.blue_count == 0 {
+            return None;
+        }
+        let (lo, hi) = self.ancestor_bounds(x, is_ancestor);
+        // The K-cluster bound puts any ancestor the descent stepped over within the next `2k` leaves past `hi`.
+        let end = hi.saturating_add(2 * u64::from(self.k)).min(self.blue_count);
+        self.last_ancestor_in(hi, end, x, is_ancestor).or(lo)
+    }
+
     /// Append `value` as a new leaf at index `blue_count`, starting at score zero.
     pub fn append_leaf(&mut self, value: T) {
         let i = self.blue_count;
@@ -136,6 +157,63 @@ impl<'a, T: Clone, S: Score, St: UmcTreeStore<T, S>> TreeBuilder<'a, T, S, St> {
         } else {
             self.store.get_node(self.k, r).expect("published record read failed").expect("published record")
         }
+    }
+
+    /// Adjacent bounds around the latest ancestor leaf: `lo` is the largest known ancestor index, `None` until one is found; `hi` is the smallest known non-ancestor index.
+    fn ancestor_bounds(&self, x: &T, is_ancestor: &impl Fn(AncestryProbe<'_, T>) -> bool) -> (Option<u64>, u64) {
+        let n = self.blue_count;
+        // `lo` is the largest known ancestor index, `None` until one is found; `hi` is the smallest known non-ancestor index.
+        let mut lo = None;
+        let mut hi = n;
+        let mut r = self.root.expect("populated tree has a root");
+        let mut h = self.root_height;
+        let mut j = 0u64;
+        // `l < hi` is a maintained invariant, so the subtraction cannot underflow.
+        while lo.map_or(hi > 0, |l| hi - l > 1) {
+            if h == 0 {
+                let value = match self.load(r) {
+                    NodeRecord::Leaf { value, .. } => value,
+                    _ => unreachable!("leaf expected"),
+                };
+                if is_ancestor(AncestryProbe { leaf: &value, block: x }) {
+                    lo = Some(j);
+                } else {
+                    hi = j;
+                }
+                break;
+            }
+            let split = (2 * j + 1) << (h - 1);
+            let (boundary, lv, rv) = match self.load(r) {
+                NodeRecord::Internal { boundary, left_version, right_version, .. } => (boundary, left_version, right_version),
+                _ => unreachable!("internal node expected"),
+            };
+            if split >= n {
+                // The right half holds no leaf; every leaf sits in the left half.
+                r = child_of(r, lv, 0).expect("populated left child");
+                j *= 2;
+            } else if is_ancestor(AncestryProbe { leaf: &boundary.expect("left half is full at an inner split"), block: x }) {
+                lo = Some(split - 1);
+                r = child_of(r, rv, 1).expect("populated right child at an inner split");
+                j = 2 * j + 1;
+            } else {
+                hi = split - 1;
+                r = child_of(r, lv, 0).expect("populated left child");
+                j *= 2;
+            }
+            h -= 1;
+        }
+        (lo, hi)
+    }
+
+    /// Latest ancestor leaf in `[a, b)`, or `None` when the range holds none.
+    fn last_ancestor_in(&self, a: u64, b: u64, x: &T, is_ancestor: &impl Fn(AncestryProbe<'_, T>) -> bool) -> Option<u64> {
+        let mut latest = None;
+        self.scan_leaves(a, b, &mut |i, value| {
+            if is_ancestor(AncestryProbe { leaf: value, block: x }) {
+                latest = Some(i);
+            }
+        });
+        latest
     }
 
     /// Minimum of the subtree at `r`; `None` when it has no leaves.
@@ -405,6 +483,9 @@ mod tests {
     use super::*;
     use kaspa_database::create_temp_db;
     use kaspa_database::prelude::ConnBuilder;
+    use rand::rngs::SmallRng;
+    use rand::seq::SliceRandom;
+    use rand::{Rng, SeedableRng};
 
     use super::super::api::UmcTreeStoreReader;
     use super::super::mem::MemoryUmcTreeStore;
@@ -414,6 +495,26 @@ mod tests {
 
     fn leaf_scores(pairs: &[(u64, i64)]) -> Vec<LeafScore<u64, i64>> {
         pairs.iter().map(|&(value, score)| LeafScore { value, score }).collect()
+    }
+
+    /// Query sentinel: never a leaf value, so only the closure decides ancestry.
+    const QUERY: u64 = u64::MAX;
+
+    /// Ancestry closure over leaf values: the leaf is an ancestor of the query
+    /// iff its value is `<= p` and not one of `holes`. `p = -1` makes nothing
+    /// an ancestor.
+    fn ancestry(p: i64, holes: &[u64]) -> impl Fn(AncestryProbe<'_, u64>) -> bool {
+        let holes = holes.to_vec();
+        move |AncestryProbe { leaf, .. }| (*leaf as i64) <= p && !holes.contains(leaf)
+    }
+
+    /// Builder over a working tree of `n` leaves with values `0..n`.
+    fn tree_with_leaves<'a>(store: &'a mut Store, k: KType, n: u64) -> TreeBuilder<'a, u64, i64, Store> {
+        let mut b = store.begin(k, None);
+        for v in 0..n {
+            b.append_leaf(v);
+        }
+        b
     }
 
     /// A root-wide lazy addition adjusts the root only; leaf records stay untouched.
@@ -556,5 +657,134 @@ mod tests {
         assert_eq!(stores.scores(3, v1).unwrap(), leaf_scores(&[(0, 7), (1, 6), (2, 5), (3, 5), (4, 5)]));
         assert_eq!(stores.minimum_score(3, v1).unwrap(), Some(5));
         assert_eq!(stores.latest_version(3).unwrap(), Some(v1));
+    }
+
+    /// An empty tree has no blue ancestor to find, whatever the closure says.
+    #[test]
+    fn latest_blue_ancestor_empty_tree_is_none() {
+        let mut store = Store::new();
+        let b = tree_with_leaves(&mut store, 2, 0);
+        assert_eq!(b.latest_blue_ancestor(&QUERY, &|_: AncestryProbe<'_, u64>| true), None);
+    }
+
+    /// A single-leaf tree returns that leaf or `None` depending on ancestry;
+    /// the leaf probe at height 0 feeds both the `lo` and `hi` sentinel.
+    #[test]
+    fn latest_blue_ancestor_single_leaf() {
+        let mut store = Store::new();
+        let b = tree_with_leaves(&mut store, 2, 1);
+        assert_eq!(b.latest_blue_ancestor(&QUERY, &ancestry(0, &[])), Some(0));
+        assert_eq!(b.latest_blue_ancestor(&QUERY, &ancestry(-1, &[])), None);
+    }
+
+    /// Without holes the prefix ancestor set is answered exactly, at every tree
+    /// shape from height 2 to 4, including grown roots with an empty right half.
+    #[test]
+    fn latest_blue_ancestor_prefix_without_holes() {
+        for &n in &[3u64, 4, 5, 8, 9] {
+            for p in 0..n {
+                let mut store = Store::new();
+                let b = tree_with_leaves(&mut store, 2, n);
+                assert_eq!(b.latest_blue_ancestor(&QUERY, &ancestry(p as i64, &[])), Some(p), "n={n} p={p}");
+            }
+        }
+    }
+
+    /// A non-ancestor boundary hides later ancestors from the descent; the scan
+    /// past the boundary repairs the answer.
+    ///
+    /// Leaves 0..=4 and 6 are ancestors, leaf 5 is not. By construction the
+    /// descent alone must stop at 4: leaf 5 is the boundary of the [4,8)
+    /// subtree, so the probe sets hi=5, and leaf 4 is the boundary of the [4,6)
+    /// subtree, so the probe sets lo=4 even though leaf 6 is an ancestor. Only
+    /// the correction scan reaches 6.
+    #[test]
+    fn latest_blue_ancestor_correction_scan_repairs_descent() {
+        let mut store = Store::new();
+        let b = tree_with_leaves(&mut store, 2, 8);
+        assert_eq!(b.latest_blue_ancestor(&QUERY, &ancestry(6, &[5])), Some(6));
+
+        // With the hole before a probed boundary (leaf 5 is the [4,8) boundary
+        // and an ancestor), the descent alone already lands on the answer.
+        let mut store = Store::new();
+        let b = tree_with_leaves(&mut store, 2, 8);
+        assert_eq!(b.latest_blue_ancestor(&QUERY, &ancestry(5, &[4])), Some(5));
+    }
+
+    /// K=0 empties the correction window, so the descent's answer stands even
+    /// when a later leaf is an ancestor: keeping the blue set a K-cluster is the
+    /// caller's responsibility, not the search's.
+    #[test]
+    fn latest_blue_ancestor_k0_correction_window_is_empty() {
+        let mut store = Store::new();
+        let b = tree_with_leaves(&mut store, 0, 8);
+        // Leaf 6 is an ancestor, but the hole at 5 is illegal at K=0: the
+        // descent stops at lo=4 and the scan window [5,5) is empty.
+        assert_eq!(b.latest_blue_ancestor(&QUERY, &ancestry(6, &[5])), Some(4));
+    }
+
+    /// With no ancestor at all, the -1 sentinel survives both the descent and
+    /// the scan and surfaces as `None`.
+    #[test]
+    fn latest_blue_ancestor_without_ancestors_is_none() {
+        let mut store = Store::new();
+        let b = tree_with_leaves(&mut store, 2, 8);
+        assert_eq!(b.latest_blue_ancestor(&QUERY, &ancestry(-1, &[])), None);
+    }
+
+    /// The search is read-only: a parked root-wide lazy addition stays parked,
+    /// no records join the buffer, and scores are unchanged.
+    #[test]
+    fn latest_blue_ancestor_is_read_only() {
+        let mut store = Store::new();
+        let mut b = store.begin(2, None);
+        for v in 0..4 {
+            b.append_leaf(v);
+        }
+        b.range_add(0, 1, 3);
+        // Park a root-wide lazy addition: leaf records stay at [3,0,0,0].
+        b.range_add(0, 4, 7);
+        let scores = b.scores();
+        let minimum = b.minimum_score();
+        let buffer_len = b.buffer.len();
+        let root = b.root.unwrap();
+        let NodeRecord::Internal { pending_addition: parked, .. } = b.load(root) else { panic!("internal root") };
+
+        assert_eq!(b.latest_blue_ancestor(&QUERY, &ancestry(1, &[])), Some(1));
+
+        assert_eq!(b.scores(), scores);
+        assert_eq!(b.minimum_score(), minimum);
+        assert_eq!(b.buffer.len(), buffer_len, "the search must not buffer records");
+        let NodeRecord::Internal { pending_addition, .. } = b.load(root) else { panic!("internal root") };
+        assert_eq!(pending_addition, parked, "the search must not push lazy additions");
+    }
+
+    /// Randomized oracle: hole placements drawn freely inside the legal window
+    /// (at most K holes, each within 2K-1 of the last ancestor, including the
+    /// left edge and adjacent pairs) always match a brute-force scan.
+    #[test]
+    fn latest_blue_ancestor_matches_brute_force() {
+        for k in 0u16..=4 {
+            for seed in 0u64..24 {
+                let mut rng = SmallRng::seed_from_u64(1000 * u64::from(k) + seed + 1);
+                let n = rng.gen_range(0..=40u64);
+                let p: i64 = if n == 0 || rng.gen_bool(0.2) { -1 } else { rng.gen_range(0..n) as i64 };
+                let window_lo = (p - (2 * i64::from(k) - 1)).max(0);
+                let mut holes: Vec<u64> = (window_lo..p).map(|i| i as u64).collect();
+                let hole_count = rng.gen_range(0..=k as usize).min(holes.len());
+                holes.shuffle(&mut rng);
+                holes.truncate(hole_count);
+                holes.sort_unstable();
+
+                let mut store = Store::new();
+                let b = tree_with_leaves(&mut store, k, n);
+                let expected = (0..n).filter(|&i| (i as i64) <= p && !holes.contains(&i)).max();
+                assert_eq!(
+                    b.latest_blue_ancestor(&QUERY, &ancestry(p, &holes)),
+                    expected,
+                    "k={k} seed={seed} n={n} p={p} holes={holes:?}"
+                );
+            }
+        }
     }
 }
