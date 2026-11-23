@@ -60,6 +60,13 @@ pub trait UmcTreeStoreReader<T: Clone, S: Score> {
         }
     }
 
+    /// Whether the published state passes the UMC test at `deficit`: the root
+    /// minimum is at least `-deficit`; a state with no leaves qualifies vacuously.
+    /// An unknown version is a `DataInconsistency` error, never a vacuous pass.
+    fn qualifies(&self, k: KType, version: u64, deficit: S) -> StoreResult<bool> {
+        Ok(self.minimum_score(k, version)?.is_none_or(|m| m >= -deficit))
+    }
+
     /// All leaf scores of a published state in leaf order; costs O(n). An unknown
     /// version is a `DataInconsistency` error, never an empty vector.
     fn scores(&self, k: KType, version: u64) -> StoreResult<Vec<LeafScore<T, S>>> {

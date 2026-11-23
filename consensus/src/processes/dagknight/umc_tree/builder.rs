@@ -47,6 +47,18 @@ pub struct AncestryProbe<'a, T> {
     pub block: &'a T,
 }
 
+/// One supplied block arrival: the block itself, its color, and the work-weighted
+/// vote it contributes to every blue ancestor's score.
+#[derive(Clone, Copy)]
+pub struct Arrival<T, S> {
+    /// The arriving block; a blue arrival appends it as the new leaf value.
+    pub block: T,
+    /// Supplied color: blue arrivals append a leaf and vote positively, red ones only vote.
+    pub blue: bool,
+    /// Weight added to (blue) or subtracted from (red) the score of each existing ancestor leaf.
+    pub work: S,
+}
+
 impl<'a, T: Clone, S: Score, St: UmcTreeStore<T, S>> TreeBuilder<'a, T, S, St> {
     /// Allocate a version and open a builder over `store`: from scratch, or
     /// extending the published `anchor_version` state.
@@ -134,6 +146,64 @@ impl<'a, T: Clone, S: Score, St: UmcTreeStore<T, S>> TreeBuilder<'a, T, S, St> {
         self.blue_count += 1;
     }
 
+    /// Apply one supplied arrival and return whether the resulting state passes
+    /// the UMC test at `deficit`.
+    ///
+    /// A blue arrival adds `work` to every existing leaf (its blue ancestors,
+    /// repaired at the nonancestor holes of the last `2k-1` positions) and
+    /// appends its own leaf at score zero. A red arrival subtracts `work` from
+    /// the leaf prefix through its latest blue ancestor, repairing the holes of
+    /// the `2k-1` positions before it; a red arrival with no blue ancestor
+    /// changes nothing. At `k == 0` the hole window is empty by construction,
+    /// so no scan runs.
+    ///
+    /// `deficit` is a nonnegative work allowance: the state qualifies when the
+    /// root minimum is at least `-deficit`. It is a query parameter, not state,
+    /// and a failed qualification never stops state maintenance; later arrivals
+    /// may restore sufficient support.
+    ///
+    /// Probes `is_ancestor` O(k + log n) times.
+    ///
+    /// The blue set, the arrival included, must stay a K-cluster, and arrivals must come in
+    /// topological order, so every old nonancestor of the arrival is incomparable with it.
+    pub fn process_block(&mut self, arrival: Arrival<T, S>, deficit: S, is_ancestor: &impl Fn(AncestryProbe<'_, T>) -> bool) -> bool {
+        if arrival.blue {
+            let n = self.blue_count;
+            let holes = self.holes_before(n, &arrival.block, is_ancestor);
+            self.range_add(0, n, arrival.work);
+            self.correct_holes(&holes, -arrival.work);
+            self.append_leaf(arrival.block);
+        } else if let Some(p) = self.latest_blue_ancestor(&arrival.block, is_ancestor) {
+            let holes = self.holes_before(p, &arrival.block, is_ancestor);
+            self.range_add(0, p + 1, -arrival.work);
+            self.correct_holes(&holes, arrival.work);
+        }
+        self.qualifies(deficit)
+    }
+
+    /// Apply a run of arrivals in order and return whether the final state
+    /// passes the UMC test at `deficit`.
+    ///
+    /// The run must be topologically ordered: each block already queryable
+    /// through `is_ancestor` when it is applied.
+    pub fn apply_delta(
+        &mut self,
+        events: impl IntoIterator<Item = Arrival<T, S>>,
+        deficit: S,
+        is_ancestor: &impl Fn(AncestryProbe<'_, T>) -> bool,
+    ) -> bool {
+        for arrival in events {
+            self.process_block(arrival, deficit, is_ancestor);
+        }
+        self.qualifies(deficit)
+    }
+
+    /// Whether the working state passes the UMC test at `deficit`: the root
+    /// minimum is at least `-deficit`; a tree with no leaves qualifies vacuously.
+    pub fn qualifies(&self, deficit: S) -> bool {
+        self.minimum_score().is_none_or(|m| m >= -deficit)
+    }
+
     /// Publish buffered records as this builder's version, close it, and return
     /// the version id. Fails when the backing store write fails, in which case
     /// no new state is exposed.
@@ -214,6 +284,19 @@ impl<'a, T: Clone, S: Score, St: UmcTreeStore<T, S>> TreeBuilder<'a, T, S, St> {
             }
         });
         latest
+    }
+
+    /// Nonancestor leaf indices inside the `2k-1` positions ending at `end`
+    /// (exclusive); at `k == 0` the window is empty and nothing is scanned.
+    fn holes_before(&self, end: u64, block: &T, is_ancestor: &impl Fn(AncestryProbe<'_, T>) -> bool) -> Vec<u64> {
+        let start = end.saturating_sub((2 * u64::from(self.k)).saturating_sub(1));
+        let mut holes = Vec::new();
+        self.scan_leaves(start, end, &mut |i, leaf| {
+            if !is_ancestor(AncestryProbe { leaf, block }) {
+                holes.push(i);
+            }
+        });
+        holes
     }
 
     /// Minimum of the subtree at `r`; `None` when it has no leaves.
@@ -480,6 +563,11 @@ impl<'a, T: Clone, S: Score, St: UmcTreeStore<T, S>> TreeBuilder<'a, T, S, St> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::BTreeSet;
+
+    use kaspa_math::Uint192;
+
     use super::*;
     use kaspa_database::create_temp_db;
     use kaspa_database::prelude::ConnBuilder;
@@ -490,6 +578,7 @@ mod tests {
     use super::super::api::UmcTreeStoreReader;
     use super::super::mem::MemoryUmcTreeStore;
     use super::super::stores::UmcTreeStores;
+    use crate::processes::dagknight::umc_voting::SignedWork;
 
     type Store = MemoryUmcTreeStore<u64, i64>;
 
@@ -786,5 +875,557 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Shortcut for building one recorded arrival.
+    fn event(block: u64, blue: bool, work: i64) -> Arrival<u64, i64> {
+        Arrival { block, blue, work }
+    }
+
+    /// Brute-force DAG oracle: it stores each block's full strict-ancestor set
+    /// and recomputes every blue score by summing the signed work of its strict
+    /// descendants. It shares no logic with the tree: no segment structure, no
+    /// hole windows, no ancestor search.
+    /// The oracle keeps its tables behind `RefCell` so a shared ancestry
+    /// closure can stay alive across later `add` calls.
+    #[derive(Default)]
+    struct DagOracle {
+        past: RefCell<Vec<Vec<u64>>>,
+    }
+
+    impl DagOracle {
+        /// Admit the next block with `parents`: its strict ancestors are each parent
+        /// plus each parent's ancestors.
+        fn add(&self, parents: &[u64]) {
+            let mut ancestors = BTreeSet::new();
+            for &parent in parents {
+                ancestors.insert(parent);
+                ancestors.extend(self.past.borrow()[parent as usize].iter().copied());
+            }
+            self.past.borrow_mut().push(ancestors.into_iter().collect());
+        }
+
+        /// Id the next admitted block will carry.
+        fn next_id(&self) -> u64 {
+            self.past.borrow().len() as u64
+        }
+
+        /// Whether `ancestor` is a strict ancestor of `block`.
+        fn is_ancestor(&self, ancestor: u64, block: u64) -> bool {
+            self.past.borrow()[block as usize].contains(&ancestor)
+        }
+
+        /// Ancestry closure for the builder: maps the leaf and arrival values
+        /// through the oracle.
+        fn probe(&self) -> impl Fn(AncestryProbe<'_, u64>) -> bool + '_ {
+            move |AncestryProbe { leaf, block }| self.is_ancestor(*leaf, *block)
+        }
+
+        /// Ancestry closure that records each `(leaf, block)` pair it is asked into `queries`,
+        /// then answers through the oracle.
+        fn recording_probe<'a>(&'a self, queries: &'a RefCell<Vec<(u64, u64)>>) -> impl Fn(AncestryProbe<'_, u64>) -> bool + 'a {
+            move |AncestryProbe { leaf, block }| {
+                queries.borrow_mut().push((*leaf, *block));
+                self.is_ancestor(*leaf, *block)
+            }
+        }
+
+        /// Blue leaves in arrival order, each scored by the signed work of its
+        /// strict descendants.
+        fn scores(&self, events: &[Arrival<u64, i64>]) -> Vec<LeafScore<u64, i64>> {
+            events
+                .iter()
+                .filter(|e| e.blue)
+                .map(|e| LeafScore {
+                    value: e.block,
+                    score: events
+                        .iter()
+                        .filter(|d| self.is_ancestor(e.block, d.block))
+                        .map(|d| if d.blue { d.work } else { -d.work })
+                        .sum(),
+                })
+                .collect()
+        }
+
+        /// Minimum blue score, or `None` while no blue has arrived.
+        fn minimum(&self, events: &[Arrival<u64, i64>]) -> Option<i64> {
+            self.scores(events).iter().map(|leaf| leaf.score).min()
+        }
+
+        /// K-cluster guard: `block` may turn blue when every blue, itself
+        /// included, keeps at most `k` incomparable blues, two blocks being
+        /// incomparable when neither is a strict ancestor of the other.
+        fn may_add_blue(&self, events: &[Arrival<u64, i64>], block: u64, k: KType) -> bool {
+            let blues: Vec<u64> = events.iter().filter(|e| e.blue).map(|e| e.block).chain([block]).collect();
+            blues.iter().all(|&a| {
+                blues.iter().filter(|&&b| b != a && !self.is_ancestor(a, b) && !self.is_ancestor(b, a)).count() <= usize::from(k)
+            })
+        }
+    }
+
+    /// The parent set of `block` when it extends only `block - 1` in a chain;
+    /// block 0 has no parents.
+    fn chain_parents(block: u64) -> Vec<u64> {
+        (block > 0).then(|| block - 1).into_iter().collect()
+    }
+
+    /// Ancestry closure over a chain DAG: a block is an ancestor of exactly the
+    /// later blocks.
+    fn chain_ancestry(AncestryProbe { leaf, block }: AncestryProbe<'_, u64>) -> bool {
+        *leaf < *block
+    }
+
+    /// Compare the whole working state against the oracle: leaf count, score
+    /// vector, root minimum, and qualification at several deficits. Reads must
+    /// not edit or buffer any record.
+    fn check_builder(b: &TreeBuilder<'_, u64, i64, Store>, oracle: &DagOracle, events: &[Arrival<u64, i64>]) {
+        let expected = oracle.scores(events);
+        let minimum = expected.iter().map(|leaf| leaf.score).min();
+        assert_eq!(b.blue_count(), expected.len() as u64);
+        let buffer_before = b.buffer.clone();
+        assert_eq!(b.scores(), expected, "leaf scores diverged from direct sums");
+        assert_eq!(b.minimum_score(), minimum);
+        for deficit in [0, 1, 7] {
+            assert_eq!(b.qualifies(deficit), minimum.is_none_or(|m| m >= -deficit), "deficit {deficit}");
+        }
+        assert_eq!(b.buffer, buffer_before, "reading pushed or rewrote a record");
+    }
+
+    /// Compare a published state against the oracle: scores, root minimum, blue
+    /// count, and qualification at several deficits.
+    fn check_published(store: &Store, k: KType, version: u64, oracle: &DagOracle, events: &[Arrival<u64, i64>]) {
+        let expected = oracle.scores(events);
+        let minimum = expected.iter().map(|leaf| leaf.score).min();
+        assert_eq!(store.scores(k, version).unwrap(), expected, "version {version}");
+        assert_eq!(store.minimum_score(k, version).unwrap(), minimum, "version {version}");
+        assert_eq!(store.metadata(k, version).unwrap().map(|m| m.blue_count), Some(expected.len() as u64));
+        for deficit in [0, 1, 7] {
+            assert_eq!(
+                store.qualifies(k, version, deficit).unwrap(),
+                minimum.is_none_or(|m| m >= -deficit),
+                "version {version} deficit {deficit}"
+            );
+        }
+    }
+
+    /// Apply one weighted arrival, record it, and check the working state
+    /// against the oracle: the returned qualification must match the oracle
+    /// minimum at `deficit`.
+    fn process_weighted(
+        b: &mut TreeBuilder<'_, u64, i64, Store>,
+        oracle: &DagOracle,
+        events: &mut Vec<Arrival<u64, i64>>,
+        e: Arrival<u64, i64>,
+        deficit: i64,
+        probe: &impl Fn(AncestryProbe<'_, u64>) -> bool,
+    ) -> bool {
+        events.push(e);
+        let result = b.process_block(e, deficit, probe);
+        let minimum = oracle.minimum(events);
+        assert_eq!(result, minimum.is_none_or(|m| m >= -deficit), "block {} answered {result} at minimum {minimum:?}", e.block);
+        check_builder(b, oracle, events);
+        result
+    }
+
+    /// Randomized batches and forks across fixed seeds and k values, with every
+    /// block carrying its own nonzero work: every intermediate working tree and
+    /// every published history matches direct descendant-work sums in scores,
+    /// minimum, and qualification.
+    #[test]
+    fn randomized_batches_and_forks_match_direct_scores() {
+        for &k in &[0u16, 1, 3, 8] {
+            for seed in 0u64..6 {
+                let mut rng = SmallRng::seed_from_u64(100 * u64::from(k) + seed);
+                let oracle = DagOracle::default();
+                let mut store = Store::new();
+                let mut histories: HashMap<Option<u64>, Vec<Arrival<u64, i64>>> = HashMap::from([(None, Vec::new())]);
+                let mut anchor = None;
+                for batch in 0..12 {
+                    if batch % 3 == 2 {
+                        let keys: Vec<Option<u64>> = histories.keys().copied().collect();
+                        anchor = keys[rng.gen_range(0..keys.len())];
+                    }
+                    let mut events = histories[&anchor].clone();
+                    let mut b = store.begin(k, anchor);
+                    check_builder(&b, &oracle, &events);
+                    for _ in 0..rng.gen_range(0..=7) {
+                        let block = oracle.next_id();
+                        let visible: Vec<u64> = events.iter().map(|e| e.block).collect();
+                        let parents: Vec<u64> = if visible.is_empty() {
+                            Vec::new()
+                        } else if rng.gen_bool(0.35) {
+                            visible[visible.len().saturating_sub(6)..].to_vec()
+                        } else {
+                            let pool = &visible[visible.len().saturating_sub(8)..];
+                            let count = rng.gen_range(1..=pool.len().min(3));
+                            pool.choose_multiple(&mut rng, count).copied().collect()
+                        };
+                        oracle.add(&parents);
+                        let work = rng.gen_range(1..=9i64);
+                        let blue = rng.gen_bool(0.7) && oracle.may_add_blue(&events, block, k);
+                        let deficit = rng.gen_range(0..=10i64);
+                        process_weighted(&mut b, &oracle, &mut events, event(block, blue, work), deficit, &oracle.probe());
+                    }
+                    anchor = Some(b.publish().unwrap());
+                    histories.insert(anchor, events);
+                }
+                for (version, events) in &histories {
+                    if let Some(version) = version {
+                        check_published(&store, k, *version, &oracle, events);
+                    }
+                }
+            }
+        }
+    }
+
+    /// An empty tree qualifies vacuously, a red-only run never grows a tree no
+    /// matter the work its reds carry, and a blue over red-only history starts
+    /// a fresh tree whose single leaf scores zero because earlier reds cannot
+    /// be its ancestors. A red with no blue ancestor over that non-empty tree
+    /// still changes nothing.
+    #[test]
+    fn empty_and_red_only_states_qualify() {
+        let oracle = DagOracle::default();
+        let mut store = Store::new();
+        let mut events = Vec::new();
+        let mut b = store.begin(0, None);
+        check_builder(&b, &oracle, &events);
+        assert!(b.apply_delta(std::iter::empty(), 0, &oracle.probe()));
+        let empty = b.publish().unwrap();
+        check_published(&store, 0, empty, &oracle, &events);
+        assert_eq!(store.metadata(0, empty).unwrap().expect("empty metadata").root_version, None);
+
+        let mut b = store.begin(0, Some(empty));
+        for block in 0..6u64 {
+            oracle.add(&chain_parents(block));
+            assert!(process_weighted(&mut b, &oracle, &mut events, event(block, false, 3 + block as i64), 0, &oracle.probe()));
+        }
+        let red_only = b.publish().unwrap();
+        assert_eq!(store.metadata(0, red_only).unwrap().expect("red-only metadata").root_version, None);
+        check_published(&store, 0, red_only, &oracle, &events);
+
+        // The first blue leaf is not an ancestor of the earlier reds, so the
+        // tree starts fresh at zero.
+        let mut b = store.begin(0, Some(red_only));
+        oracle.add(&[5]);
+        assert!(process_weighted(&mut b, &oracle, &mut events, event(6, true, 7), 0, &oracle.probe()));
+        assert_eq!(b.scores(), leaf_scores(&[(6, 0)]));
+        // A red whose only parent is an old red has no blue ancestor even over
+        // a non-empty tree: nothing changes.
+        oracle.add(&[5]);
+        assert!(process_weighted(&mut b, &oracle, &mut events, event(7, false, 9), 0, &oracle.probe()));
+        assert_eq!(b.scores(), leaf_scores(&[(6, 0)]));
+        let version = b.publish().unwrap();
+        check_published(&store, 0, version, &oracle, &events);
+    }
+
+    /// A blue arrival finds its nonancestor holes by scanning only the bounded
+    /// suffix window: every ancestry probe touches a leaf within `2k-1`
+    /// positions of the new leaf and the arriving block itself.
+    #[test]
+    fn blue_shortcut_only_queries_the_bounded_suffix() {
+        for &k in &[0u16, 1, 2, 4] {
+            for n in [0u64, 1, 3, 4, 9] {
+                let oracle = DagOracle::default();
+                let mut store = Store::new();
+                let mut events = Vec::new();
+                let queries = RefCell::new(Vec::new());
+                let probe = oracle.recording_probe(&queries);
+                let mut b = store.begin(k, None);
+                for block in 0..n {
+                    oracle.add(&chain_parents(block));
+                    process_weighted(&mut b, &oracle, &mut events, event(block, true, 1), 0, &probe);
+                }
+                let anchor = b.publish().unwrap();
+                let mut b = store.begin(k, Some(anchor));
+                oracle.add(&chain_parents(n));
+                queries.borrow_mut().clear();
+                process_weighted(&mut b, &oracle, &mut events, event(n, true, 1), 0, &probe);
+
+                let bound = n.min((2 * i64::from(k) - 1).max(0) as u64);
+                let probed = queries.borrow();
+                assert!(probed.len() <= bound as usize, "k={k} n={n} probed {probed:?}");
+                assert!(
+                    probed.iter().all(|&(leaf, block)| leaf >= n - bound && leaf < n && block == n),
+                    "k={k} n={n} probed {probed:?}"
+                );
+            }
+        }
+    }
+
+    /// A hole exactly at the window's left edge is repaired: with two parallel
+    /// k-long blue chains over a shared prefix, the new right tip adds its work
+    /// to its ancestors only, the left chain's head sits exactly `2k-1`
+    /// positions before it and keeps its score, and the prefix leaves are never
+    /// probed.
+    #[test]
+    fn blue_hole_at_the_left_edge_of_the_shortcut_window() {
+        for &k in &[1u16, 2, 3, 5] {
+            let oracle = DagOracle::default();
+            let mut store = Store::new();
+            let mut events = Vec::new();
+            for i in 0..4u64 {
+                oracle.add(&chain_parents(i));
+                events.push(event(i, true, 1 + i as i64));
+            }
+            // Two parallel k-long chains over the prefix tip give every block
+            // exactly k incomparable blues.
+            for &base in &[4u64, 4 + u64::from(k)] {
+                for i in 0..u64::from(k) {
+                    let block = base + i;
+                    let parents = if i == 0 { vec![3] } else { vec![block - 1] };
+                    oracle.add(&parents);
+                    if base != 4 + u64::from(k) || i < u64::from(k) - 1 {
+                        events.push(event(block, true, 2 + i as i64));
+                    }
+                }
+            }
+            let new_blue = 4 + 2 * u64::from(k) - 1;
+            assert!(oracle.may_add_blue(&events, new_blue, k), "k={k}");
+
+            let queries = RefCell::new(Vec::new());
+            let probe = oracle.recording_probe(&queries);
+            let mut b = store.begin(k, None);
+            b.apply_delta(events.iter().copied(), 0, &probe);
+            let anchor = b.publish().unwrap();
+            let old_events = events.clone();
+            let mut b = store.begin(k, Some(anchor));
+            queries.borrow_mut().clear();
+            process_weighted(&mut b, &oracle, &mut events, event(new_blue, true, 6), 0, &probe);
+
+            let probed = queries.borrow();
+            assert!(probed.contains(&(4, new_blue)), "the left-edge hole must be probed: {probed:?}");
+            assert!(probed.len() < 2 * usize::from(k), "k={k} probed {probed:?}");
+            assert!(probed.iter().all(|&(leaf, _)| !(0..4).contains(&leaf)), "prefix leaves must not be probed: {probed:?}");
+            assert_eq!(b.scores().last(), Some(&LeafScore { value: new_blue, score: 0 }));
+            drop(probed);
+            let updated = b.publish().unwrap();
+            check_published(&store, k, anchor, &oracle, &old_events);
+            check_published(&store, k, updated, &oracle, &events);
+        }
+    }
+
+    /// A blue adds its work to every existing leaf, yet the appended leaf
+    /// starts at zero: old leaves gain the work, the new leaf nothing, and the
+    /// root grows one level exactly when the old tree was full.
+    #[test]
+    fn blue_root_addition_does_not_leak_into_the_appended_leaf() {
+        for n in [1u64, 3, 4, 5, 8] {
+            let oracle = DagOracle::default();
+            let mut store = Store::new();
+            let mut events = Vec::new();
+            let mut b = store.begin(0, None);
+            for block in 0..n + 6 {
+                oracle.add(&chain_parents(block));
+                process_weighted(&mut b, &oracle, &mut events, event(block, block < n, 1 + block as i64), 0, &oracle.probe());
+            }
+            let anchor = b.publish().unwrap();
+            let old_events = events.clone();
+            let old_scores = store.scores(0, anchor).unwrap();
+            let old_height = store.metadata(0, anchor).unwrap().expect("anchor metadata").root_height;
+
+            let mut b = store.begin(0, Some(anchor));
+            let new_blue = n + 6;
+            oracle.add(&[new_blue - 1]);
+            let work = 4;
+            process_weighted(&mut b, &oracle, &mut events, event(new_blue, true, work), 0, &oracle.probe());
+            let mut expected: Vec<_> =
+                old_scores.iter().map(|leaf| LeafScore { value: leaf.value, score: leaf.score + work }).collect();
+            expected.push(LeafScore { value: new_blue, score: 0 });
+            assert_eq!(b.scores(), expected, "n={n}");
+            let updated = b.publish().unwrap();
+
+            let grew = n & (n - 1) == 0;
+            assert_eq!(
+                store.metadata(0, updated).unwrap().expect("updated metadata").root_height,
+                old_height + u16::from(grew),
+                "n={n}"
+            );
+            check_published(&store, 0, anchor, &oracle, &old_events);
+            check_published(&store, 0, updated, &oracle, &events);
+        }
+    }
+
+    /// A red with no blue ancestor over a non-empty tree is a no-op: nothing is
+    /// buffered, and the published state keeps the anchor's root and lineage.
+    #[test]
+    fn red_without_blue_ancestors_keeps_inherited_root() {
+        let oracle = DagOracle::default();
+        oracle.add(&[]);
+        oracle.add(&[0]);
+        oracle.add(&[0]);
+        let events = vec![event(0, false, 5), event(1, true, 3)];
+        let mut store = Store::new();
+        let anchor = {
+            let mut b = store.begin(0, None);
+            b.apply_delta(events.iter().copied(), 0, &oracle.probe());
+            b.publish().unwrap()
+        };
+
+        let mut b = store.begin(0, Some(anchor));
+        let mut events = events.clone();
+        process_weighted(&mut b, &oracle, &mut events, event(2, false, 7), 0, &oracle.probe());
+        assert!(b.buffer.is_empty(), "a no-op red must not touch any record");
+        let version = b.publish().unwrap();
+        assert_eq!(
+            store.metadata(0, version).unwrap().expect("version metadata").root_version,
+            store.metadata(0, anchor).unwrap().expect("anchor metadata").root_version
+        );
+        assert_eq!(store.metadata(0, version).unwrap().expect("version metadata").anchor_version, Some(anchor));
+        check_published(&store, 0, anchor, &oracle, &events);
+        check_published(&store, 0, version, &oracle, &events);
+    }
+
+    /// Two builders extending the same anchor with divergent deltas put their
+    /// own leaf values at the same coordinates and keep independent scores; the
+    /// anchor's published state answers unchanged.
+    #[test]
+    fn forks_get_different_leaves_at_same_coordinates() {
+        let oracle = DagOracle::default();
+        for (_, parents) in [(0u64, vec![]), (1, vec![0]), (2, vec![1]), (3, vec![0]), (4, vec![2]), (5, vec![3])] {
+            oracle.add(&parents);
+        }
+        let mut store = Store::new();
+        let base = vec![event(0, true, 2), event(1, true, 3)];
+        let anchor = {
+            let mut b = store.begin(1, None);
+            b.apply_delta(base.iter().copied(), 0, &oracle.probe());
+            b.publish().unwrap()
+        };
+        let mut left_events = base.clone();
+        let left_version = {
+            let mut b = store.begin(1, Some(anchor));
+            process_weighted(&mut b, &oracle, &mut left_events, event(2, true, 5), 0, &oracle.probe());
+            process_weighted(&mut b, &oracle, &mut left_events, event(4, false, 4), 0, &oracle.probe());
+            b.publish().unwrap()
+        };
+        let mut right_events = base.clone();
+        let right_version = {
+            let mut b = store.begin(1, Some(anchor));
+            process_weighted(&mut b, &oracle, &mut right_events, event(3, true, 6), 0, &oracle.probe());
+            process_weighted(&mut b, &oracle, &mut right_events, event(5, false, 8), 0, &oracle.probe());
+            b.publish().unwrap()
+        };
+        assert_ne!(left_version, right_version);
+        assert_eq!(store.scores(1, left_version).unwrap()[2].value, 2);
+        assert_eq!(store.scores(1, right_version).unwrap()[2].value, 3);
+        check_published(&store, 1, anchor, &oracle, &base);
+        check_published(&store, 1, left_version, &oracle, &left_events);
+        check_published(&store, 1, right_version, &oracle, &right_events);
+    }
+
+    /// A negative root minimum is not terminal: a blue descendant restores its
+    /// ancestors' scores. After a red drags the minimum to minus its own work,
+    /// a blue child adds its work back to every ancestor leaf, and its own zero
+    /// leaf lifts the minimum to zero.
+    #[test]
+    fn negative_root_recovers_on_blue_descendant() {
+        let oracle = DagOracle::default();
+        let mut store = Store::new();
+        let mut events = Vec::new();
+        let mut b = store.begin(1, None);
+        oracle.add(&[]);
+        assert!(process_weighted(&mut b, &oracle, &mut events, event(0, true, 1), 0, &oracle.probe()));
+        assert_eq!(b.minimum_score(), Some(0));
+
+        oracle.add(&[0]);
+        assert!(!process_weighted(&mut b, &oracle, &mut events, event(1, false, 3), 0, &oracle.probe()));
+        assert_eq!(b.minimum_score(), Some(-3), "the red drags the root minimum to minus its work");
+
+        oracle.add(&[1]);
+        assert!(process_weighted(&mut b, &oracle, &mut events, event(2, true, 5), 0, &oracle.probe()));
+        assert_eq!(b.scores(), leaf_scores(&[(0, 2), (2, 0)]));
+        assert_eq!(b.minimum_score(), Some(0), "the blue descendant restores the minimum");
+    }
+
+    /// `qualifies` is a pure query parameter: the same state answers
+    /// differently per deficit without changing a single score, and a tree with
+    /// no leaves qualifies vacuously at every deficit.
+    #[test]
+    fn qualifies_is_a_pure_query_parameter() {
+        let oracle = DagOracle::default();
+        let mut store = Store::new();
+        let mut events = Vec::new();
+        let mut b = store.begin(1, None);
+        oracle.add(&[]);
+        oracle.add(&[0]);
+        process_weighted(&mut b, &oracle, &mut events, event(0, true, 2), 0, &oracle.probe());
+        process_weighted(&mut b, &oracle, &mut events, event(1, false, 5), 0, &oracle.probe());
+        // The blue leaf scores -5: its own work never reaches it, the red's does.
+        let scores = b.scores();
+        let buffer = b.buffer.clone();
+        assert_eq!(b.minimum_score(), Some(-5));
+        assert!(!b.qualifies(0));
+        assert!(!b.qualifies(4), "-5 is below the allowance -4");
+        assert!(b.qualifies(5), "-5 exactly meets the allowance -5");
+        assert!(b.qualifies(100));
+        assert_eq!(b.scores(), scores, "qualification queries must not mutate the tree");
+        assert_eq!(b.buffer, buffer, "qualification queries must not buffer records");
+        drop(b);
+
+        let b = store.begin(1, None);
+        for deficit in [0, 5, 1000] {
+            assert!(b.qualifies(deficit), "an empty tree qualifies at deficit {deficit}");
+        }
+    }
+
+    /// Feeding a run of arrivals through `apply_delta` lands on the same state
+    /// as feeding them one by one through `process_block`: a mid-run failed
+    /// qualification does not stop maintenance, and a later blue descendant
+    /// restores it.
+    #[test]
+    fn apply_delta_matches_stepwise_process_block() {
+        let oracle = DagOracle::default();
+        for (_, parents) in [(0u64, vec![]), (1, vec![0]), (2, vec![0]), (3, vec![1, 2]), (4, vec![2]), (5, vec![3, 4])] {
+            oracle.add(&parents);
+        }
+        let run =
+            vec![event(0, true, 1), event(1, true, 2), event(2, true, 2), event(3, true, 2), event(4, false, 9), event(5, true, 8)];
+        let mut store = Store::new();
+        let (stepwise_scores, stepwise_minimum, stepwise_version) = {
+            let mut b = store.begin(1, None);
+            let mut events = Vec::new();
+            let mut results = Vec::new();
+            for &e in &run {
+                results.push(process_weighted(&mut b, &oracle, &mut events, e, 0, &oracle.probe()));
+            }
+            assert_eq!(results, vec![true, true, true, true, false, true], "a failed qualification must not stop maintenance");
+            let scores = b.scores();
+            let minimum = b.minimum_score();
+            (scores, minimum, b.publish().unwrap())
+        };
+        let batch_version = {
+            let mut b = store.begin(1, None);
+            assert!(b.apply_delta(run.iter().copied(), 0, &oracle.probe()));
+            assert_eq!(b.scores(), stepwise_scores);
+            assert_eq!(b.minimum_score(), stepwise_minimum);
+            for deficit in [0, 1, 7] {
+                assert_eq!(b.qualifies(deficit), stepwise_minimum.is_none_or(|m| m >= -deficit), "deficit {deficit}");
+            }
+            b.publish().unwrap()
+        };
+        check_published(&store, 1, stepwise_version, &oracle, &run);
+        check_published(&store, 1, batch_version, &oracle, &run);
+    }
+
+    /// Signed 192-bit work arithmetic end to end: the path exercises negation
+    /// through range additions and the negated zero allowance in the deficit
+    /// comparison.
+    #[test]
+    fn signed_work_scores_negate_end_to_end() {
+        let work = |n: u64| SignedWork::from(Uint192::from_u64(n));
+        let mut store = MemoryUmcTreeStore::<u64, SignedWork>::new();
+        let mut b = store.begin(1, None);
+        assert!(b.process_block(Arrival { block: 0, blue: true, work: work(7) }, work(0), &chain_ancestry));
+        assert!(b.process_block(Arrival { block: 1, blue: true, work: work(3) }, work(0), &chain_ancestry));
+        // A red over both blues subtracts its full work from each of them.
+        assert!(!b.process_block(Arrival { block: 2, blue: false, work: work(5) }, work(3), &chain_ancestry));
+        assert_eq!(
+            b.scores(),
+            vec![LeafScore { value: 0, score: work(0) - work(2) }, LeafScore { value: 1, score: work(0) - work(5) }]
+        );
+        assert_eq!(b.minimum_score(), Some(work(0) - work(5)));
+        assert!(!b.qualifies(work(3)));
+        assert!(b.qualifies(work(5)));
     }
 }

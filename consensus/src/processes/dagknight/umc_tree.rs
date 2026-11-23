@@ -31,7 +31,7 @@ mod records;
 mod stores;
 
 pub use api::{PublishedVersion, UmcTreeStore, UmcTreeStoreReader};
-pub use builder::TreeBuilder;
+pub use builder::{AncestryProbe, Arrival, TreeBuilder};
 pub use db::DbUmcTreeStore;
 pub use keys::{NodeKey, RevVersion, VersionKey};
 pub use mem::MemoryUmcTreeStore;

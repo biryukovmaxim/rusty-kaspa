@@ -8,6 +8,8 @@
 //! structs below ([`LeafWire`], [`InternalWire`], [`VersionMetadataWire`]) via the
 //! [`ScoreWire`]/[`ValueWire`] codecs. Nothing in this module is serde.
 
+use std::ops::Neg;
+
 use num_traits::Zero;
 use zerocopy::byteorder::big_endian::{I64, U16, U64};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout, TryFromBytes, Unaligned};
@@ -18,10 +20,10 @@ use kaspa_math::Uint192;
 
 use crate::processes::dagknight::umc_voting::SignedWork;
 
-/// Score arithmetic of the tree: ordered, signed quantities supporting `+` and `-` around a zero.
-pub trait Score: Copy + Ord + Zero {}
+/// Score arithmetic of the tree: ordered, signed quantities supporting `+` and negation around a zero.
+pub trait Score: Copy + Ord + Zero + Neg<Output = Self> {}
 
-impl<T> Score for T where T: Copy + Ord + Zero {}
+impl<T> Score for T where T: Copy + Ord + Zero + Neg<Output = Self> {}
 
 /// Tree coordinate: level `h` and position `j`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]

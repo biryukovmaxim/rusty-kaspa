@@ -1,5 +1,5 @@
 use core::fmt::{self, Display};
-use core::ops::{Add, AddAssign, Div, Mul, Sub};
+use core::ops::{Add, AddAssign, Div, Mul, Neg, Sub};
 use num_traits::Zero;
 
 #[derive(Copy, Clone, Debug)]
@@ -114,6 +114,14 @@ impl<T: Div<Output = T>> Div for SignedInteger<T> {
     #[track_caller]
     fn div(self, rhs: Self) -> Self::Output {
         Self { negative: self.negative ^ rhs.negative, abs: self.abs / rhs.abs }
+    }
+}
+
+impl<T> Neg for SignedInteger<T> {
+    type Output = Self;
+    #[inline]
+    fn neg(self) -> Self::Output {
+        Self { negative: !self.negative, abs: self.abs }
     }
 }
 

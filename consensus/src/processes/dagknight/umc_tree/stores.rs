@@ -276,8 +276,8 @@ mod tests {
         assert_eq!(stores.metadata(0, v2).unwrap().map(|m| m.blue_count), Some(3));
     }
 
-    /// Unknown versions read as errors, never as empty state: `minimum_score`
-    /// and `scores` answer `DataInconsistency` for an unpublished version.
+    /// Unknown versions read as errors, never as empty state: `minimum_score`,
+    /// `scores` and `qualifies` answer `DataInconsistency` for an unpublished version.
     #[test]
     fn unknown_version_reads_error() {
         let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
@@ -286,6 +286,8 @@ mod tests {
         let error = stores.minimum_score(0, v0 + 1).unwrap_err();
         assert!(matches!(error, StoreError::DataInconsistency(ref message) if message.contains("unknown umc version")));
         let error = stores.scores(0, v0 + 1).unwrap_err();
+        assert!(matches!(error, StoreError::DataInconsistency(ref message) if message.contains("unknown umc version")));
+        let error = stores.qualifies(0, v0 + 1, 0).unwrap_err();
         assert!(matches!(error, StoreError::DataInconsistency(ref message) if message.contains("unknown umc version")));
         // A published version still reads normally next to the error path.
         assert_eq!(stores.scores(0, v0).unwrap(), leaf_scores(&[(1, 0)]));
