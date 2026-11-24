@@ -6,7 +6,8 @@
 //! friends, and decode failures carry the key coordinates. Point reads decode a
 //! missing key to `None`; newest-first queries use raw iterators with the same
 //! seek keys as the memory level. Publication commits node puts, the metadata
-//! put and the counter advance as one atomic `WriteBatch`.
+//! put, the anchor entry and the counter advance as one atomic `WriteBatch`,
+//! then takes the anchor into the map's cache.
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use rocksdb::WriteBatch;
 use zerocopy::{FromBytes, IntoBytes};
 
 use kaspa_consensus_core::KType;
-use kaspa_database::prelude::{BatchDbWriter, DB, DbWriter, StoreError, StoreResult};
+use kaspa_database::prelude::{BatchDbWriter, DB, DbWriter, StoreError, StoreResult, VersionMap};
 use kaspa_database::registry::DatabaseStorePrefixes;
 
 use super::api::{PublishedVersion, UmcTreeStore, UmcTreeStoreReader};
@@ -24,13 +25,14 @@ use super::records::{
     NodeCoord, NodeRecord, NodeRef, Score, ScoreWire, ValueWire, VersionMetadata, VersionedNode, decode_metadata, decode_node,
     encode_metadata, encode_node,
 };
+use crate::model::stores::conflict_zone_coloring::ConflictZoneColoringKey;
 
 /// RocksDB-backed store of published UMC tree records, partitioned by k via key
 /// prefixes.
 ///
 /// Generic callers need `T`/`S` to round-trip through the wire encoding; the
-/// store keeps only prefixes and a lazily-loaded image of the version counter
-/// besides the database handle.
+/// store keeps only prefixes, the anchor map with its cache, and a
+/// lazily-loaded image of the version counter besides the database handle.
 pub struct DbUmcTreeStore<T, S> {
     /// Database handle shared with the owning consensus stores.
     db: Arc<DB>,
@@ -40,6 +42,8 @@ pub struct DbUmcTreeStore<T, S> {
     pub(crate) version_prefix: u8,
     /// Key prefix byte of the singleton counter namespace.
     pub(crate) meta_prefix: u8,
+    /// Anchor map this store writes and reads; its cache is sized by `new`.
+    pub(crate) anchors: VersionMap<ConflictZoneColoringKey>,
     /// In-memory image of the durable counter; `None` until the first read of the meta key.
     next_version_id: Option<u64>,
     /// Placeholder tying the generic parameters to the store type. Uses a
@@ -49,9 +53,11 @@ pub struct DbUmcTreeStore<T, S> {
 }
 
 impl<T, S> DbUmcTreeStore<T, S> {
-    /// Store over `db` using the `DagKnightUmc*` registry prefixes.
-    pub fn new(db: Arc<DB>) -> Self {
+    /// Store over `db` with the UMC tree's node, version and counter prefixes,
+    /// and an anchor map caching at most `anchor_capacity` entries.
+    pub fn new(db: Arc<DB>, anchor_capacity: usize) -> Self {
         Self {
+            anchors: VersionMap::new(db.clone(), DatabaseStorePrefixes::DagKnightConflictZoneVersions.into(), anchor_capacity),
             db,
             node_prefix: DatabaseStorePrefixes::DagKnightUmcNodes.into(),
             version_prefix: DatabaseStorePrefixes::DagKnightUmcVersions.into(),
@@ -73,8 +79,10 @@ impl<T: Clone + ValueWire, S: Score + ScoreWire> DbUmcTreeStore<T, S> {
         Ok(u64::from_be_bytes(value))
     }
 
-    /// Commit one publication atomically: node puts, the version-metadata put and
-    /// the counter advance (`counter`) in a single `WriteBatch`.
+    /// Commit one publication atomically: node puts, the version-metadata put,
+    /// the anchor entry and the counter advance (`counter`) in a single
+    /// `WriteBatch`; after that batch is written the anchor enters the map's
+    /// cache. A rejected anchor leaves nothing written.
     pub(crate) fn commit_publish(&self, k: KType, publish: &PublishedVersion<T, S>, counter: u64) -> StoreResult<()> {
         let mut batch = WriteBatch::default();
         {
@@ -85,13 +93,25 @@ impl<T: Clone + ValueWire, S: Score + ScoreWire> DbUmcTreeStore<T, S> {
             }
             let vkey = VersionKey::new(self.version_prefix, k, publish.version);
             writer.put(vkey, encode_metadata(&publish.metadata).as_bytes()).map_err(StoreError::DbError)?;
+            if let Some(anchor) = &publish.anchor {
+                self.validate_anchor(k, anchor)?;
+                self.anchors.put(&mut writer, anchor, publish.version)?;
+            }
             writer.put([self.meta_prefix], counter.to_be_bytes()).map_err(StoreError::DbError)?;
         }
-        self.db.write(batch).map_err(StoreError::DbError)
+        self.db.write(batch).map_err(StoreError::DbError)?;
+        if let Some(anchor) = &publish.anchor {
+            self.anchors.write_through(anchor, publish.version);
+        }
+        Ok(())
     }
 }
 
 impl<T: Clone + ValueWire, S: Score + ScoreWire> UmcTreeStoreReader<T, S> for DbUmcTreeStore<T, S> {
+    fn resolve_anchor(&self, anchor: &ConflictZoneColoringKey) -> StoreResult<Option<u64>> {
+        self.anchors.get(anchor)
+    }
+
     fn get_node(&self, k: KType, node: NodeRef) -> StoreResult<Option<NodeRecord<T, S>>> {
         let key = NodeKey::new(self.node_prefix, k, node.h, node.j, node.version);
         let Some(bytes) = self.db.get(key).map_err(StoreError::DbError)? else { return Ok(None) };
@@ -175,18 +195,20 @@ impl<T: Clone + ValueWire, S: Score + ScoreWire> UmcTreeStore<T, S> for DbUmcTre
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use super::*;
     use kaspa_database::create_temp_db;
-    use kaspa_database::prelude::ConnBuilder;
+    use kaspa_database::prelude::{ConnBuilder, DbKey};
 
     use super::super::records::LeafScore;
+    use super::super::test_support::{AnchorInput, anchor_key};
 
     type Store = DbUmcTreeStore<u64, i64>;
 
     fn make_store() -> (kaspa_database::utils::DbLifetime, Store) {
         let (lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        (lifetime, Store::new(db))
+        (lifetime, Store::new(db, 0))
     }
 
     /// One published leaf plus an internal root carrying a pending addition.
@@ -207,6 +229,7 @@ mod tests {
             version,
             metadata: VersionMetadata { anchor_version: None, root_version: Some(version), root_height: 1, blue_count: 1 },
             records,
+            anchor: None,
         }
     }
 
@@ -269,7 +292,7 @@ mod tests {
     #[test]
     fn publish_batch_advances_counter() {
         let (lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        let mut store = Store::new(db.clone());
+        let mut store = Store::new(db.clone(), 0);
         assert_eq!(store.allocate_version().unwrap(), 0);
         assert_eq!(store.allocate_version().unwrap(), 1);
         store.publish(0, sample_version(5, 1)).unwrap();
@@ -281,7 +304,7 @@ mod tests {
         assert_eq!(store.allocate_version().unwrap(), 6);
         drop(store);
         // A fresh instance reads the durable counter.
-        assert_eq!(Store::new(db).allocate_version().unwrap(), 6);
+        assert_eq!(Store::new(db, 0).allocate_version().unwrap(), 6);
         drop(lt);
     }
 
@@ -302,5 +325,78 @@ mod tests {
             message.contains("k 0") && message.contains("h 0") && message.contains("j 0") && message.contains("version 0"),
             "{message}"
         );
+    }
+
+    /// Publication writes the anchor entry inside the publish batch under the
+    /// map's prefix; a fresh store over the same database resolves it, and a
+    /// second registration of the key is rejected without writing.
+    #[test]
+    fn publish_batch_registers_anchor() {
+        let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
+        let key = anchor_key(AnchorInput { root: 1, pov: 2, k: 0 });
+        // Version 1: its two byte orders differ, so the stored one is observable.
+        let mut version = sample_version(1, 42);
+        version.anchor = Some(key.clone());
+        Store::new(db.clone(), 0).publish(0, version).unwrap();
+
+        let prefix: u8 = DatabaseStorePrefixes::DagKnightConflictZoneVersions.into();
+        let mut raw_key = vec![prefix];
+        raw_key.extend_from_slice(key.as_ref());
+        assert_eq!(db.get(raw_key).unwrap().unwrap(), 1u64.to_be_bytes());
+
+        let mut again = sample_version(2, 43);
+        again.anchor = Some(key.clone());
+        let error = Store::new(db.clone(), 0).publish(0, again).unwrap_err();
+        assert!(matches!(error, StoreError::KeyAlreadyExists(_)));
+        let meta_prefix: u8 = DatabaseStorePrefixes::DagKnightUmcMeta.into();
+        assert_eq!(
+            db.get([meta_prefix]).unwrap(),
+            Some(2u64.to_be_bytes().to_vec()),
+            "a rejected publish leaves the counter where it was"
+        );
+        assert_eq!(Store::new(db.clone(), 0).metadata(0, 2).unwrap(), None, "a rejected publish writes nothing");
+        assert_eq!(Store::new(db.clone(), 0).resolve_anchor(&key).unwrap(), Some(1));
+        assert_eq!(
+            Store::new(db, 0).scores(0, 1).unwrap(),
+            leaf_scores(&[(42, 2)]),
+            "the key resolves to the state published with it"
+        );
+    }
+
+    /// An anchor of another k panics inside the batch block, before the batch
+    /// is written: it leaves no metadata, no registration, no counter and no
+    /// cached entry behind.
+    #[test]
+    fn anchor_of_other_k_is_rejected() {
+        let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
+        let key = anchor_key(AnchorInput { root: 1, pov: 1, k: 1 });
+        let mut version = sample_version(1, 42);
+        version.anchor = Some(key.clone());
+        let mut store = Store::new(db.clone(), 2);
+        let published = catch_unwind(AssertUnwindSafe(|| store.publish(0, version)));
+        let payload = published.expect_err("an anchor of another k panics");
+        assert!(payload.downcast_ref::<String>().is_some_and(|message| message.contains("names k 1")), "{payload:?}");
+
+        let meta_prefix: u8 = DatabaseStorePrefixes::DagKnightUmcMeta.into();
+        assert_eq!(db.get([meta_prefix]).unwrap(), None, "the counter did not move");
+        assert_eq!(store.metadata(0, 1).unwrap(), None, "the state was not published");
+        assert_eq!(store.resolve_anchor(&key).unwrap(), None, "the key was not registered");
+        assert!(!store.anchors.is_cached(&key), "the cache holds no registration");
+    }
+
+    /// An anchor entry whose value is not eight bytes is a data inconsistency,
+    /// never a missing key.
+    #[test]
+    fn malformed_anchor_value_reads_error() {
+        let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
+        let key = anchor_key(AnchorInput { root: 1, pov: 2, k: 0 });
+        let mut version = sample_version(0, 42);
+        version.anchor = Some(key.clone());
+        Store::new(db.clone(), 0).publish(0, version).unwrap();
+
+        let prefix: u8 = DatabaseStorePrefixes::DagKnightConflictZoneVersions.into();
+        db.put(DbKey::new(&[prefix], key.as_ref()), [0u8; 7].as_slice()).unwrap();
+        let error = Store::new(db, 0).resolve_anchor(&key).unwrap_err();
+        assert!(matches!(error, StoreError::DataInconsistency(ref message) if message.contains("8 big-endian bytes")));
     }
 }

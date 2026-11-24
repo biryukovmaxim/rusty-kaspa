@@ -4,7 +4,7 @@
 //! The cache is keyed by the exact storage keys ([`NodeKey`]/[`VersionKey`]), so
 //! memory ordering equals DB ordering and the same seek constants serve both levels.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use kaspa_consensus_core::KType;
 use kaspa_database::prelude::StoreResult;
@@ -14,6 +14,7 @@ use super::api::{PublishedVersion, UmcTreeStore, UmcTreeStoreReader};
 use super::builder::TreeBuilder;
 use super::keys::{NodeKey, VersionKey};
 use super::records::{NodeCoord, NodeRecord, NodeRef, Score, VersionMetadata, VersionedNode};
+use crate::model::stores::conflict_zone_coloring::ConflictZoneColoringKey;
 
 /// Extracts the ordering version from a cache key.
 pub(crate) trait HasVersion {
@@ -118,7 +119,8 @@ impl<K: Ord + Copy + HasVersion + AsRef<[u8]>, V> BoundedCache<K, V> {
 }
 
 /// Exact unbounded in-memory store: the node and version maps are [`BoundedCache`]
-/// instances with unlimited capacity, keyed exactly as the DB level keys them.
+/// instances with unlimited capacity, keyed exactly as the DB level keys them; the
+/// anchor map is keyed by the anchor key itself.
 ///
 /// Reads never fail and nothing is ever evicted; the store suits tests and
 /// ephemeral use. `begin` panics on an unknown anchor version (the builder
@@ -131,11 +133,18 @@ pub struct MemoryUmcTreeStore<T, S> {
     nodes: BoundedCache<NodeKey, NodeRecord<T, S>>,
     /// Published version metadata keyed exactly as the DB level keys it.
     versions: BoundedCache<VersionKey, VersionMetadata>,
+    /// Anchor entries: anchor key to registering version.
+    anchors: HashMap<ConflictZoneColoringKey, u64>,
 }
 
 impl<T, S> Default for MemoryUmcTreeStore<T, S> {
     fn default() -> Self {
-        Self { next_version_id: 0, nodes: BoundedCache::new(usize::MAX), versions: BoundedCache::new(usize::MAX) }
+        Self {
+            next_version_id: 0,
+            nodes: BoundedCache::new(usize::MAX),
+            versions: BoundedCache::new(usize::MAX),
+            anchors: HashMap::new(),
+        }
     }
 }
 
@@ -153,6 +162,10 @@ impl<T: Clone, S: Score> MemoryUmcTreeStore<T, S> {
 }
 
 impl<T: Clone, S: Score> UmcTreeStoreReader<T, S> for MemoryUmcTreeStore<T, S> {
+    fn resolve_anchor(&self, anchor: &ConflictZoneColoringKey) -> StoreResult<Option<u64>> {
+        Ok(self.anchors.get(anchor).copied())
+    }
+
     fn get_node(&self, k: KType, node: NodeRef) -> StoreResult<Option<NodeRecord<T, S>>> {
         let key = NodeKey::new(DatabaseStorePrefixes::DagKnightUmcNodes.into(), k, node.h, node.j, node.version);
         Ok(self.nodes.get(&key).cloned())
@@ -186,19 +199,30 @@ impl<T: Clone, S: Score> UmcTreeStore<T, S> for MemoryUmcTreeStore<T, S> {
     }
 
     fn publish(&mut self, k: KType, publish: PublishedVersion<T, S>) -> StoreResult<()> {
+        if let Some(anchor) = &publish.anchor {
+            self.validate_anchor(k, anchor)?;
+        }
         let node_prefix: u8 = DatabaseStorePrefixes::DagKnightUmcNodes.into();
         for (coord, record) in publish.records.iter() {
             self.nodes.insert(NodeKey::new(node_prefix, k, coord.h, coord.j, publish.version), record.clone());
         }
         self.versions
             .insert(VersionKey::new(DatabaseStorePrefixes::DagKnightUmcVersions.into(), k, publish.version), publish.metadata);
+        if let Some(anchor) = publish.anchor {
+            self.anchors.insert(anchor, publish.version);
+        }
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
     use super::*;
+    use kaspa_database::prelude::StoreError;
+
+    use super::super::test_support::{AnchorInput, anchor_key, register};
 
     /// Versions of one coordinate, newest first, by repeated newest-first probes.
     fn coordinate_versions(cache: &BoundedCache<NodeKey, u64>, prefix: u8, k: u16, h: u16, j: u64) -> Vec<u64> {
@@ -318,5 +342,34 @@ mod tests {
             assert_eq!(*value, version);
             assert_eq!(cache.len(), 1);
         }
+    }
+
+    /// The memory store registers a published state under its anchor key and
+    /// keeps the first registration when the key is registered again.
+    #[test]
+    fn publish_registers_anchor() {
+        let mut store = MemoryUmcTreeStore::<u64, i64>::new();
+        let key = anchor_key(AnchorInput { root: 1, pov: 2, k: 0 });
+        assert_eq!(store.resolve_anchor(&key).unwrap(), None);
+
+        let registered = register(&mut store, 0, key.clone()).unwrap();
+        assert_eq!(store.resolve_anchor(&key).unwrap(), Some(registered));
+        assert_eq!(store.minimum_score(0, registered).unwrap(), Some(0), "the key resolves to the state published with it");
+        let error = register(&mut store, 0, key.clone()).unwrap_err();
+        assert!(matches!(error, StoreError::KeyAlreadyExists(_)));
+        assert_eq!(store.resolve_anchor(&key).unwrap(), Some(registered), "the first registration stands");
+    }
+
+    /// An anchor names the partition its state publishes into. A mismatch
+    /// panics before anything is written, so it cannot poison the key.
+    #[test]
+    fn anchor_of_other_k_is_rejected() {
+        let mut store = MemoryUmcTreeStore::<u64, i64>::new();
+        let key = anchor_key(AnchorInput { root: 1, pov: 1, k: 1 });
+        let published = catch_unwind(AssertUnwindSafe(|| register(&mut store, 0, key.clone())));
+        let payload = published.expect_err("an anchor of another k panics");
+        assert!(payload.downcast_ref::<String>().is_some_and(|message| message.contains("names k 1")), "{payload:?}");
+        assert_eq!(store.resolve_anchor(&key).unwrap(), None, "the key was not registered");
+        assert_eq!(store.latest_version(0).unwrap(), None, "the state was not published");
     }
 }

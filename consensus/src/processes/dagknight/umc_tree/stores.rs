@@ -49,6 +49,10 @@
 //! never enters the store (evicting or persisting it piecemeal would expose a
 //! partial state and break publish atomicity), and the version counter is a
 //! single durable u64 under the meta key, advanced inside the publish batch.
+//!
+//! Anchor entries live in a `VersionMap`; unlike the record caches, its eviction
+//! order is unspecified and a read refills it. An evicted entry costs one DB
+//! point get, on the read that brings it back into the cache.
 
 use std::sync::Arc;
 
@@ -61,8 +65,24 @@ use super::db::DbUmcTreeStore;
 use super::keys::{NodeKey, VersionKey};
 use super::mem::BoundedCache;
 use super::records::{NodeCoord, NodeRecord, NodeRef, Score, ScoreWire, ValueWire, VersionMetadata, VersionedNode};
+use crate::model::stores::conflict_zone_coloring::ConflictZoneColoringKey;
+
+/// Entry-count capacities of the facade's caches.
+#[derive(Clone, Copy, Debug)]
+pub struct Capacities {
+    /// Maximum cached node records.
+    pub nodes: usize,
+    /// Maximum cached version-metadata entries.
+    pub metadata: usize,
+    /// Maximum number of cached entries of the anchor map; `0` keeps no cache.
+    pub anchors: usize,
+}
 
 /// Bounded-memory UMC tree store with DB fallback: the production singleton across all k.
+///
+/// Capacities count entries (at the `T = Hash`, `S = SignedWork` instantiation one node entry
+/// costs roughly 250 to 350 bytes across both cache indexes).
+// TODO(dk): switch to byte budgets if profiling demands it
 pub struct UmcTreeStores<T, S> {
     /// DB level answering every cache miss.
     db: DbUmcTreeStore<T, S>,
@@ -75,18 +95,12 @@ pub struct UmcTreeStores<T, S> {
 }
 
 impl<T: Clone + ValueWire, S: Score + ScoreWire> UmcTreeStores<T, S> {
-    /// Facade over `db` caching at most `node_capacity` node records and
-    /// `metadata_capacity` metadata entries.
-    ///
-    /// Capacities count entries (at the `T = Hash`, `S = SignedWork`
-    /// instantiation one node entry costs roughly 250 to 350 bytes across both
-    /// cache indexes).
-    // TODO(dk): switch to byte budgets if profiling demands it
-    pub fn new(db: Arc<DB>, node_capacity: usize, metadata_capacity: usize) -> Self {
+    /// Facade over `db` whose caches hold at most the entries of `capacities`.
+    pub fn new(db: Arc<DB>, capacities: Capacities) -> Self {
         Self {
-            db: DbUmcTreeStore::new(db),
-            nodes: BoundedCache::new(node_capacity),
-            versions: BoundedCache::new(metadata_capacity),
+            db: DbUmcTreeStore::new(db, capacities.anchors),
+            nodes: BoundedCache::new(capacities.nodes),
+            versions: BoundedCache::new(capacities.metadata),
             next_version_id: None,
         }
     }
@@ -100,6 +114,10 @@ impl<T: Clone + ValueWire, S: Score + ScoreWire> UmcTreeStores<T, S> {
 }
 
 impl<T: Clone + ValueWire, S: Score + ScoreWire> UmcTreeStoreReader<T, S> for UmcTreeStores<T, S> {
+    fn resolve_anchor(&self, anchor: &ConflictZoneColoringKey) -> StoreResult<Option<u64>> {
+        self.db.resolve_anchor(anchor)
+    }
+
     fn get_node(&self, k: KType, node: NodeRef) -> StoreResult<Option<NodeRecord<T, S>>> {
         let key = NodeKey::new(self.db.node_prefix, k, node.h, node.j, node.version);
         if let Some(record) = self.nodes.get(&key) {
@@ -167,6 +185,7 @@ mod tests {
 
     use super::super::mem::MemoryUmcTreeStore;
     use super::super::records::LeafScore;
+    use super::super::test_support::{AnchorInput, anchor_key, register};
 
     type Facade = UmcTreeStores<u64, i64>;
 
@@ -189,7 +208,7 @@ mod tests {
     #[test]
     fn publish_write_through_evict_then_fallback() {
         let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        let mut stores = Facade::new(db, 2, 1);
+        let mut stores = Facade::new(db, Capacities { nodes: 2, metadata: 1, anchors: 0 });
         let mut anchor = None;
         let mut versions = Vec::new();
         for value in 0..4u64 {
@@ -209,7 +228,7 @@ mod tests {
     #[test]
     fn latest_node_cache_hit_authoritative() {
         let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        let mut facade = Facade::new(db, 100, 100);
+        let mut facade = Facade::new(db, Capacities { nodes: 100, metadata: 100, anchors: 0 });
         let mut memory = MemoryUmcTreeStore::<u64, i64>::new();
         let mut anchor_f = None;
         let mut anchor_m = None;
@@ -233,7 +252,7 @@ mod tests {
     #[test]
     fn two_ks_one_facade() {
         let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        let mut stores = Facade::new(db, 100, 100);
+        let mut stores = Facade::new(db, Capacities { nodes: 100, metadata: 100, anchors: 0 });
         let v0 = {
             let mut b = stores.begin(0, None);
             b.append_leaf(10);
@@ -257,7 +276,7 @@ mod tests {
     #[should_panic(expected = "unknown anchor version")]
     fn anchor_from_other_k_rejected() {
         let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        let mut stores = Facade::new(db, 100, 100);
+        let mut stores = Facade::new(db, Capacities { nodes: 100, metadata: 100, anchors: 0 });
         let v0 = publish_leaves(&mut stores, 0, None, 0, 0);
         let _ = publish_leaves(&mut stores, 1, Some(v0), 5, 5);
     }
@@ -267,7 +286,7 @@ mod tests {
     #[test]
     fn metadata_eviction_fallback() {
         let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        let mut stores = Facade::new(db, 100, 1);
+        let mut stores = Facade::new(db, Capacities { nodes: 100, metadata: 1, anchors: 0 });
         let v0 = publish_leaves(&mut stores, 0, None, 0, 0);
         let v1 = publish_leaves(&mut stores, 0, Some(v0), 1, 1);
         let v2 = publish_leaves(&mut stores, 0, Some(v1), 2, 2);
@@ -281,7 +300,7 @@ mod tests {
     #[test]
     fn unknown_version_reads_error() {
         let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        let mut stores = Facade::new(db, 10, 10);
+        let mut stores = Facade::new(db, Capacities { nodes: 10, metadata: 10, anchors: 0 });
         let v0 = publish_leaves(&mut stores, 0, None, 1, 1);
         let error = stores.minimum_score(0, v0 + 1).unwrap_err();
         assert!(matches!(error, StoreError::DataInconsistency(ref message) if message.contains("unknown umc version")));
@@ -298,7 +317,7 @@ mod tests {
     #[test]
     fn eviction_never_touches_open_buffer() {
         let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        let mut stores = Facade::new(db, 3, 3);
+        let mut stores = Facade::new(db, Capacities { nodes: 3, metadata: 3, anchors: 0 });
         // Churn the caches with earlier publishes.
         let mut anchor = None;
         for value in 0..4u64 {
@@ -324,7 +343,7 @@ mod tests {
     #[test]
     fn root_record_eviction_db_fallback() {
         let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        let mut stores = Facade::new(db, 3, 2);
+        let mut stores = Facade::new(db, Capacities { nodes: 3, metadata: 2, anchors: 0 });
         // v0: six leaves under a height-3 root (eleven records, over capacity).
         let v0 = publish_leaves(&mut stores, 0, None, 0, 5);
         // v1: two more leaves plus a root-wide addition; its inserts evict every v0 record.
@@ -388,7 +407,7 @@ mod tests {
     #[test]
     fn same_coordinate_publishes_never_stale_at_capacity_one() {
         let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        let mut stores = Facade::new(db, 1, 1);
+        let mut stores = Facade::new(db, Capacities { nodes: 1, metadata: 1, anchors: 0 });
         let v0 = publish_leaves(&mut stores, 0, None, 0, 1);
         let mut anchor = Some(v0);
         for step in 1..=12u64 {
@@ -440,7 +459,7 @@ mod tests {
             b.publish().unwrap()
         }
         let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        let mut stores = Facade::new(db, 4, 2);
+        let mut stores = Facade::new(db, Capacities { nodes: 4, metadata: 2, anchors: 0 });
         let mut oracle = MemoryUmcTreeStore::<u64, i64>::new();
         let v0 = build_v0(&mut stores, 0);
         let o0 = build_v0(&mut oracle, 0);
@@ -468,7 +487,7 @@ mod tests {
     #[test]
     fn cross_k_eviction_keeps_cold_k_correct() {
         let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        let mut stores = Facade::new(db, 2, 1);
+        let mut stores = Facade::new(db, Capacities { nodes: 2, metadata: 1, anchors: 0 });
         // k1 publishes first and then goes cold.
         let w0 = {
             let mut b = stores.begin(1, None);
@@ -530,7 +549,7 @@ mod tests {
             }
         }
         let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        let mut stores = Facade::new(db, 5, 2);
+        let mut stores = Facade::new(db, Capacities { nodes: 5, metadata: 2, anchors: 4 });
         let mut oracle = MemoryUmcTreeStore::<u64, i64>::new();
         let mut rng = Rng(0x5EED_CAFE_F00D_1234);
         let mut anchor = None;
@@ -589,5 +608,78 @@ mod tests {
                 "metadata after version {version}"
             );
         }
+    }
+
+    /// A tiny anchor capacity makes the facade cache evict an entry. Every key
+    /// still resolves, the evicted one from the DB and back into the cache, a
+    /// builder opened on a registered state continues it, and registering a key
+    /// that is not cached is rejected by the stored entry, with nothing written.
+    #[test]
+    fn anchor_cache_write_through_then_db_fallback() {
+        let (_lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
+        let mut stores = Facade::new(db, Capacities { nodes: 100, metadata: 100, anchors: 2 });
+        let keys = [
+            anchor_key(AnchorInput { root: 1, pov: 1, k: 0 }),
+            anchor_key(AnchorInput { root: 1, pov: 2, k: 0 }),
+            anchor_key(AnchorInput { root: 1, pov: 3, k: 0 }),
+        ];
+        let mut versions = Vec::new();
+        for key in &keys {
+            versions.push(register(&mut stores, 0, key.clone()).unwrap());
+        }
+        assert_eq!(
+            keys.iter().filter(|key| stores.db.anchors.is_cached(key)).count(),
+            2,
+            "published anchors enter the cache, which never exceeds its capacity"
+        );
+        for (key, &version) in keys.iter().zip(&versions) {
+            assert_eq!(stores.resolve_anchor(key).unwrap(), Some(version));
+        }
+        let (evicted, &evicted_version) = keys.iter().zip(&versions).find(|(key, _)| !stores.db.anchors.is_cached(key)).unwrap();
+        assert_eq!(stores.resolve_anchor(evicted).unwrap(), Some(evicted_version), "served by the DB");
+        assert!(stores.db.anchors.is_cached(evicted), "a read refills the cache");
+
+        let resumed = stores.resolve_anchor(&keys[0]).unwrap().unwrap();
+        let continued = publish_leaves(&mut stores, 0, Some(resumed), 10, 10);
+        assert_eq!(stores.scores(0, continued).unwrap(), leaf_scores(&[(0, 0), (10, 0)]));
+
+        let (uncached, &uncached_version) = keys.iter().zip(&versions).find(|(key, _)| !stores.db.anchors.is_cached(key)).unwrap();
+        let latest = stores.latest_version(0).unwrap();
+        let error = register(&mut stores, 0, uncached.clone()).unwrap_err();
+        assert!(matches!(error, StoreError::KeyAlreadyExists(_)));
+        assert_eq!(stores.resolve_anchor(uncached).unwrap(), Some(uncached_version));
+        assert_eq!(stores.latest_version(0).unwrap(), latest, "a rejected publish exposes no version");
+    }
+
+    /// Anchors published through a facade survive its restart: a fresh facade
+    /// over the same database resolves the key and continues the registered
+    /// state exactly like an in-memory oracle.
+    #[test]
+    fn anchors_survive_restart() {
+        /// Publish, in partition 2, state `version` extended by one leaf of value `3`
+        /// and a range addition of `1` over both leaves; returns the new version.
+        fn extend(store: &mut impl UmcTreeStore<u64, i64>, version: u64) -> u64 {
+            let mut b = TreeBuilder::begin(store, 2, Some(version));
+            b.append_leaf(3);
+            b.range_add(0, 1, 1);
+            b.publish().unwrap()
+        }
+        let (lt, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
+        let key = anchor_key(AnchorInput { root: 7, pov: 9, k: 2 });
+        let capacities = Capacities { nodes: 1, metadata: 1, anchors: 1 };
+        let mut oracle = MemoryUmcTreeStore::<u64, i64>::new();
+        let mut first = Facade::new(db.clone(), capacities);
+        let published = register(&mut first, 2, key.clone()).unwrap();
+        let oracle_published = register(&mut oracle, 2, key.clone()).unwrap();
+        assert_eq!(published, oracle_published);
+        drop(first);
+
+        let mut restarted = Facade::new(db, capacities);
+        assert_eq!(restarted.resolve_anchor(&key).unwrap(), Some(published));
+        let extended = extend(&mut restarted, published);
+        let oracle_extended = extend(&mut oracle, oracle_published);
+        assert_eq!(restarted.scores(2, extended).unwrap(), oracle.scores(2, oracle_extended).unwrap());
+        drop(restarted);
+        drop(lt);
     }
 }

@@ -12,6 +12,7 @@ use kaspa_consensus_core::KType;
 use kaspa_database::prelude::{StoreError, StoreResult};
 
 use super::records::{LeafScore, NodeCoord, NodeRecord, NodeRef, Score, VersionMetadata, VersionedNode, collect_scores};
+use crate::model::stores::conflict_zone_coloring::ConflictZoneColoringKey;
 
 /// One immutable published version: metadata plus the frozen buffer contents.
 ///
@@ -26,11 +27,16 @@ pub struct PublishedVersion<T, S> {
     pub metadata: VersionMetadata,
     /// Frozen working-buffer records keyed by tree coordinate, at most one per coordinate.
     pub records: HashMap<NodeCoord, NodeRecord<T, S>>,
+    /// Key that resolves to this version once it is published; `None` for an unregistered state.
+    pub anchor: Option<ConflictZoneColoringKey>,
 }
 
 /// Read-only storage contract for published UMC tree records; satisfied by the
 /// memory, database and combined (facade) levels.
 pub trait UmcTreeStoreReader<T: Clone, S: Score> {
+    /// Version registered for `anchor`; `None` when no published state claims it.
+    fn resolve_anchor(&self, anchor: &ConflictZoneColoringKey) -> StoreResult<Option<u64>>;
+
     /// Exact record at `(k, node.h, node.j, node.version)`; `None` if absent.
     fn get_node(&self, k: KType, node: NodeRef) -> StoreResult<Option<NodeRecord<T, S>>>;
 
@@ -88,7 +94,20 @@ pub trait UmcTreeStore<T: Clone, S: Score>: UmcTreeStoreReader<T, S> {
     /// never lags a committed version id.
     fn allocate_version(&mut self) -> StoreResult<u64>;
 
+    /// Whether `anchor` may be registered by a publish into partition `k`: it
+    /// names `k` and no published state claims it yet. A registered key is
+    /// `KeyAlreadyExists`; an anchor of another k panics.
+    fn validate_anchor(&self, k: KType, anchor: &ConflictZoneColoringKey) -> StoreResult<()> {
+        assert!(anchor.k == k, "anchor {anchor} names k {}, but the state publishes into k {k}", anchor.k);
+        if self.resolve_anchor(anchor)?.is_some() {
+            return Err(StoreError::KeyAlreadyExists(anchor.to_string()));
+        }
+        Ok(())
+    }
+
     /// Freeze one immutable version into partition `k`: node records + metadata
-    /// (+ counter advance) committed as one batch.
+    /// + the anchor entry (+ counter advance) committed as one batch.
+    ///
+    /// A rejected anchor leaves the store untouched.
     fn publish(&mut self, k: KType, publish: PublishedVersion<T, S>) -> StoreResult<()>;
 }

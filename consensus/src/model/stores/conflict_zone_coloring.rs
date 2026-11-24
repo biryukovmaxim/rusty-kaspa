@@ -99,7 +99,7 @@ pub trait ConflictZoneColoringStoreReader {
     fn has(&self, key: ConflictZoneColoringKey) -> Result<bool, StoreError>;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ConflictZoneColoringKey {
     pub pov_hash: Hash,
     pub root_hash: Hash,

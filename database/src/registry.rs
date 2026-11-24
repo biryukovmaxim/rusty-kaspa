@@ -98,6 +98,10 @@ pub enum DatabaseStorePrefixes {
     // Singleton version-id counter: `prefix(1)`, value `u64` BE
     DagKnightUmcMeta = 84,
 
+    // `prefix(1) | ConflictZoneColoringKey` (root_hash | k | pov_hash | free_search),
+    // value `u64` BE version
+    DagKnightConflictZoneVersions = 85,
+
     // ---- Separator ----
     /// Reserved as a separator
     Separator = SEPARATOR,

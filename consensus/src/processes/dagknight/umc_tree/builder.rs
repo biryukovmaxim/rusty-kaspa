@@ -214,7 +214,7 @@ impl<'a, T: Clone, S: Score, St: UmcTreeStore<T, S>> TreeBuilder<'a, T, S, St> {
             root_height: self.root_height,
             blue_count: self.blue_count,
         };
-        let publish = PublishedVersion { version: self.version, metadata, records: std::mem::take(&mut self.buffer) };
+        let publish = PublishedVersion { version: self.version, metadata, records: std::mem::take(&mut self.buffer), anchor: None };
         self.store.publish(self.k, publish)?;
         Ok(self.version)
     }
@@ -577,7 +577,7 @@ mod tests {
 
     use super::super::api::UmcTreeStoreReader;
     use super::super::mem::MemoryUmcTreeStore;
-    use super::super::stores::UmcTreeStores;
+    use super::super::stores::{Capacities, UmcTreeStores};
     use crate::processes::dagknight::umc_voting::SignedWork;
 
     type Store = MemoryUmcTreeStore<u64, i64>;
@@ -723,7 +723,7 @@ mod tests {
     #[test]
     fn algorithm_against_facade_over_temp_db() {
         let (_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        let mut stores = UmcTreeStores::<u64, i64>::new(db, 100, 100);
+        let mut stores = UmcTreeStores::<u64, i64>::new(db, Capacities { nodes: 100, metadata: 100, anchors: 0 });
         let v0 = {
             let mut b = stores.begin(3, None);
             for v in 0..4 {
