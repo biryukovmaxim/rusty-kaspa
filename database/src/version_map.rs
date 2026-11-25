@@ -73,7 +73,9 @@ where
         self.cache.insert(key.clone(), version);
     }
 
-    /// Whether `key` is in the cache.
+    /// Whether `key` is in the cache. Test introspection: production code
+    /// observes the cache through read and write behavior, never directly.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn is_cached(&self, key: &K) -> bool {
         self.cache.contains_key(key)
     }

@@ -527,8 +527,11 @@ mod tests {
     }
 
     /// Deterministic randomized op sequences (append, range addition, hole
-    /// repair, anchor-chained publishes) through a tiny-cache facade must
-    /// match an unbounded memory oracle exactly after every publish.
+    /// repair, anchor-chained publishes, each published state registered
+    /// under its own anchor key) through a tiny-cache facade must match an
+    /// unbounded memory oracle exactly after every publish, and every key
+    /// must keep resolving through anchor-cache evictions and database
+    /// fallbacks alike.
     #[test]
     fn randomized_ops_match_unbounded_oracle() {
         /// Xorshift64 state; a fixed seed keeps failures reproducible.
@@ -554,7 +557,9 @@ mod tests {
         let mut rng = Rng(0x5EED_CAFE_F00D_1234);
         let mut anchor = None;
         let mut next_value = 0u64;
-        for _cycle in 0..60 {
+        let mut registered = Vec::new();
+        for cycle in 0..60 {
+            let key = anchor_key(AnchorInput { root: 1, pov: cycle, k: 2 });
             let (version, oracle_version) = {
                 let mut b = stores.begin(2, anchor);
                 let mut oracle_builder = oracle.begin(2, anchor);
@@ -585,10 +590,13 @@ mod tests {
                         _ => {}
                     }
                 }
-                (b.publish().unwrap(), oracle_builder.publish().unwrap())
+                (b.publish_as(key.clone()).unwrap(), oracle_builder.publish_as(key.clone()).unwrap())
             };
             assert_eq!(version, oracle_version);
             anchor = Some(version);
+            assert_eq!(stores.resolve_anchor(&key).unwrap(), Some(version), "facade registered version {version}");
+            assert_eq!(oracle.resolve_anchor(&key).unwrap(), Some(version), "oracle registered version {version}");
+            registered.push((key, version));
             assert_eq!(
                 stores.scores(2, version).unwrap(),
                 oracle.scores(2, oracle_version).unwrap(),
@@ -607,6 +615,10 @@ mod tests {
                 (oracle_metadata.blue_count, oracle_metadata.root_height, oracle_metadata.root_version),
                 "metadata after version {version}"
             );
+        }
+        for (cycle, (key, version)) in registered.iter().enumerate() {
+            assert_eq!(stores.resolve_anchor(key).unwrap(), Some(*version), "facade anchor of cycle {cycle}");
+            assert_eq!(oracle.resolve_anchor(key).unwrap(), Some(*version), "oracle anchor of cycle {cycle}");
         }
     }
 

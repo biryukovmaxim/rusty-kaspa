@@ -9,6 +9,9 @@ include.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+test-util = []
+
 [dependencies]
 bincode.workspace = true
 enum-primitive-derive.workspace = true

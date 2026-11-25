@@ -63,6 +63,7 @@ flate2.workspace = true
 rand_distr.workspace = true
 kaspa-txscript-errors.workspace = true
 kaspa-addresses.workspace = true
+kaspa-database = { workspace = true, features = ["test-util"] }
 
 [[bench]]
 name = "parallel_muhash"

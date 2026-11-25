@@ -13,7 +13,10 @@ use kaspa_consensus_core::KType;
 use kaspa_database::prelude::StoreResult;
 
 use super::api::{PublishedVersion, UmcTreeStore};
-use super::records::{LeafScore, NodeCoord, NodeRecord, NodeRef, Score, VersionMetadata, bounds, child_of, collect_scores, min_opt};
+#[cfg(test)]
+use super::records::{LeafScore, collect_scores};
+use super::records::{NodeCoord, NodeRecord, NodeRef, Score, VersionMetadata, bounds, child_of, min_opt};
+use crate::model::stores::conflict_zone_coloring::ConflictZoneColoringKey;
 
 /// One mutable working tree over any `UmcTreeStore`: copies records on first
 /// edit, buffers them, and publishes them as one immutable version.
@@ -78,11 +81,15 @@ impl<'a, T: Clone, S: Score, St: UmcTreeStore<T, S>> TreeBuilder<'a, T, S, St> {
     }
 
     /// Version id under which this builder's records will be published.
+    /// Test scaffolding: production receives the version id from the publish call.
+    #[cfg(test)]
     pub fn version(&self) -> u64 {
         self.version
     }
 
     /// Number of leaves appended so far, inherited ones included.
+    /// Test scaffolding: production reads the blue count from a published state's metadata.
+    #[cfg(test)]
     pub fn blue_count(&self) -> u64 {
         self.blue_count
     }
@@ -93,6 +100,8 @@ impl<'a, T: Clone, S: Score, St: UmcTreeStore<T, S>> TreeBuilder<'a, T, S, St> {
     }
 
     /// Materialize all leaf scores without editing records; costs O(n).
+    /// Test scaffolding: production reads leaf scores of a published state through the store.
+    #[cfg(test)]
     pub fn scores(&self) -> Vec<LeafScore<T, S>> {
         collect_scores(self.root, |r| Ok(self.load(r))).expect("loads inside one builder are infallible")
     }
@@ -205,16 +214,34 @@ impl<'a, T: Clone, S: Score, St: UmcTreeStore<T, S>> TreeBuilder<'a, T, S, St> {
     }
 
     /// Publish buffered records as this builder's version, close it, and return
-    /// the version id. Fails when the backing store write fails, in which case
-    /// no new state is exposed.
-    pub fn publish(mut self) -> StoreResult<u64> {
+    /// the version id. The published state is registered under no anchor. Fails
+    /// when the backing store write fails, in which case no new state is exposed.
+    /// Test scaffolding: production callers register through `publish_as`.
+    #[cfg(test)]
+    pub fn publish(self) -> StoreResult<u64> {
+        self.publish_with(None)
+    }
+
+    /// Publish buffered records as this builder's version, register the
+    /// published state under `anchor`, close the builder, and return the
+    /// version id. Fails like `publish`, and with `KeyAlreadyExists` when
+    /// `anchor` already names a published state; no new state is exposed
+    /// either way; panics when `anchor` names another `k`.
+    pub fn publish_as(self, anchor: ConflictZoneColoringKey) -> StoreResult<u64> {
+        self.publish_with(Some(anchor))
+    }
+
+    /// Shared publish tail: validates nothing and hands the state and its anchor
+    /// to the store's one publish call, which rejects an already-registered key
+    /// before it writes anything.
+    fn publish_with(mut self, anchor: Option<ConflictZoneColoringKey>) -> StoreResult<u64> {
         let metadata = VersionMetadata {
             anchor_version: self.anchor_version,
             root_version: self.root.map(|r| r.version),
             root_height: self.root_height,
             blue_count: self.blue_count,
         };
-        let publish = PublishedVersion { version: self.version, metadata, records: std::mem::take(&mut self.buffer), anchor: None };
+        let publish = PublishedVersion { version: self.version, metadata, records: std::mem::take(&mut self.buffer), anchor };
         self.store.publish(self.k, publish)?;
         Ok(self.version)
     }
@@ -578,6 +605,7 @@ mod tests {
     use super::super::api::UmcTreeStoreReader;
     use super::super::mem::MemoryUmcTreeStore;
     use super::super::stores::{Capacities, UmcTreeStores};
+    use super::super::test_support::{AnchorInput, anchor_key};
     use crate::processes::dagknight::umc_voting::SignedWork;
 
     type Store = MemoryUmcTreeStore<u64, i64>;
@@ -702,6 +730,40 @@ mod tests {
         // Newest-first reads: the latest version wins; v0's published records are unchanged.
         assert_eq!(store.latest_node(0, NodeCoord { h: 0, j: 0 }).unwrap().map(|vn| vn.version), Some(v0));
         assert_eq!(store.scores(0, v0).unwrap(), leaf_scores(&[(10, 5), (11, 5)]));
+    }
+
+    /// `publish_as` registers the published state under its key, so a later
+    /// builder opens it through `resolve_anchor`; a plain publish registers
+    /// nothing; two publishes under two keys register independent states.
+    #[test]
+    fn publish_as_registers_anchor() {
+        let mut store = Store::new();
+        let v0 = {
+            let mut b = store.begin(0, None);
+            b.append_leaf(1);
+            b.publish().unwrap()
+        };
+        let unregistered = anchor_key(AnchorInput { root: 1, pov: 1, k: 0 });
+        assert_eq!(store.resolve_anchor(&unregistered).unwrap(), None, "a plain publish registers nothing");
+
+        let first = anchor_key(AnchorInput { root: 1, pov: 2, k: 0 });
+        let v1 = {
+            let mut b = store.begin(0, Some(v0));
+            b.append_leaf(2);
+            b.publish_as(first.clone()).unwrap()
+        };
+        let second = anchor_key(AnchorInput { root: 1, pov: 3, k: 0 });
+        let v2 = {
+            let mut b = store.begin(0, Some(v1));
+            b.append_leaf(3);
+            b.publish_as(second.clone()).unwrap()
+        };
+        assert_eq!(store.resolve_anchor(&first).unwrap(), Some(v1));
+        assert_eq!(store.resolve_anchor(&second).unwrap(), Some(v2));
+        assert_eq!(store.scores(0, v1).unwrap(), leaf_scores(&[(1, 0), (2, 0)]), "the first registered state is unchanged");
+        let resumed = store.resolve_anchor(&first).unwrap();
+        let b = store.begin(0, resumed);
+        assert_eq!(b.scores(), leaf_scores(&[(1, 0), (2, 0)]));
     }
 
     /// The hash-only range scan never pushes lazy additions.
